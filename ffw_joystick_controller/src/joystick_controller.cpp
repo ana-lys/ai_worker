@@ -268,10 +268,11 @@ void JoystickController::publish_joystick_values()
   }
 }
 
-void JoystickController::handle_mode_switching(bool left_tact_pressed, bool right_tact_pressed)
+void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right_tact_pressed)
 {
   bool both_tact_switch_pressed = left_tact_pressed && right_tact_pressed;
-  // Detect falling edge (pressed -> released)
+  
+  // Handle mode switching (both switches together)
   if (!both_tact_switch_pressed && prev_tact_switch_) {
     std_msgs::msg::String mode_msg;
     if (current_mode_ == constants::ARM_CONTROL_MODE) {
@@ -285,14 +286,10 @@ void JoystickController::handle_mode_switching(bool left_tact_pressed, bool righ
     RCLCPP_INFO(get_node()->get_logger(), "Mode switched to: %s", current_mode_.c_str());
   }
   prev_tact_switch_ = both_tact_switch_pressed;
-}
-
-void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right_tact_pressed)
-{
-  bool both_tact_switch_pressed = left_tact_pressed && right_tact_pressed;
   
-  // Only handle individual tact switches if both are not pressed simultaneously
-  if (!both_tact_switch_pressed) {
+  // Handle individual tact switches ONLY if both are not pressed simultaneously
+  // and we're not in a state where both were just pressed
+  if (!both_tact_switch_pressed && !prev_tact_switch_) {
     // Handle right tact switch (falling edge detection)
     if (!right_tact_pressed && prev_right_tact_switch_) {
       std_msgs::msg::String trigger_msg;
@@ -441,10 +438,7 @@ controller_interface::return_type JoystickController::update(
   // Publish joystick values
   publish_joystick_values();
 
-  // Handle mode switching
-  handle_mode_switching(left_tact_switch_pressed, right_tact_switch_pressed);
-
-  // Handle individual tact switch triggers
+  // Handle all tact switch functionality (mode switching and individual triggers)
   handle_tact_switches(left_tact_switch_pressed, right_tact_switch_pressed);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "Joystick controller update completed");
