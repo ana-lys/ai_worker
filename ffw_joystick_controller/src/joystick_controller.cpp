@@ -292,12 +292,25 @@ void JoystickController::handle_right_tact_switch(bool right_tact_pressed)
   // Detect falling edge for right tact switch (pressed -> released)
   if (!right_tact_pressed && prev_right_tact_switch_) {
     std_msgs::msg::String trigger_msg;
-    trigger_msg.data = "right_tact_triggered";
-    right_tact_trigger_pub_->publish(trigger_msg);
+    trigger_msg.data = "right";
+    tact_trigger_pub_->publish(trigger_msg);
     
     RCLCPP_INFO(get_node()->get_logger(), "Right tact switch triggered!");
   }
   prev_right_tact_switch_ = right_tact_pressed;
+}
+
+void JoystickController::handle_left_tact_switch(bool left_tact_pressed)
+{
+  // Detect falling edge for left tact switch (pressed -> released)
+  if (!left_tact_pressed && prev_left_tact_switch_) {
+    std_msgs::msg::String trigger_msg;
+    trigger_msg.data = "left";
+    tact_trigger_pub_->publish(trigger_msg);
+    
+    RCLCPP_INFO(get_node()->get_logger(), "Left tact switch triggered!");
+  }
+  prev_left_tact_switch_ = left_tact_pressed;
 }
 
 controller_interface::InterfaceConfiguration
@@ -430,6 +443,7 @@ controller_interface::return_type JoystickController::update(
 
   // Handle right tact switch trigger
   handle_right_tact_switch(right_tact_switch_pressed);
+  handle_left_tact_switch(left_tact_switch_pressed);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "Joystick controller update completed");
 
@@ -546,9 +560,10 @@ controller_interface::CallbackReturn JoystickController::on_configure(
   prev_tact_switch_ = false;
 
   // Create publisher for right tact switch trigger
-  right_tact_trigger_pub_ = get_node()->create_publisher<std_msgs::msg::String>(
-    "/leader/joystick_controller_right/right_tact_trigger", 10);
+  tact_trigger_pub_ = get_node()->create_publisher<std_msgs::msg::String>(
+    "/leader/joystick_controller/tact_trigger", 10);
   prev_right_tact_switch_ = false;
+  prev_left_tact_switch_ = false;
 
   // Create publisher for cmd_vel
   cmd_vel_pub_ = get_node()->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
