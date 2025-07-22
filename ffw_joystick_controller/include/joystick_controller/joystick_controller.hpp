@@ -115,8 +115,7 @@ protected:
   void publish_cmd_vel(bool swerve_mode, const JoystickValues & joystick_values);
   void publish_joystick_values();
   void handle_mode_switching(bool left_tact_pressed, bool right_tact_pressed);
-  void handle_right_tact_switch(bool right_tact_pressed);
-  void handle_left_tact_switch(bool left_tact_pressed);
+  void handle_tact_switches(bool left_tact_pressed, bool right_tact_pressed);
   std::vector<std::string> sensorxel_joy_names_;
   std::vector<std::string> state_interface_types_ = {"JOYSTICK X VALUE", "JOYSTICK Y VALUE",
     "JOYSTICK TACT SWITCH"};

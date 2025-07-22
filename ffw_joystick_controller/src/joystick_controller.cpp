@@ -287,29 +287,32 @@ void JoystickController::handle_mode_switching(bool left_tact_pressed, bool righ
   prev_tact_switch_ = both_tact_switch_pressed;
 }
 
-void JoystickController::handle_right_tact_switch(bool right_tact_pressed)
+void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right_tact_pressed)
 {
-  // Detect falling edge for right tact switch (pressed -> released)
-  if (!right_tact_pressed && prev_right_tact_switch_) {
-    std_msgs::msg::String trigger_msg;
-    trigger_msg.data = "right";
-    tact_trigger_pub_->publish(trigger_msg);
-    
-    RCLCPP_INFO(get_node()->get_logger(), "Right tact switch triggered!");
-  }
-  prev_right_tact_switch_ = right_tact_pressed;
-}
+  bool both_tact_switch_pressed = left_tact_pressed && right_tact_pressed;
+  
+  // Only handle individual tact switches if both are not pressed simultaneously
+  if (!both_tact_switch_pressed) {
+    // Handle right tact switch (falling edge detection)
+    if (!right_tact_pressed && prev_right_tact_switch_) {
+      std_msgs::msg::String trigger_msg;
+      trigger_msg.data = "right";
+      tact_trigger_pub_->publish(trigger_msg);
+      
+      RCLCPP_INFO(get_node()->get_logger(), "Right tact switch triggered!");
+    }
 
-void JoystickController::handle_left_tact_switch(bool left_tact_pressed)
-{
-  // Detect falling edge for left tact switch (pressed -> released)
-  if (!left_tact_pressed && prev_left_tact_switch_) {
-    std_msgs::msg::String trigger_msg;
-    trigger_msg.data = "left";
-    tact_trigger_pub_->publish(trigger_msg);
-    
-    RCLCPP_INFO(get_node()->get_logger(), "Left tact switch triggered!");
+    // Handle left tact switch (falling edge detection)  
+    if (!left_tact_pressed && prev_left_tact_switch_) {
+      std_msgs::msg::String trigger_msg;
+      trigger_msg.data = "left";
+      tact_trigger_pub_->publish(trigger_msg);
+      
+      RCLCPP_INFO(get_node()->get_logger(), "Left tact switch triggered!");
+    }
   }
+  
+  prev_right_tact_switch_ = right_tact_pressed;
   prev_left_tact_switch_ = left_tact_pressed;
 }
 
@@ -441,9 +444,8 @@ controller_interface::return_type JoystickController::update(
   // Handle mode switching
   handle_mode_switching(left_tact_switch_pressed, right_tact_switch_pressed);
 
-  // Handle right tact switch trigger
-  handle_right_tact_switch(right_tact_switch_pressed);
-  handle_left_tact_switch(left_tact_switch_pressed);
+  // Handle individual tact switch triggers
+  handle_tact_switches(left_tact_switch_pressed, right_tact_switch_pressed);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "Joystick controller update completed");
 
