@@ -81,3 +81,4 @@ jobs:
             ffw_spring_actuator_controller
             ffw_teleop
             ffw_swerve_drive_controller
+            ffw_robot_manager

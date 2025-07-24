@@ -118,6 +118,9 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_confi
         group_joint_offsets_[group_name] = params_.left_offsets;
       } else if (group_name == "right" && !params_.right_offsets.empty()) {
         group_joint_offsets_[group_name] = params_.right_offsets;
+      } else {
+        // Initialize empty offsets if not provided
+        group_joint_offsets_[group_name] = std::vector<double>();
       }
 
       // Get reverse joints for this group
@@ -125,11 +128,14 @@ controller_interface::CallbackReturn JointTrajectoryCommandBroadcaster::on_confi
         group_reverse_joints_[group_name] = params_.left_reverse_joints;
       } else if (group_name == "right" && !params_.right_reverse_joints.empty()) {
         group_reverse_joints_[group_name] = params_.right_reverse_joints;
+      } else {
+        // Initialize empty reverse joints if not provided
+        group_reverse_joints_[group_name] = std::vector<std::string>();
       }
 
       // Create topic name with group-specific namespace
       std::string topic_name;
-      topic_name = "~/joint_trajectory_command_broadcaster_" + group_name + "/joint_trajectory";
+      topic_name = "joint_trajectory_command_broadcaster_" + group_name + "/joint_trajectory";
       group_topic_names_[group_name] = topic_name;
 
       // Create publisher for this group
@@ -322,8 +328,19 @@ double JointTrajectoryCommandBroadcaster::calculate_mean_error() const
   for (const auto & group_pair : group_joint_names_) {
     const auto & group_name = group_pair.first;
     const auto & group_joints = group_pair.second;
-    const auto & group_offsets = group_joint_offsets_.at(group_name);
-    const auto & group_reverse_joints = group_reverse_joints_.at(group_name);
+    // Safely get group offsets and reverse joints
+    std::vector<double> group_offsets;
+    std::vector<std::string> group_reverse_joints;
+
+    auto offsets_it = group_joint_offsets_.find(group_name);
+    if (offsets_it != group_joint_offsets_.end()) {
+      group_offsets = offsets_it->second;
+    }
+
+    auto reverse_it = group_reverse_joints_.find(group_name);
+    if (reverse_it != group_reverse_joints_.end()) {
+      group_reverse_joints = reverse_it->second;
+    }
 
     for (size_t i = 0; i < group_joints.size(); ++i) {
       const auto & joint_name = group_joints[i];
@@ -364,8 +381,11 @@ bool JointTrajectoryCommandBroadcaster::check_trigger_active() const
   double gripper_l_pos = get_value(name_if_value_mapping_, "gripper_l_joint1", HW_IF_POSITION);
 
   // Return true if both grippers are above threshold
-  return (!std::isnan(gripper_r_pos) && gripper_r_pos * params_.trigger_sign >= params_.trigger_threshold * params_.trigger_sign) &&
-         (!std::isnan(gripper_l_pos) && gripper_l_pos * params_.trigger_sign >= params_.trigger_threshold * params_.trigger_sign);
+  return (!std::isnan(gripper_r_pos) &&
+         gripper_r_pos * params_.trigger_sign >=
+         params_.trigger_threshold * params_.trigger_sign) &&
+         (!std::isnan(gripper_l_pos) &&
+         gripper_l_pos * params_.trigger_sign >= params_.trigger_threshold * params_.trigger_sign);
 }
 
 void JointTrajectoryCommandBroadcaster::update_trigger_state(const rclcpp::Time & current_time)
@@ -464,8 +484,19 @@ controller_interface::return_type JointTrajectoryCommandBroadcaster::update(
   // Publish JointTrajectory messages for each group with current positions
   for (const auto & group_name : trajectory_groups_) {
     const auto & group_joints = group_joint_names_[group_name];
-    const auto & group_offsets = group_joint_offsets_[group_name];
-    const auto & group_reverse_joints = group_reverse_joints_[group_name];
+    // Safely get group offsets and reverse joints
+    std::vector<double> group_offsets;
+    std::vector<std::string> group_reverse_joints;
+
+    auto offsets_it = group_joint_offsets_.find(group_name);
+    if (offsets_it != group_joint_offsets_.end()) {
+      group_offsets = offsets_it->second;
+    }
+
+    auto reverse_it = group_reverse_joints_.find(group_name);
+    if (reverse_it != group_reverse_joints_.end()) {
+      group_reverse_joints = reverse_it->second;
+    }
 
     if (group_joints.empty()) {
       continue;  // Skip empty groups

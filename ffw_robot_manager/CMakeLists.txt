@@ -39,7 +39,7 @@ target_link_libraries(ffw_robot_manager PUBLIC
   ffw_robot_manager_parameters
   pluginlib::pluginlib
   rclcpp::rclcpp
-  dynamixel_hardware_interface::dynamixel_hardware_interface
+  ${dynamixel_hardware_interface_TARGETS}
   ${std_srvs_TARGETS}
   ${dynamixel_interfaces_TARGETS}
 )
