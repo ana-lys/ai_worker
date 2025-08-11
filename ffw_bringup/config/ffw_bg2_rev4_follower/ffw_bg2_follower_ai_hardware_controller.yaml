@@ -19,6 +19,9 @@
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster
 
+      ffw_robot_manager:
+        type: ffw_robot_manager/FfwRobotManager
+
 /**:
   arm_l_controller:
     ros__parameters:
@@ -84,3 +87,9 @@
         - position
         - velocity
       allow_nonzero_velocity_at_trajectory_end: true
+
+/**:
+  ffw_robot_manager:
+    ros__parameters:
+      disable_torque_on_error: false
+      set_led_error_on_error: true

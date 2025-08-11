@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:macro name="ffw_sg2_sensor_system" params="use_sim:=^|false use_fake_hardware:=^|false fake_sensor_commands:=^|false">
-    <ros2_control name="ffw_sg2_sensor" type="system" is_async="true">
+  <xacro:macro name="ffw_bg2_sensor_system" params="use_sim:=^|false use_fake_hardware:=^|false fake_sensor_commands:=^|false">
+    <ros2_control name="ffw_bg2_sensor" type="system" is_async="true">
       <xacro:unless value="$(arg use_sim)">
         <hardware>
           <xacro:if value="${use_fake_hardware}">
@@ -29,31 +29,6 @@
         </hardware>
       </xacro:unless>
 
-      <sensor name="imu">
-        <state_interface name="IMU ACC SCALE"/>
-        <state_interface name="IMU GYRO SCALE"/>
-        <state_interface name="IMU TIMESTAMP"/>
-        <state_interface name="IMU ACC X"/>
-        <state_interface name="IMU ACC Y"/>
-        <state_interface name="IMU ACC Z"/>
-        <state_interface name="IMU GYRO X"/>
-        <state_interface name="IMU GYRO Y"/>
-        <state_interface name="IMU GYRO Z"/>
-      </sensor>
-
-      <gpio name="imu">
-        <param name="type">sensor</param>
-        <param name="ID">200</param>
-        <state_interface name="IMU ACC SCALE"/>
-        <state_interface name="IMU GYRO SCALE"/>
-        <state_interface name="IMU TIMESTAMP"/>
-        <state_interface name="IMU ACC X"/>
-        <state_interface name="IMU ACC Y"/>
-        <state_interface name="IMU ACC Z"/>
-        <state_interface name="IMU GYRO X"/>
-        <state_interface name="IMU GYRO Y"/>
-        <state_interface name="IMU GYRO Z"/>
-      </gpio>
       <gpio name="led">
         <param name="type">controller</param>
         <param name="ID">91</param>
