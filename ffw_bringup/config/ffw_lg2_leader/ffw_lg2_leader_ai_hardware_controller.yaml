@@ -7,7 +7,10 @@
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster
 
-      joint_trajectory_command_broadcaster:
+      joint_trajectory_command_broadcaster_left:
+        type: joint_trajectory_command_broadcaster/JointTrajectoryCommandBroadcaster
+
+      joint_trajectory_command_broadcaster_right:
         type: joint_trajectory_command_broadcaster/JointTrajectoryCommandBroadcaster
 
       spring_actuator_controller_left:
@@ -16,13 +19,16 @@
       spring_actuator_controller_right:
         type: spring_actuator_controller/SpringActuatorController
 
-      joystick_controller:
+      joystick_controller_left:
+        type: joystick_controller/JoystickController
+
+      joystick_controller_right:
         type: joystick_controller/JoystickController
 
 /**:
-  joint_trajectory_command_broadcaster:
+  joint_trajectory_command_broadcaster_left:
     ros__parameters:
-      left_joints:
+      joints:
         - arm_l_joint1
         - arm_l_joint2
         - arm_l_joint3
@@ -31,7 +37,9 @@
         - arm_l_joint6
         - arm_l_joint7
         - gripper_l_joint1
-      left_offsets:
+      interfaces:
+        - position
+      offsets:
         - 0.0
         - 0.0
         - 0.0
@@ -40,7 +48,13 @@
         - 0.0
         - 0.0
         - 0.3
-      right_joints:
+      action_monitor_rate: 20.0
+      use_local_topics: true
+
+/**:
+  joint_trajectory_command_broadcaster_right:
+    ros__parameters:
+      joints:
         - arm_r_joint1
         - arm_r_joint2
         - arm_r_joint3
@@ -49,7 +63,9 @@
         - arm_r_joint6
         - arm_r_joint7
         - gripper_r_joint1
-      right_offsets:
+      interfaces:
+        - position
+      offsets:
         - 0.0
         - 0.0
         - 0.0
@@ -58,6 +74,8 @@
         - 0.0
         - 0.0
         - 0.3
+      action_monitor_rate: 20.0
+      use_local_topics: true
 
 /**:
   spring_actuator_controller_left:
@@ -82,29 +100,40 @@
         - velocity
 
 /**:
-  joystick_controller:
+  joystick_controller_left:
     ros__parameters:
       joystick_sensors:
         - sensorxel_l_joy
-        - sensorxel_r_joy
       state_interfaces:
         - JOYSTICK X VALUE
         - JOYSTICK Y VALUE
-        - JOYSTICK TACT SWITCH
-      sensorxel_l_joy_reverse_interfaces:
+      reverse_interfaces:
         - JOYSTICK Y VALUE
         - JOYSTICK X VALUE
       joystick_calibration_min: 0.0
       joystick_calibration_center: 2048.0
       joystick_calibration_max: 4096.0
-      sensorxel_l_joy_controlled_joints:
+      controlled_joints:
         - head_joint1
         - head_joint2
-      sensorxel_r_joy_controlled_joints:
+      joint_states_topic: "/joint_states"
+      joint_trajectory_topic: "~/joint_trajectory"
+      jog_scale: 0.06
+      deadzone: 0.05
+
+/**:
+  joystick_controller_right:
+    ros__parameters:
+      joystick_sensors:
+        - sensorxel_r_joy
+      state_interfaces:
+        - JOYSTICK X VALUE
+      joystick_calibration_min: 0.0
+      joystick_calibration_center: 2048.0
+      joystick_calibration_max: 4096.0
+      controlled_joints:
         - lift_joint
       joint_states_topic: "/joint_states"
-      sensorxel_l_joy_joint_trajectory_topic: "/leader/joystick_controller_left/joint_trajectory"
-      sensorxel_r_joy_joint_trajectory_topic: "/leader/joystick_controller_right/joint_trajectory"
-      sensorxel_l_joy_jog_scale: 0.06
-      sensorxel_r_joy_jog_scale: 0.01
+      joint_trajectory_topic: "~/joint_trajectory"
+      jog_scale: 0.005
       deadzone: 0.05

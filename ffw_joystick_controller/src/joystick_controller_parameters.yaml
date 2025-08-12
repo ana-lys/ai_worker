@@ -10,17 +10,11 @@ joystick_controller:
   }
   state_interfaces: {
     type: string_array,
-    default_value: ["JOYSTICK X VALUE", "JOYSTICK Y VALUE", "JOYSTICK TACT SWITCH"],
+    default_value: ["JOYSTICK X VALUE", "JOYSTICK Y VALUE"],
     description: "State interfaces provided by the hardware for Joystick sensors",
     read_only: true,
   }
-  sensorxel_l_joy_reverse_interfaces: {
-    type: string_array,
-    default_value: [],
-    description: "List of state interfaces to reverse after normalization",
-    read_only: true,
-  }
-  sensorxel_r_joy_reverse_interfaces: {
+  reverse_interfaces: {
     type: string_array,
     default_value: [],
     description: "List of state interfaces to reverse after normalization",
@@ -34,23 +28,17 @@ joystick_controller:
   }
   joystick_calibration_center: {
     type: double,
-    default_value: 2048.0,
-    description: "Center ADC value (2048)",
+    default_value: 1830.0,
+    description: "Center ADC value (1830)",
     read_only: true
   }
   joystick_calibration_max: {
     type: double,
-    default_value: 4096.0,
-    description: "Maximum ADC value (4096)",
+    default_value: 4033.0,
+    description: "Maximum ADC value (4033)",
     read_only: true
   }
-  sensorxel_l_joy_controlled_joints: {
-    type: string_array,
-    default_value: [],
-    description: "List of joints to control with Joystick",
-    read_only: true
-  }
-  sensorxel_r_joy_controlled_joints: {
+  controlled_joints: {
     type: string_array,
     default_value: [],
     description: "List of joints to control with Joystick",
@@ -62,25 +50,13 @@ joystick_controller:
     description: "Topic to subscribe for joint states",
     read_only: true
   }
-  sensorxel_l_joy_joint_trajectory_topic: {
+  joint_trajectory_topic: {
     type: string,
     default_value: "~/joint_trajectory",
     description: "Topic to publish joint trajectory commands",
     read_only: true
   }
-  sensorxel_r_joy_joint_trajectory_topic: {
-    type: string,
-    default_value: "~/joint_trajectory",
-    description: "Topic to publish joint trajectory commands",
-    read_only: true
-  }
-  sensorxel_l_joy_jog_scale: {
-    type: double,
-    default_value: 0.1,
-    description: "Scale factor for jog commands",
-    read_only: true
-  }
-  sensorxel_r_joy_jog_scale: {
+  jog_scale: {
     type: double,
     default_value: 0.1,
     description: "Scale factor for jog commands",

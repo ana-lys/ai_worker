@@ -30,14 +30,12 @@
         - arm_l_joint5
         - arm_l_joint6
         - arm_l_joint7
-        - gripper_l_joint1
       command_interfaces:
         - position
       state_interfaces:
         - position
         - velocity
       allow_nonzero_velocity_at_trajectory_end: true
-      allow_partial_joints_goal: true
 
 /**:
   arm_r_controller:
@@ -57,7 +55,6 @@
         - position
         - velocity
       allow_nonzero_velocity_at_trajectory_end: true
-      allow_partial_joints_goal: true
 
 /**:
   head_controller:

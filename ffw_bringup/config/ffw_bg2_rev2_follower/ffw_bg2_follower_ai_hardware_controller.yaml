@@ -37,7 +37,6 @@
         - position
         - velocity
       allow_nonzero_velocity_at_trajectory_end: true
-      allow_partial_joints_goal: true
 
 /**:
   arm_r_controller:
@@ -57,7 +56,6 @@
         - position
         - velocity
       allow_nonzero_velocity_at_trajectory_end: true
-      allow_partial_joints_goal: true
 
 /**:
   head_controller:
