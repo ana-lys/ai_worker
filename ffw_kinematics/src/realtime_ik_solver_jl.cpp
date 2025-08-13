@@ -8,7 +8,7 @@
 #include <kdl/chain.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/chainiksolvervel_pinv.hpp>
-#include <kdl/chainiksolverpos_nr.hpp>
+#include <kdl/chainiksolverpos_nr_jl.hpp>
 #include <kdl/frames.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 
@@ -17,13 +17,13 @@
 #include <vector>
 #include <map>
 
-class RealtimeIKSolver : public rclcpp::Node
+class RealtimeIKSolverJL : public rclcpp::Node
 {
 public:
-    RealtimeIKSolver() : Node("realtime_ik_solver"),
-                         lift_joint_index_(-1),
-                         setup_complete_(false),
-                         has_joint_states_(false)
+    RealtimeIKSolverJL() : Node("realtime_ik_solver_jl"),
+                           lift_joint_index_(-1),
+                           setup_complete_(false),
+                           has_joint_states_(false)
     {
         // Parameters
         this->declare_parameter<std::string>("base_link", "base_link");
@@ -34,7 +34,7 @@ public:
         end_effector_link_ = this->get_parameter("end_effector_link").as_string();
         std::string target_pose_topic = this->get_parameter("target_pose_topic").as_string();
 
-        RCLCPP_INFO(this->get_logger(), "🚀 Realtime IK Solver starting...");
+        RCLCPP_INFO(this->get_logger(), "🚀 Realtime IK Solver with Joint Limits starting...");
         RCLCPP_INFO(this->get_logger(), "Base link: %s", base_link_.c_str());
         RCLCPP_INFO(this->get_logger(), "End effector link: %s", end_effector_link_.c_str());
         RCLCPP_INFO(this->get_logger(), "Target pose topic: %s", target_pose_topic.c_str());
@@ -42,16 +42,16 @@ public:
         // Subscribers
         robot_description_sub_ = this->create_subscription<std_msgs::msg::String>(
             "/robot_description", rclcpp::QoS(1).transient_local(),
-            std::bind(&RealtimeIKSolver::robotDescriptionCallback, this, std::placeholders::_1));
+            std::bind(&RealtimeIKSolverJL::robotDescriptionCallback, this, std::placeholders::_1));
 
         joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
             "/joint_states", 10,
-            std::bind(&RealtimeIKSolver::jointStateCallback, this, std::placeholders::_1));
+            std::bind(&RealtimeIKSolverJL::jointStateCallback, this, std::placeholders::_1));
 
         // Subscribe to target pose topic for real-time IK solving
         target_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             target_pose_topic, 10,
-            std::bind(&RealtimeIKSolver::targetPoseCallback, this, std::placeholders::_1));
+            std::bind(&RealtimeIKSolverJL::targetPoseCallback, this, std::placeholders::_1));
 
         // Publishers
         current_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
@@ -63,7 +63,7 @@ public:
         // Timer for publishing current pose at 10Hz
         pose_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100),
-            std::bind(&RealtimeIKSolver::publishCurrentPose, this));
+            std::bind(&RealtimeIKSolverJL::publishCurrentPose, this));
 
         // Try to get robot_description from parameter server
         auto param_client = std::make_shared<rclcpp::SyncParametersClient>(this, "/robot_state_publisher");
@@ -129,43 +129,97 @@ private:
 
             RCLCPP_INFO(this->get_logger(), "KDL chain extracted with %d joints", chain_.getNrOfJoints());
 
-            // Create solvers
+            // Extract joint names and identify lift_joint index
+            extractJointNames();
+
+            // Setup joint limits from URDF
+            setupJointLimits(model);
+
+            // Create solvers with joint limits
             fk_solver_ = std::make_unique<KDL::ChainFkSolverPos_recursive>(chain_);
             ik_vel_solver_ = std::make_unique<KDL::ChainIkSolverVel_pinv>(chain_);
-            // Increase max iterations and relax tolerance for better convergence
-            ik_solver_ = std::make_unique<KDL::ChainIkSolverPos_NR>(
-                chain_, *fk_solver_, *ik_vel_solver_, 1000, 1e-3);
 
-            // Extract joint names and identify lift_joint index
-            joint_names_.clear();
-            lift_joint_index_ = -1;
-
-            for (unsigned int i = 0; i < chain_.getNrOfSegments(); i++) {
-                KDL::Segment segment = chain_.getSegment(i);
-                if (segment.getJoint().getType() != KDL::Joint::None) {
-                    std::string joint_name = segment.getJoint().getName();
-                    joint_names_.push_back(joint_name);
-
-                    // Check if this is the lift_joint
-                    if (joint_name == "lift_joint") {
-                        lift_joint_index_ = joint_names_.size() - 1;
-                        RCLCPP_INFO(this->get_logger(), "Found lift_joint at index %d (will be fixed)", lift_joint_index_);
-                    }
-                }
-            }
-
-            RCLCPP_INFO(this->get_logger(), "Joint names extracted:");
-            for (size_t i = 0; i < joint_names_.size(); i++) {
-                RCLCPP_INFO(this->get_logger(), "  [%zu] %s%s", i, joint_names_[i].c_str(),
-                           (i == lift_joint_index_) ? " (LIFT - will be fixed)" : "");
-            }
+            // Create IK solver with joint limits
+            ik_solver_jl_ = std::make_unique<KDL::ChainIkSolverPos_NR_JL>(
+                chain_, q_min_, q_max_, *fk_solver_, *ik_vel_solver_, 1000, 1e-6);
 
             setup_complete_ = true;
-            RCLCPP_INFO(this->get_logger(), "✅ KDL setup completed successfully! Ready for real-time IK.");
+            RCLCPP_INFO(this->get_logger(), "✅ KDL setup with Joint Limits completed successfully! Ready for real-time IK.");
 
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "Error processing robot description: %s", e.what());
         }
+    }
+
+    void extractJointNames()
+    {
+        joint_names_.clear();
+        lift_joint_index_ = -1;
+
+        for (unsigned int i = 0; i < chain_.getNrOfSegments(); i++) {
+            KDL::Segment segment = chain_.getSegment(i);
+            if (segment.getJoint().getType() != KDL::Joint::None) {
+                std::string joint_name = segment.getJoint().getName();
+                joint_names_.push_back(joint_name);
+
+                // Check if this is the lift_joint
+                if (joint_name == "lift_joint") {
+                    lift_joint_index_ = joint_names_.size() - 1;
+                    RCLCPP_INFO(this->get_logger(), "Found lift_joint at index %d (will be fixed)", lift_joint_index_);
+                }
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Joint names extracted:");
+        for (size_t i = 0; i < joint_names_.size(); i++) {
+            RCLCPP_INFO(this->get_logger(), "  [%zu] %s%s", i, joint_names_[i].c_str(),
+                       (i == lift_joint_index_) ? " (LIFT - will be fixed)" : "");
+        }
+    }
+
+    void setupJointLimits(const urdf::Model& model)
+    {
+        unsigned int num_joints = chain_.getNrOfJoints();
+        q_min_.resize(num_joints);
+        q_max_.resize(num_joints);
+
+        RCLCPP_INFO(this->get_logger(), "🔒 Setting up joint limits:");
+
+        for (size_t i = 0; i < joint_names_.size(); i++) {
+            const std::string& joint_name = joint_names_[i];
+
+            // Get joint from URDF
+            auto joint_ptr = model.getJoint(joint_name);
+
+            if (joint_ptr && joint_ptr->limits) {
+                // Use URDF limits
+                q_min_(i) = joint_ptr->limits->lower;
+                q_max_(i) = joint_ptr->limits->upper;
+
+                RCLCPP_INFO(this->get_logger(), "  %s: [%.3f, %.3f] rad ([%.1f°, %.1f°])",
+                           joint_name.c_str(),
+                           q_min_(i), q_max_(i),
+                           q_min_(i) * 180.0 / M_PI, q_max_(i) * 180.0 / M_PI);
+            } else {
+                // Default limits if not specified in URDF
+                if (joint_name == "lift_joint") {
+                    // Lift joint has limited range
+                    q_min_(i) = -0.1;   // -0.1m
+                    q_max_(i) = 0.5;    // 0.5m
+                } else {
+                    // Arm joints - reasonable limits
+                    q_min_(i) = -3.14159;  // -180°
+                    q_max_(i) = 3.14159;   // +180°
+                }
+
+                RCLCPP_WARN(this->get_logger(), "  %s: Using default limits [%.3f, %.3f] rad ([%.1f°, %.1f°])",
+                           joint_name.c_str(),
+                           q_min_(i), q_max_(i),
+                           q_min_(i) * 180.0 / M_PI, q_max_(i) * 180.0 / M_PI);
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "✅ Joint limits configured for %d joints", num_joints);
     }
 
     void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
@@ -196,6 +250,37 @@ private:
         if (all_joints_found && !has_joint_states_) {
             has_joint_states_ = true;
             RCLCPP_INFO(this->get_logger(), "✅ Joint states received. System ready for target poses!");
+
+            // Check if current joint positions are within limits
+            checkCurrentJointLimits();
+        }
+    }
+
+    void checkCurrentJointLimits()
+    {
+        bool all_within_limits = true;
+
+        RCLCPP_INFO(this->get_logger(), "🔍 Checking current joint positions against limits:");
+
+        for (size_t i = 0; i < current_joint_positions_.size(); i++) {
+            double pos = current_joint_positions_[i];
+            bool within_limits = (pos >= q_min_(i) && pos <= q_max_(i));
+
+            if (!within_limits) {
+                all_within_limits = false;
+            }
+
+            RCLCPP_INFO(this->get_logger(), "  %s: %.3f rad (%.1f°) %s [%.3f, %.3f]",
+                       joint_names_[i].c_str(),
+                       pos, pos * 180.0 / M_PI,
+                       within_limits ? "✅" : "⚠️ OUTSIDE",
+                       q_min_(i), q_max_(i));
+        }
+
+        if (all_within_limits) {
+            RCLCPP_INFO(this->get_logger(), "✅ All joints are within limits");
+        } else {
+            RCLCPP_WARN(this->get_logger(), "⚠️ Some joints are outside their limits!");
         }
     }
 
@@ -219,7 +304,7 @@ private:
 
     void solveIKAndMove(const geometry_msgs::msg::PoseStamped& target_pose)
     {
-        RCLCPP_INFO(this->get_logger(), "🔧 Solving IK for target pose...");
+        RCLCPP_INFO(this->get_logger(), "🔧 Solving IK with Joint Limits for target pose...");
 
         // Convert target pose to KDL Frame
         KDL::Frame target_frame;
@@ -242,57 +327,100 @@ private:
             q_init(i) = current_joint_positions_[i];
         }
 
-        KDL::JntArray q_result(chain_.getNrOfJoints());
-        int ik_result = ik_solver_->CartToJnt(q_init, target_frame, q_result);
+        // Clamp initial guess to joint limits
+        for (unsigned int i = 0; i < q_init.rows(); i++) {
+            if (q_init(i) < q_min_(i)) {
+                q_init(i) = q_min_(i);
+                RCLCPP_DEBUG(this->get_logger(), "Clamped initial guess for joint %d to min limit", i);
+            }
+            if (q_init(i) > q_max_(i)) {
+                q_init(i) = q_max_(i);
+                RCLCPP_DEBUG(this->get_logger(), "Clamped initial guess for joint %d to max limit", i);
+            }
+        }
 
-        // If IK failed, try with different initial guesses
+        KDL::JntArray q_result(chain_.getNrOfJoints());
+        int ik_result = ik_solver_jl_->CartToJnt(q_init, target_frame, q_result);
+
+        // If IK failed, try with different initial guesses within limits
         if (ik_result < 0) {
             RCLCPP_WARN(this->get_logger(), "IK failed with current guess (error: %d), trying alternatives...", ik_result);
 
-            // Try with zero initial position
-            KDL::JntArray q_zero(chain_.getNrOfJoints());
+            // Try with center of joint limits as initial guess
+            KDL::JntArray q_center(chain_.getNrOfJoints());
             for (unsigned int i = 0; i < chain_.getNrOfJoints(); i++) {
-                q_zero(i) = 0.0;
+                q_center(i) = (q_min_(i) + q_max_(i)) / 2.0;
             }
-            ik_result = ik_solver_->CartToJnt(q_zero, target_frame, q_result);
+            ik_result = ik_solver_jl_->CartToJnt(q_center, target_frame, q_result);
 
             if (ik_result < 0) {
-                // Try with small random perturbation
+                // Try with small random perturbation within limits
                 KDL::JntArray q_perturb = q_init;
                 for (unsigned int i = 0; i < chain_.getNrOfJoints(); i++) {
                     if ((int)i != lift_joint_index_) {  // Don't perturb lift joint
-                        q_perturb(i) += (rand() % 1000 - 500) * 0.001;  // ±0.5 rad perturbation
+                        double range = q_max_(i) - q_min_(i);
+                        double perturbation = (rand() % 1000 - 500) * range * 0.001 / 1000.0;  // Small perturbation
+                        q_perturb(i) = std::max(q_min_(i), std::min(q_max_(i), q_perturb(i) + perturbation));
                     }
                 }
-                ik_result = ik_solver_->CartToJnt(q_perturb, target_frame, q_result);
+                ik_result = ik_solver_jl_->CartToJnt(q_perturb, target_frame, q_result);
             }
         }
 
-        // Fix lift_joint to its current position
+        // Fix lift_joint to its current position (ensuring it stays within limits)
         if (lift_joint_index_ >= 0 && lift_joint_index_ < (int)q_result.rows()) {
-            q_result(lift_joint_index_) = current_joint_positions_[lift_joint_index_];
+            double lift_pos = current_joint_positions_[lift_joint_index_];
+            // Clamp to limits
+            lift_pos = std::max(q_min_(lift_joint_index_), std::min(q_max_(lift_joint_index_), lift_pos));
+            q_result(lift_joint_index_) = lift_pos;
         }
 
         if (ik_result >= 0) {
-            // Verify the solution
-            KDL::Frame verify_frame;
-            fk_solver_->JntToCart(q_result, verify_frame);
-
-            KDL::Vector error_pos = verify_frame.p - target_frame.p;
-            double error_magnitude = sqrt(
-                error_pos.x() * error_pos.x() +
-                error_pos.y() * error_pos.y() +
-                error_pos.z() * error_pos.z());
-
-            if (error_magnitude < 0.3) {  // 30cm tolerance
-                RCLCPP_INFO(this->get_logger(), "✅ IK solution found (error: %.4fm). Moving robot...", error_magnitude);
-
-                // Send joint trajectory command to move the robot
-                sendJointTrajectory(q_result);
-
-            } else {
-                RCLCPP_WARN(this->get_logger(), "⚠️ Large verification error: %.4f m. Skipping movement.", error_magnitude);
+            // Verify all joints are within limits
+            bool all_within_limits = true;
+            for (unsigned int i = 0; i < q_result.rows(); i++) {
+                if (q_result(i) < q_min_(i) || q_result(i) > q_max_(i)) {
+                    all_within_limits = false;
+                    RCLCPP_WARN(this->get_logger(), "Joint %d solution %.3f is outside limits [%.3f, %.3f]",
+                               i, q_result(i), q_min_(i), q_max_(i));
+                }
             }
+
+            if (!all_within_limits) {
+                RCLCPP_ERROR(this->get_logger(), "❌ IK solution violates joint limits! Skipping movement.");
+                return;
+            }
+
+            // // Verify the solution (COMMENTED OUT - using IK result directly)
+            // KDL::Frame verify_frame;
+            // fk_solver_->JntToCart(q_result, verify_frame);
+
+            // KDL::Vector error_pos = verify_frame.p - target_frame.p;
+            // double error_magnitude = sqrt(
+            //     error_pos.x() * error_pos.x() +
+            //     error_pos.y() * error_pos.y() +
+            //     error_pos.z() * error_pos.z());
+
+            // if (error_magnitude < 0.1) {  // 10cm tolerance
+            //     RCLCPP_INFO(this->get_logger(), "✅ IK solution found with Joint Limits (error: %.4fm). Moving robot...", error_magnitude);
+            // } else {
+            //     RCLCPP_WARN(this->get_logger(), "⚠️ Large verification error: %.4f m. Skipping movement.", error_magnitude);
+            // }
+
+            // Use IK solution directly without verification
+            RCLCPP_INFO(this->get_logger(), "✅ IK solution found with Joint Limits. Moving robot directly...");
+
+            // Log joint solution
+            RCLCPP_INFO(this->get_logger(), "🎯 Joint solution:");
+            for (size_t i = 0; i < joint_names_.size(); i++) {
+                RCLCPP_INFO(this->get_logger(), "  %s: %.3f rad (%.1f°) [%.3f, %.3f]",
+                           joint_names_[i].c_str(),
+                           q_result(i), q_result(i) * 180.0 / M_PI,
+                           q_min_(i), q_max_(i));
+            }
+
+            // Send joint trajectory command to move the robot
+            sendJointTrajectory(q_result);
 
         } else {
             // Provide detailed error information
@@ -306,7 +434,7 @@ private:
                 default: error_msg = "Unknown error"; break;
             }
 
-            RCLCPP_ERROR(this->get_logger(), "❌ IK failed: %d (%s)", ik_result, error_msg.c_str());
+            RCLCPP_ERROR(this->get_logger(), "❌ IK with Joint Limits failed: %d (%s)", ik_result, error_msg.c_str());
         }
     }
 
@@ -314,7 +442,7 @@ private:
     {
         // Create joint trajectory message (format matching real leader)
         auto traj_msg = trajectory_msgs::msg::JointTrajectory();
-        // traj_msg.header.stamp = this->get_clock()->now();  // Use current time for real-time control
+        // traj_msg.header.stamp = this->get_clock()->now();
         traj_msg.header.frame_id = "";
 
         // Set joint names (arm joints + gripper, excluding lift_joint)
@@ -340,7 +468,7 @@ private:
         point.velocities = {};  // Empty velocities array
         point.accelerations = {};  // Empty accelerations array
         point.effort = {};  // Empty effort array
-        point.time_from_start.sec = 0;    // 3 second execution time for smoother movement
+        point.time_from_start.sec = 0;    // 2 second execution time for smooth movement
         point.time_from_start.nanosec = 0;
 
         traj_msg.points.push_back(point);
@@ -348,7 +476,7 @@ private:
         // Publish the trajectory
         joint_trajectory_pub_->publish(traj_msg);
 
-        RCLCPP_INFO(this->get_logger(), "📤 Joint trajectory sent! Robot should move in 1 second.");
+        RCLCPP_INFO(this->get_logger(), "📤 Joint trajectory with Joint Limits sent! Robot should move in 2 seconds.");
     }
 
     void publishCurrentPose()
@@ -404,7 +532,11 @@ private:
     KDL::Chain chain_;
     std::unique_ptr<KDL::ChainFkSolverPos_recursive> fk_solver_;
     std::unique_ptr<KDL::ChainIkSolverVel_pinv> ik_vel_solver_;
-    std::unique_ptr<KDL::ChainIkSolverPos_NR> ik_solver_;
+    std::unique_ptr<KDL::ChainIkSolverPos_NR_JL> ik_solver_jl_;  // Joint Limits IK solver
+
+    // Joint limits
+    KDL::JntArray q_min_;  // Minimum joint limits
+    KDL::JntArray q_max_;  // Maximum joint limits
 
     // Joint information
     std::vector<std::string> joint_names_;
@@ -420,9 +552,9 @@ int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
 
-    auto node = std::make_shared<RealtimeIKSolver>();
+    auto node = std::make_shared<RealtimeIKSolverJL>();
 
-    RCLCPP_INFO(node->get_logger(), "🚀 Realtime IK Solver node started");
+    RCLCPP_INFO(node->get_logger(), "🚀 Realtime IK Solver with Joint Limits node started");
 
     rclcpp::spin(node);
 

@@ -70,8 +70,47 @@ ament_target_dependencies(target_pose_publisher
   geometry_msgs
 )
 
+# IK Solver Comparison executable
+add_executable(ik_solver_comparison src/ik_solver_comparison.cpp)
+
+target_include_directories(ik_solver_comparison PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
+target_compile_features(ik_solver_comparison PUBLIC c_std_99 cxx_std_17)
+
+ament_target_dependencies(ik_solver_comparison
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  std_msgs
+  kdl_parser
+  urdf
+  orocos_kdl
+)
+
+# Realtime IK Solver with Joint Limits executable
+add_executable(realtime_ik_solver_jl src/realtime_ik_solver_jl.cpp)
+
+target_include_directories(realtime_ik_solver_jl PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
+target_compile_features(realtime_ik_solver_jl PUBLIC c_std_99 cxx_std_17)
+
+ament_target_dependencies(realtime_ik_solver_jl
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  std_msgs
+  trajectory_msgs
+  kdl_parser
+  urdf
+  orocos_kdl
+)
+
 # Install C++ executables
-install(TARGETS kdl_ik_solver_cpp realtime_ik_solver target_pose_publisher
+install(TARGETS kdl_ik_solver_cpp realtime_ik_solver target_pose_publisher ik_solver_comparison realtime_ik_solver_jl
   DESTINATION lib/${PROJECT_NAME})
 
 
