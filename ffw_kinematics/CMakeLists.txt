@@ -15,6 +15,7 @@ find_package(trajectory_msgs REQUIRED)
 find_package(kdl_parser REQUIRED)
 find_package(urdf REQUIRED)
 find_package(orocos_kdl REQUIRED)
+find_package(pinocchio REQUIRED)
 
 # C++ executables
 add_executable(kdl_ik_solver_cpp src/kdl_ik_solver.cpp)
@@ -109,8 +110,29 @@ ament_target_dependencies(realtime_ik_solver_jl
   orocos_kdl
 )
 
+# Pinocchio IK Solver executable
+add_executable(pinocchio_ik_solver src/pinocchio_ik_solver.cpp)
+
+target_include_directories(pinocchio_ik_solver PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
+target_compile_features(pinocchio_ik_solver PUBLIC c_std_99 cxx_std_17)
+
+ament_target_dependencies(pinocchio_ik_solver
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  std_msgs
+  trajectory_msgs
+  urdf
+)
+
+# Link Pinocchio manually (since it might not have proper CMake integration in ROS2)
+target_link_libraries(pinocchio_ik_solver pinocchio::pinocchio)
+
 # Install C++ executables
-install(TARGETS kdl_ik_solver_cpp realtime_ik_solver target_pose_publisher ik_solver_comparison realtime_ik_solver_jl
+install(TARGETS kdl_ik_solver_cpp realtime_ik_solver target_pose_publisher ik_solver_comparison realtime_ik_solver_jl pinocchio_ik_solver
   DESTINATION lib/${PROJECT_NAME})
 
 
