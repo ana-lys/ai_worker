@@ -53,12 +53,48 @@
   </xacro:ffw_follower_body>
 
   <xacro:rh_p12_rn_a parent="$(arg prefix)arm_l_link7" prefix="$(arg prefix)gripper_l_">
-    <origin xyz="0 0 -0.078" rpy="0 3.14159265359 0"/>
+    <origin xyz="0 0 -0.078" rpy="0 3.14159265359 3.14159265359"/>
   </xacro:rh_p12_rn_a>
 
+  <joint name="$(arg prefix)end_effector_l_joint" type="fixed">
+    <parent link="$(arg prefix)arm_l_link7"/>
+    <child link="$(arg prefix)end_effector_l_link"/>
+    <origin xyz="0 0 -0.215" rpy="0 0 0"/>
+  </joint>
+
+  <link name="$(arg prefix)end_effector_l_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01 0.01 0.01" />
+      </geometry>
+      <material name="red">
+        <color rgba="1.0 0.0 0.0 1"/>
+      </material>
+    </visual>
+  </link>
+
   <xacro:rh_p12_rn_a parent="$(arg prefix)arm_r_link7" prefix="$(arg prefix)gripper_r_">
-    <origin xyz="0 0 -0.078" rpy="0 3.14159265359 0"/>
+    <origin xyz="0 0 -0.078" rpy="0 3.14159265359 3.14159265359"/>
   </xacro:rh_p12_rn_a>
+
+  <joint name="$(arg prefix)end_effector_r_joint" type="fixed">
+    <parent link="$(arg prefix)arm_r_link7"/>
+    <child link="$(arg prefix)end_effector_r_link"/>
+    <origin xyz="0 0 -0.215" rpy="0 0 0"/>
+  </joint>
+
+  <link name="$(arg prefix)end_effector_r_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01 0.01 0.01" />
+      </geometry>
+      <material name="red">
+        <color rgba="1.0 0.0 0.0 1"/>
+      </material>
+    </visual>
+  </link>
 
   <xacro:ffw_bg2_follower_system
     use_sim="$(arg use_sim)"

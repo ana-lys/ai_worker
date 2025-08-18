@@ -2,9 +2,6 @@ services:
   ai_worker:
     container_name: ai_worker
     image: robotis/ai-worker:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
     tty: true
     restart: always
     cap_add:
@@ -23,14 +20,5 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
       - ../:/root/ros2_ws/src/ai_worker/
-      - ./lerobot/outputs:/root/ros2_ws/src/physical_ai_tools/lerobot/outputs
-      - ./huggingface:/root/.cache/huggingface
     privileged: true
     command: bash
-    runtime: nvidia
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]

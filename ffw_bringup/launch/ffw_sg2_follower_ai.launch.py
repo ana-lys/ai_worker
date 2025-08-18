@@ -146,6 +146,7 @@ def generate_launch_description():
         executable='spawner',
         arguments=['swerve_steering_initial_position_controller'],
         parameters=[robot_description],
+        condition=IfCondition(init_position),
     )
 
     # Unspawner for swerve_steering_initial_position_controller
@@ -163,6 +164,16 @@ def generate_launch_description():
         arguments=['swerve_drive_controller'],
         parameters=[robot_description],
         output='screen',
+    )
+
+    # Direct spawner for swerve_drive_controller when init_position is false
+    swerve_drive_spawner_direct = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['swerve_drive_controller'],
+        parameters=[robot_description],
+        output='screen',
+        condition=UnlessCondition(init_position),
     )
 
     # Add a TimerAction to delay swerve_drive_spawner by 5 seconds after unspawning
@@ -219,6 +230,7 @@ def generate_launch_description():
         name='swerve_steering_joint_trajectory_executor',
         parameters=[trajectory_params_file],
         output='screen',
+        condition=IfCondition(init_position),
     )
 
     init_position_event_handler = RegisterEventHandler(
@@ -271,6 +283,7 @@ def generate_launch_description():
             delay_rviz_after_joint_state_broadcaster_spawner,
             robot_controller_spawner,
             swerve_steering_initial_position_spawner,
+            swerve_drive_spawner_direct,
             init_position_event_handler,
             swerve_controller_switch_event_handler,
             camera_timer_20s,

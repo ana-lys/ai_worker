@@ -4,6 +4,7 @@
    <xacro:macro name="ffw_follower_body" params="prefix parent *origin">
 
       <xacro:include filename="$(find realsense2_description)/urdf/_d405.urdf.xacro" />
+      <xacro:include filename="$(find ffw_description)/urdf/common/follower/zedm.urdf.xacro" />
       <xacro:property name="meshes_file_direction" value="package://ffw_description/meshes/common/follower" />
 
       <joint name="${prefix}lift_joint" type="prismatic">
@@ -43,7 +44,7 @@
       <joint name="${prefix}head_joint1" type="revolute">
          <parent link="${prefix}arm_base_link" />
          <child link="${prefix}head_link1" />
-         <origin xyz="0.0494878 0 0.102123" rpy="0 0 0" />
+         <origin xyz="0.049483 0 0.102130" rpy="0 0 0" />
          <axis xyz="0 1 0" />
          <limit velocity="4.8" effort="1000" lower="-0.2317" upper="0.6951" />
          <dynamics damping="0.1" />
@@ -75,7 +76,7 @@
       <joint name="${prefix}head_joint2" type="revolute">
          <parent link="${prefix}head_link1" />
          <child link="${prefix}head_link2" />
-         <origin xyz="0.0365694 0 0.0563797" rpy="0 0 0" />
+         <origin xyz="0.040 0 0.054" rpy="0 0 0" />
          <axis xyz="0 0 1" />
          <limit velocity="4.8" effort="1000" lower="-0.35" upper="0.35" />
          <dynamics damping="0.1" />
@@ -104,6 +105,12 @@
             izz="1.339403400e-03" />
          </inertial>
       </link>
+      <xacro:zed_camera name="zedm" model="zedm" />
+      <joint name="zedm_joint" type="fixed">
+         <parent link="head_link2"/>
+         <child link="zedm_camera_link"/>
+         <origin xyz="0.0238122 -0.00651797 -0.0242094" rpy="0 0 0" />
+      </joint>
 
       <joint name="${prefix}arm_l_joint1" type="revolute">
          <parent link="${prefix}arm_base_link" />

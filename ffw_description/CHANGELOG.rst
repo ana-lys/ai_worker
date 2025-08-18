@@ -4,7 +4,8 @@ Changelog for package ffw_description
 
 1.1.10 (2025-07-22)
 ------------------
-* None
+* Added URDF for ZED camera
+* Contributors: Woojin Wie
 
 1.1.9 (2025-07-18)
 ------------------
