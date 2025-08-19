@@ -54,14 +54,30 @@ private:
             wrist_pose_vr.orientation.z
         );
 
-        // === VR(Meta Quest/Unity) → ROS 변환 (position, with scale) ===
-        // ROS.x = -VR.z, ROS.y = -VR.x, ROS.z = VR.y
-        Eigen::Vector3d ros_position;
-        ros_position.x() = -vr_position.z() * vr_scale_;
-        ros_position.y() = -vr_position.x() * vr_scale_;
-        ros_position.z() =  vr_position.y() * vr_scale_;
 
-        Eigen::Vector3d base_position = ros_position;
+    // === VR(Meta Quest/Unity) → ROS 변환 (position, with scale) ===
+    // ROS.x = -VR.z, ROS.y = -VR.x, ROS.z = VR.y
+    Eigen::Vector3d ros_position;
+    ros_position.x() = -vr_position.z() * vr_scale_;
+    ros_position.y() = -vr_position.x() * vr_scale_;
+    ros_position.z() =  vr_position.y() * vr_scale_;
+
+    // 기준 좌표: zedm_camera_center에서 base_link로 이동 (URDF 누적 offset 적용)
+    // x: 0.049483 + 0.040 + 0.0238122 + 0 = 0.1132952
+    // y: 0
+    // z: 0.102130 + 0.054 + (-0.0242094) + 0.01325 = 0.1451706
+
+    Eigen::Vector3d zedm_to_base_offset(0.1132952, 0.0, 0.1451706);
+    Eigen::Vector3d base_position = ros_position;
+    base_position.x() -= zedm_to_base_offset.x();
+    base_position.y() -= zedm_to_base_offset.y();
+    base_position.z() -= zedm_to_base_offset.z();
+
+    RCLCPP_INFO(this->get_logger(), "[DEBUG] VR raw pos: [%.4f, %.4f, %.4f]  ROS pos: [%.4f, %.4f, %.4f]  Offset: [%.4f, %.4f, %.4f]  base_link pos: [%.4f, %.4f, %.4f]", 
+        vr_position.x(), vr_position.y(), vr_position.z(),
+        ros_position.x(), ros_position.y(), ros_position.z(),
+        zedm_to_base_offset.x(), zedm_to_base_offset.y(), zedm_to_base_offset.z(),
+        base_position.x(), base_position.y(), base_position.z());
 
 
     // === VR(Meta Quest/Unity) → ROS 변환 (orientation) ===

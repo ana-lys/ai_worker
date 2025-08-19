@@ -305,28 +305,15 @@ private:
                    msg->pose.orientation.x, msg->pose.orientation.y,
                    msg->pose.orientation.z, msg->pose.orientation.w);
 
-        // Transform pose from base_link to arm_base_link frame
-        geometry_msgs::msg::PoseStamped arm_base_pose = *msg;
+    // No transform needed; pose is already in arm_base_link frame
+    // Calculate distance for reachability check
+    double distance = sqrt(msg->pose.position.x * msg->pose.position.x +
+                  msg->pose.position.y * msg->pose.position.y +
+                  msg->pose.position.z * msg->pose.position.z);
+    RCLCPP_INFO(this->get_logger(), "📐 Target distance from arm_base: %.3f m", distance);
 
-        // URDF lift_joint origin: xyz="0.0055 0 1.4316"  
-        // Transform: base_link -> arm_base_link
-        arm_base_pose.pose.position.x -= 0.0055;  // lift_joint x offset
-        arm_base_pose.pose.position.y -= 0.0;     // lift_joint y offset
-        arm_base_pose.pose.position.z -= (1.4316 + lift_joint_position_); // lift_joint z offset + current lift position
-
-        RCLCPP_INFO(this->get_logger(), "🔄 Transformed to arm_base_link frame:");
-        RCLCPP_INFO(this->get_logger(), "   Position: x=%.3f, y=%.3f, z=%.3f (lift: %.3f m)",
-                   arm_base_pose.pose.position.x, arm_base_pose.pose.position.y,
-                   arm_base_pose.pose.position.z, lift_joint_position_);
-
-        // Calculate distance for reachability check
-        double distance = sqrt(arm_base_pose.pose.position.x * arm_base_pose.pose.position.x +
-                              arm_base_pose.pose.position.y * arm_base_pose.pose.position.y +
-                              arm_base_pose.pose.position.z * arm_base_pose.pose.position.z);
-        RCLCPP_INFO(this->get_logger(), "📐 Target distance from arm_base: %.3f m", distance);
-
-        // Solve IK for the transformed target
-        solveIKAndMove(arm_base_pose);
+    // Solve IK for the target (already in arm_base_link frame)
+    solveIKAndMove(*msg);
     }
 
     void solveIKAndMove(const geometry_msgs::msg::PoseStamped& target_pose)
@@ -459,7 +446,7 @@ private:
             }
 
             RCLCPP_ERROR(this->get_logger(), "❌ Arm-only IK with Joint Limits failed: %d (%s)", ik_result, error_msg.c_str());
-            
+
             // Additional failure analysis
             if (ik_result == -5) {
                 RCLCPP_ERROR(this->get_logger(), "  → Target may be unreachable for arm-only configuration");
