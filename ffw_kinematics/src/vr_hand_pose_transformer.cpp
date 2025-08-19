@@ -22,7 +22,7 @@ public:
         // Calculated from URDF: arm_base_link -> head_link1 -> head_link2 -> zedm_camera_link -> zedm_camera_center
         // Forward: [0.1132952, -0.00651797, 0.1449406]
         // Inverse (zedm_camera_center -> arm_base_link): [-0.1132952, 0.00651797, -0.1449406]
-        transform_zedm_to_arm_ = Eigen::Vector3d(-0.1132952, 0.00651797, -0.1449406);
+        transform_zedm_to_base_ = Eigen::Vector3d(-0.1132952, 0.00651797, -0.1449406);
 
         RCLCPP_INFO(this->get_logger(), "VR Hand Pose Transformer node started");
     }
@@ -97,7 +97,10 @@ private:
     target_pose.pose.orientation.y = arm_quaternion.y();
     target_pose.pose.orientation.z = arm_quaternion.z();
     target_pose.pose.orientation.w = arm_quaternion.w();
-
+    // target_pose.pose.orientation.x = 0.0;
+    // target_pose.pose.orientation.y = -0.70710678;
+    // target_pose.pose.orientation.z = 0.0;
+    // target_pose.pose.orientation.w = 0.70710678;
         // Publish target pose
         target_pose_pub_->publish(target_pose);
 

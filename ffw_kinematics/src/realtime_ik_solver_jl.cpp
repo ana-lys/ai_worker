@@ -415,6 +415,23 @@ private:
                 return;
             }
 
+            // Clamp joint movement to max step (e.g., 10 degrees per cycle)
+            const double max_joint_step = 10.0 * M_PI / 180.0; // 10 degrees in radians
+            bool clamped = false;
+            for (unsigned int i = 0; i < q_result.rows(); i++) {
+                double delta = q_result(i) - current_joint_positions_[i];
+                if (std::abs(delta) > max_joint_step) {
+                    clamped = true;
+                    if (delta > 0)
+                        q_result(i) = current_joint_positions_[i] + max_joint_step;
+                    else
+                        q_result(i) = current_joint_positions_[i] - max_joint_step;
+                }
+            }
+            if (clamped) {
+                RCLCPP_WARN(this->get_logger(), "⚠️ Joint movement clamped to max %.1f deg per cycle for safety.", max_joint_step * 180.0 / M_PI);
+            }
+
             RCLCPP_INFO(this->get_logger(), "✅ Arm-only IK solution found with Joint Limits. Moving robot...");
 
             // Log joint solution
