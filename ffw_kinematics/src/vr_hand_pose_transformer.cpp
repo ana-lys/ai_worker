@@ -9,6 +9,10 @@ class VRHandPoseTransformer : public rclcpp::Node
 public:
     VRHandPoseTransformer() : Node("vr_hand_pose_transformer")
     {
+        // Declare and get VR scale parameter (default: 1.0)
+        this->declare_parameter<double>("vr_scale", 1.5);
+        vr_scale_ = this->get_parameter("vr_scale").as_double();
+
         // Subscribe to VR hand poses
         subscription_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/vr_hand/right_poses", 10,
@@ -18,13 +22,7 @@ public:
         target_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "/target_pose", 10);
 
-        // Static transform from zedm_camera_center to arm_base_link
-        // Calculated from URDF: arm_base_link -> head_link1 -> head_link2 -> zedm_camera_link -> zedm_camera_center
-        // Forward: [0.1132952, -0.00651797, 0.1449406]
-        // Inverse (zedm_camera_center -> arm_base_link): [-0.1132952, 0.00651797, -0.1449406]
-        transform_zedm_to_base_ = Eigen::Vector3d(-0.1132952, 0.00651797, -0.1449406);
-
-        RCLCPP_INFO(this->get_logger(), "VR Hand Pose Transformer node started");
+        RCLCPP_INFO(this->get_logger(), "VR Hand Pose Transformer node started (vr_scale=%.3f)", vr_scale_);
     }
 
 private:
@@ -40,13 +38,13 @@ private:
         const auto& wrist_pose_vr = msg->poses[0];  // Adjust index if needed
 
 
+
         // Extract position from VR pose (Meta Quest/Unity 좌표계)
         Eigen::Vector3d vr_position(
             wrist_pose_vr.position.x,
             wrist_pose_vr.position.y,
             wrist_pose_vr.position.z
         );
-
 
         // Extract orientation from VR pose
         Eigen::Quaterniond vr_quaternion(
@@ -56,16 +54,14 @@ private:
             wrist_pose_vr.orientation.z
         );
 
+        // === VR(Meta Quest/Unity) → ROS 변환 (position, with scale) ===
+        // ROS.x = -VR.z, ROS.y = -VR.x, ROS.z = VR.y
+        Eigen::Vector3d ros_position;
+        ros_position.x() = -vr_position.z() * vr_scale_;
+        ros_position.y() = -vr_position.x() * vr_scale_;
+        ros_position.z() =  vr_position.y() * vr_scale_;
 
-    // === VR(Meta Quest/Unity) → ROS 변환 (position) ===
-    // ROS.x = -VR.z, ROS.y = -VR.x, ROS.z = VR.y
-    Eigen::Vector3d ros_position;
-    ros_position.x() = -vr_position.z();
-    ros_position.y() = -vr_position.x();
-    ros_position.z() = vr_position.y();
-
-    // Transform position from zedm_camera_center frame to arm_base_link frame
-    Eigen::Vector3d base_position = ros_position + transform_zedm_to_base_;
+        Eigen::Vector3d base_position = ros_position;
 
 
     // === VR(Meta Quest/Unity) → ROS 변환 (orientation) ===
@@ -80,6 +76,11 @@ private:
 
     Eigen::Matrix3d vr_rot = vr_quaternion.toRotationMatrix();
     Eigen::Matrix3d ros_rot = vr_to_ros * vr_rot;
+
+    // 추가: Z축으로 180도 회전 행렬 곱하기
+    Eigen::AngleAxisd rot_z_180(M_PI, Eigen::Vector3d::UnitZ());
+    ros_rot = ros_rot * rot_z_180.toRotationMatrix();
+
     Eigen::Quaterniond arm_quaternion(ros_rot);
 
 
@@ -111,7 +112,7 @@ private:
 
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr subscription_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
-    Eigen::Vector3d transform_zedm_to_base_;
+    double vr_scale_;
 };
 
 int main(int argc, char* argv[])
