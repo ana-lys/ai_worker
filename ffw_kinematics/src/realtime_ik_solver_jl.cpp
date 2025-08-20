@@ -305,15 +305,28 @@ private:
                    msg->pose.orientation.x, msg->pose.orientation.y,
                    msg->pose.orientation.z, msg->pose.orientation.w);
 
-    // No transform needed; pose is already in arm_base_link frame
-    // Calculate distance for reachability check
-    double distance = sqrt(msg->pose.position.x * msg->pose.position.x +
-                  msg->pose.position.y * msg->pose.position.y +
-                  msg->pose.position.z * msg->pose.position.z);
-    RCLCPP_INFO(this->get_logger(), "📐 Target distance from arm_base: %.3f m", distance);
+        // Transform pose from base_link to arm_base_link frame
+        geometry_msgs::msg::PoseStamped arm_base_pose = *msg;
 
-    // Solve IK for the target (already in arm_base_link frame)
-    solveIKAndMove(*msg);
+        // URDF lift_joint origin: xyz="0.0055 0 1.4316"  
+        // Transform: base_link -> arm_base_link
+        arm_base_pose.pose.position.x -= 0.0055;  // lift_joint x offset
+        arm_base_pose.pose.position.y -= 0.0;     // lift_joint y offset
+        arm_base_pose.pose.position.z -= (1.4316 + lift_joint_position_); // lift_joint z offset + current lift position
+
+        RCLCPP_INFO(this->get_logger(), "🔄 Transformed to arm_base_link frame:");
+        RCLCPP_INFO(this->get_logger(), "   Position: x=%.3f, y=%.3f, z=%.3f (lift: %.3f m)",
+                   arm_base_pose.pose.position.x, arm_base_pose.pose.position.y,
+                   arm_base_pose.pose.position.z, lift_joint_position_);
+
+        // Calculate distance for reachability check
+        double distance = sqrt(arm_base_pose.pose.position.x * arm_base_pose.pose.position.x +
+                              arm_base_pose.pose.position.y * arm_base_pose.pose.position.y +
+                              arm_base_pose.pose.position.z * arm_base_pose.pose.position.z);
+        RCLCPP_INFO(this->get_logger(), "📐 Target distance from arm_base: %.3f m", distance);
+
+        // Solve IK for the transformed target
+        solveIKAndMove(arm_base_pose);
     }
 
     void solveIKAndMove(const geometry_msgs::msg::PoseStamped& target_pose)
@@ -513,18 +526,24 @@ private:
         int fk_result = fk_solver_->JntToCart(q, end_effector_frame);
 
         if (fk_result >= 0) {
-            // Extract position and orientation
+            // Extract position and orientation (FK result is in arm_base_link frame)
             KDL::Vector pos = end_effector_frame.p;
             double qx, qy, qz, qw;
             end_effector_frame.M.GetQuaternion(qx, qy, qz, qw);
 
-            // Publish current pose
+            // Transform from arm_base_link to base_link frame
+            // URDF lift_joint origin: xyz="0.0055 0 1.4316"
+            double base_x = pos.x() + 0.0055;
+            double base_y = pos.y() + 0.0;
+            double base_z = pos.z() + (1.4316 + lift_joint_position_);
+
+            // Publish current pose (in base_link frame)
             auto pose_msg = geometry_msgs::msg::PoseStamped();
             pose_msg.header.stamp = this->get_clock()->now();
             pose_msg.header.frame_id = base_link_;
-            pose_msg.pose.position.x = pos.x();
-            pose_msg.pose.position.y = pos.y();
-            pose_msg.pose.position.z = pos.z();
+            pose_msg.pose.position.x = base_x;
+            pose_msg.pose.position.y = base_y;
+            pose_msg.pose.position.z = base_z;
             pose_msg.pose.orientation.x = qx;
             pose_msg.pose.orientation.y = qy;
             pose_msg.pose.orientation.z = qz;

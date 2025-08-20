@@ -9,9 +9,15 @@ class VRHandPoseTransformer : public rclcpp::Node
 public:
     VRHandPoseTransformer() : Node("vr_hand_pose_transformer")
     {
-        // Declare and get VR scale parameter (default: 1.0)
-        this->declare_parameter<double>("vr_scale", 1.5);
-        vr_scale_ = this->get_parameter("vr_scale").as_double();
+        // Declare and get VR scale parameter
+        // 로봇 작업공간(836mm) vs 성인남성 팔길이(~650mm) 비율 고려
+        // 로봇이 더 크므로 VR 움직임을 확대: 836/650 ≈ 1.29,
+        this->declare_parameter<double>("vr_scale_x", 1.3);
+        this->declare_parameter<double>("vr_scale_y", 1.3);
+        this->declare_parameter<double>("vr_scale_z", 1.3);
+        vr_scale_x_ = this->get_parameter("vr_scale_x").as_double();
+        vr_scale_y_ = this->get_parameter("vr_scale_y").as_double();
+        vr_scale_z_ = this->get_parameter("vr_scale_z").as_double();
 
         // Subscribe to VR hand poses
         subscription_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
@@ -22,7 +28,7 @@ public:
         target_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "/target_pose", 10);
 
-        RCLCPP_INFO(this->get_logger(), "VR Hand Pose Transformer node started (vr_scale=%.3f)", vr_scale_);
+        RCLCPP_INFO(this->get_logger(), "VR Hand Pose Transformer node started (vr_scale_x=%.3f, vr_scale_y=%.3f, vr_scale_z=%.3f)", vr_scale_x_, vr_scale_y_, vr_scale_z_);
     }
 
 private:
@@ -58,22 +64,29 @@ private:
     // === VR(Meta Quest/Unity) → ROS 변환 (position, with scale) ===
     // ROS.x = -VR.z, ROS.y = -VR.x, ROS.z = VR.y
     Eigen::Vector3d ros_position;
-    ros_position.x() = -vr_position.z() * vr_scale_;
-    ros_position.y() = -vr_position.x() * vr_scale_;
-    ros_position.z() =  vr_position.y() * vr_scale_;
+    ros_position.x() = -vr_position.z() * vr_scale_z_;
+    ros_position.y() = -vr_position.x() * vr_scale_x_;
+    ros_position.z() =  vr_position.y() * vr_scale_y_;
 
-    // 기준 좌표: zedm_camera_center에서 base_link로 이동 (URDF 누적 offset 적용)
-    // x: 0.049483 + 0.040 + 0.0238122 + 0 = 0.1132952
-    // y: 0
-    // z: 0.102130 + 0.054 + (-0.0242094) + 0.01325 = 0.1451706
+    // 기준 좌표: zedm_camera_center에서 base_link로 이동 (전체 변환 체인 적용)
+    // zedm_camera_center → zedm_camera_link: (0, 0, -0.01325)
+    // zedm_camera_link → head_link2: (-0.0238122, 0.00651797, 0.0242094)
+    // head_link2 → head_link1: (-0.040, 0, -0.054)
+    // head_link1 → arm_base_link: (-0.049483, 0, -0.102130)
+    // arm_base_link → base_link: (-0.0055, 0, -1.4316) + lift_joint_position
 
-    Eigen::Vector3d zedm_to_base_offset(0.1132952, 0.0, 0.1451706);
+    // 전체 변환: zedm_camera_center → base_link
+    Eigen::Vector3d zedm_to_base_offset(
+        0.0 - 0.0238122 - 0.040 - 0.049483 - 0.0055,           // x: -0.1132952
+        0.0 + 0.0 + 0.0 + 0.0 + 0.0,                    // y: 0.00651797
+        -0.01325 + 0.0242094 - 0.054 - 0.102130 - 1.4316       // z: -1.5766
+    );
+
     Eigen::Vector3d base_position = ros_position;
     base_position.x() -= zedm_to_base_offset.x();
     base_position.y() -= zedm_to_base_offset.y();
     base_position.z() -= zedm_to_base_offset.z();
-
-    RCLCPP_INFO(this->get_logger(), "[DEBUG] VR raw pos: [%.4f, %.4f, %.4f]  ROS pos: [%.4f, %.4f, %.4f]  Offset: [%.4f, %.4f, %.4f]  base_link pos: [%.4f, %.4f, %.4f]", 
+    RCLCPP_INFO(this->get_logger(), "[DEBUG] VR raw pos: [%.4f, %.4f, %.4f]  ROS pos: [%.4f, %.4f, %.4f]  Offset: [%.4f, %.4f, %.4f]  base_link pos: [%.4f, %.4f, %.4f]",
         vr_position.x(), vr_position.y(), vr_position.z(),
         ros_position.x(), ros_position.y(), ros_position.z(),
         zedm_to_base_offset.x(), zedm_to_base_offset.y(), zedm_to_base_offset.z(),
@@ -128,7 +141,9 @@ private:
 
     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr subscription_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_;
-    double vr_scale_;
+    double vr_scale_x_;
+    double vr_scale_y_;
+    double vr_scale_z_;
 };
 
 int main(int argc, char* argv[])
