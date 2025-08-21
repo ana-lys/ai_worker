@@ -144,7 +144,7 @@ private:
 
             // Create IK solver with joint limits
             ik_solver_jl_ = std::make_unique<KDL::ChainIkSolverPos_NR_JL>(
-                chain_, q_min_, q_max_, *fk_solver_, *ik_vel_solver_, 1000, 1e-6);
+                chain_, q_min_, q_max_, *fk_solver_, *ik_vel_solver_, 20000, 0.03);
 
             setup_complete_ = true;
             RCLCPP_INFO(this->get_logger(), "✅ KDL setup with Joint Limits completed successfully! Ready for real-time IK.");
@@ -416,7 +416,7 @@ private:
             }
 
             // Clamp joint movement to max step (e.g., 10 degrees per cycle)
-            const double max_joint_step = 10.0 * M_PI / 180.0; // 10 degrees in radians
+            const double max_joint_step = 20.0 * M_PI / 180.0; // 10 degrees in radians
             bool clamped = false;
             for (unsigned int i = 0; i < q_result.rows(); i++) {
                 double delta = q_result(i) - current_joint_positions_[i];
