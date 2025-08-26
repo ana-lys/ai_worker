@@ -268,25 +268,26 @@ void JoystickController::publish_joystick_values()
   }
 }
 
-void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time)
+void JoystickController::handle_tact_switches(
+  bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time)
 {
   // Create current state as bit pattern: left=bit1, right=bit0
   // 00 = neither pressed, 01 = right only, 10 = left only, 11 = both pressed
   uint8_t current_state = (left_tact_pressed ? 2 : 0) | (right_tact_pressed ? 1 : 0);
   uint8_t prev_state = (prev_left_tact_switch_ ? 2 : 0) | (prev_right_tact_switch_ ? 1 : 0);
-  
+
   // Handle left tact switch press start
   if (left_tact_pressed && !prev_left_tact_switch_) {
     left_tact_press_start_time_ = current_time;
     left_tact_long_press_triggered_ = false;
   }
-  
+
   // Handle right tact switch press start
   if (right_tact_pressed && !prev_right_tact_switch_) {
     right_tact_press_start_time_ = current_time;
     right_tact_long_press_triggered_ = false;
   }
-  
+
   // Check for long press on left tact switch
   if (left_tact_pressed && !left_tact_long_press_triggered_) {
     auto press_duration = current_time - left_tact_press_start_time_;
@@ -298,7 +299,7 @@ void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right
       left_tact_long_press_triggered_ = true;
     }
   }
-  
+
   // Check for long press on right tact switch
   if (right_tact_pressed && !right_tact_long_press_triggered_) {
     auto press_duration = current_time - right_tact_press_start_time_;
@@ -310,12 +311,12 @@ void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right
       right_tact_long_press_triggered_ = true;
     }
   }
-  
+
   // Set flag when both buttons are pressed
   if (current_state == 3) {
     both_pressed_flag_ = true;
   }
-  
+
   // Only trigger actions when reaching 00 state (no buttons pressed)
   if (current_state == 0 && prev_state != 0) {
     if (both_pressed_flag_) {
@@ -329,7 +330,7 @@ void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right
       mode_msg.data = current_mode_;
       mode_pub_->publish(mode_msg);
       RCLCPP_INFO(get_node()->get_logger(), "Mode switched to: %s", current_mode_.c_str());
-      
+
       // Reset flag after mode change
       both_pressed_flag_ = false;
     } else {
@@ -343,7 +344,7 @@ void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right
             RCLCPP_INFO(get_node()->get_logger(), "Right tact switch triggered!");
           }
           break;
-          
+
         case 2: // 10 -> 00 (left button only was pressed)
           if (!left_tact_long_press_triggered_) {
             std_msgs::msg::String trigger_msg;
@@ -354,7 +355,7 @@ void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right
           break;
       }
     }
-    
+
     // Reset long press flags when buttons are released
     if (prev_state == 1 || prev_state == 3) {  // Right button was pressed
       right_tact_long_press_triggered_ = false;
@@ -363,7 +364,7 @@ void JoystickController::handle_tact_switches(bool left_tact_pressed, bool right
       left_tact_long_press_triggered_ = false;
     }
   }
-  
+
   // Update previous state
   prev_left_tact_switch_ = left_tact_pressed;
   prev_right_tact_switch_ = right_tact_pressed;
