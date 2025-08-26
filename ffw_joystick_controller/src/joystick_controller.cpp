@@ -336,7 +336,7 @@ void JoystickController::handle_tact_switches(
     } else {
       // Individual button trigger - only if both were never pressed and not long press
       switch (prev_state) {
-        case 1: // 01 -> 00 (right button only was pressed)
+        case 1:  // 01 -> 00 (right button only was pressed)
           if (!right_tact_long_press_triggered_) {
             std_msgs::msg::String trigger_msg;
             trigger_msg.data = "right";
@@ -345,7 +345,7 @@ void JoystickController::handle_tact_switches(
           }
           break;
 
-        case 2: // 10 -> 00 (left button only was pressed)
+        case 2:  // 10 -> 00 (left button only was pressed)
           if (!left_tact_long_press_triggered_) {
             std_msgs::msg::String trigger_msg;
             trigger_msg.data = "left";
