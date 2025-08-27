@@ -7,6 +7,7 @@ Changelog for package ffw
 * Updated URDF for ZED camera
 * Fix velocity limit variable for ffw_swerve_drive_controller
 * Added tactile switch feature to joystick controller
+* Applied Dynamic Brake for Dynamixel Y
 * Contributors: Woojin Wie, Wonho Yun
 
 1.1.10 (2025-07-22)

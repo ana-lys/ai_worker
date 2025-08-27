@@ -5,6 +5,7 @@ Changelog for package ffw_description
 1.1.11 (2025-08-13)
 -------------------
 * Updated URDF for ZED camera
+* Applied Dynamic Brake for Dynamixel Y
 * Contributors: Woojin Wie
 
 1.1.10 (2025-07-22)
