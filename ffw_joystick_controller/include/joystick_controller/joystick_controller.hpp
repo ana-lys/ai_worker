@@ -114,8 +114,8 @@ protected:
     const std::string & sensor_name);
   void publish_cmd_vel(bool swerve_mode, const JoystickValues & joystick_values);
   void publish_joystick_values();
-  void handle_mode_switching(bool left_tact_pressed, bool right_tact_pressed);
-
+  void handle_tact_switches(
+    bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time);
   std::vector<std::string> sensorxel_joy_names_;
   std::vector<std::string> state_interface_types_ = {"JOYSTICK X VALUE", "JOYSTICK Y VALUE",
     "JOYSTICK TACT SWITCH"};
@@ -148,8 +148,18 @@ protected:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;
   std::string current_mode_ = "arm_control";
   bool prev_tact_switch_ = false;
+  bool prev_right_tact_switch_ = false;
+  bool prev_left_tact_switch_ = false;
+  bool both_pressed_flag_ = false;  // Flag to track if both buttons were pressed
+
+  // Long press functionality
+  rclcpp::Time left_tact_press_start_time_;
+  rclcpp::Time right_tact_press_start_time_;
+  bool left_tact_long_press_triggered_ = false;
+  bool right_tact_long_press_triggered_ = false;
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr tact_trigger_pub_;
 };
 
 }  // namespace joystick_controller

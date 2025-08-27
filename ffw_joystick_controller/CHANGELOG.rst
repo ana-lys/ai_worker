@@ -2,8 +2,13 @@
 Changelog for package ffw_joystick_controller
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.11 (2025-08-13)
+-------------------
+* Added tactile switch feature to joystick controller
+* Contributors: Wonho Yun
+
 1.1.10 (2025-07-22)
-------------------
+-------------------
 * None
 
 1.1.9 (2025-07-18)

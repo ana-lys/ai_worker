@@ -268,20 +268,107 @@ void JoystickController::publish_joystick_values()
   }
 }
 
-void JoystickController::handle_mode_switching(bool left_tact_pressed, bool right_tact_pressed)
+void JoystickController::handle_tact_switches(
+  bool left_tact_pressed, bool right_tact_pressed, const rclcpp::Time & current_time)
 {
-  bool both_tact_switch_pressed = left_tact_pressed && right_tact_pressed;
-  if (both_tact_switch_pressed && !prev_tact_switch_) {
-    std_msgs::msg::String mode_msg;
-    if (current_mode_ == constants::ARM_CONTROL_MODE) {
-      current_mode_ = constants::SWERVE_MODE;
-    } else {
-      current_mode_ = constants::ARM_CONTROL_MODE;
-    }
-    mode_msg.data = current_mode_;
-    mode_pub_->publish(mode_msg);
+  // Create current state as bit pattern: left=bit1, right=bit0
+  // 00 = neither pressed, 01 = right only, 10 = left only, 11 = both pressed
+  uint8_t current_state = (left_tact_pressed ? 2 : 0) | (right_tact_pressed ? 1 : 0);
+  uint8_t prev_state = (prev_left_tact_switch_ ? 2 : 0) | (prev_right_tact_switch_ ? 1 : 0);
+
+  // Handle left tact switch press start
+  if (left_tact_pressed && !prev_left_tact_switch_) {
+    left_tact_press_start_time_ = current_time;
+    left_tact_long_press_triggered_ = false;
   }
-  prev_tact_switch_ = both_tact_switch_pressed;
+
+  // Handle right tact switch press start
+  if (right_tact_pressed && !prev_right_tact_switch_) {
+    right_tact_press_start_time_ = current_time;
+    right_tact_long_press_triggered_ = false;
+  }
+
+  // Check for long press on left tact switch
+  if (left_tact_pressed && !left_tact_long_press_triggered_) {
+    auto press_duration = current_time - left_tact_press_start_time_;
+    if (press_duration.seconds() >= params_.long_press_duration) {
+      std_msgs::msg::String trigger_msg;
+      trigger_msg.data = "left_long_time";
+      tact_trigger_pub_->publish(trigger_msg);
+      RCLCPP_INFO(get_node()->get_logger(), "Left tact switch long press triggered!");
+      left_tact_long_press_triggered_ = true;
+    }
+  }
+
+  // Check for long press on right tact switch
+  if (right_tact_pressed && !right_tact_long_press_triggered_) {
+    auto press_duration = current_time - right_tact_press_start_time_;
+    if (press_duration.seconds() >= params_.long_press_duration) {
+      std_msgs::msg::String trigger_msg;
+      trigger_msg.data = "right_long_time";
+      tact_trigger_pub_->publish(trigger_msg);
+      RCLCPP_INFO(get_node()->get_logger(), "Right tact switch long press triggered!");
+      right_tact_long_press_triggered_ = true;
+    }
+  }
+
+  // Set flag when both buttons are pressed
+  if (current_state == 3) {
+    both_pressed_flag_ = true;
+  }
+
+  // Only trigger actions when reaching 00 state (no buttons pressed)
+  if (current_state == 0 && prev_state != 0) {
+    if (both_pressed_flag_) {
+      // Mode change - both buttons were pressed at some point
+      std_msgs::msg::String mode_msg;
+      if (current_mode_ == constants::ARM_CONTROL_MODE) {
+        current_mode_ = constants::SWERVE_MODE;
+      } else {
+        current_mode_ = constants::ARM_CONTROL_MODE;
+      }
+      mode_msg.data = current_mode_;
+      mode_pub_->publish(mode_msg);
+      RCLCPP_INFO(get_node()->get_logger(), "Mode switched to: %s", current_mode_.c_str());
+
+      // Reset flag after mode change
+      both_pressed_flag_ = false;
+    } else {
+      // Individual button trigger - only if both were never pressed and not long press
+      switch (prev_state) {
+        case 1:  // 01 -> 00 (right button only was pressed)
+          if (!right_tact_long_press_triggered_) {
+            std_msgs::msg::String trigger_msg;
+            trigger_msg.data = "right";
+            tact_trigger_pub_->publish(trigger_msg);
+            RCLCPP_INFO(get_node()->get_logger(), "Right tact switch triggered!");
+          }
+          break;
+
+        case 2:  // 10 -> 00 (left button only was pressed)
+          if (!left_tact_long_press_triggered_) {
+            std_msgs::msg::String trigger_msg;
+            trigger_msg.data = "left";
+            tact_trigger_pub_->publish(trigger_msg);
+            RCLCPP_INFO(get_node()->get_logger(), "Left tact switch triggered!");
+          }
+          break;
+      }
+    }
+
+    // Reset long press flags when buttons are released
+    if (prev_state == 1 || prev_state == 3) {  // Right button was pressed
+      right_tact_long_press_triggered_ = false;
+    }
+    if (prev_state == 2 || prev_state == 3) {  // Left button was pressed
+      left_tact_long_press_triggered_ = false;
+    }
+  }
+
+  // Update previous state
+  prev_left_tact_switch_ = left_tact_pressed;
+  prev_right_tact_switch_ = right_tact_pressed;
+  prev_tact_switch_ = (current_state == 3);
 }
 
 controller_interface::InterfaceConfiguration
@@ -334,7 +421,7 @@ void JoystickController::joint_states_callback(const sensor_msgs::msg::JointStat
 }
 
 controller_interface::return_type JoystickController::update(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+  const rclcpp::Time & time, const rclcpp::Duration & /*period*/)
 {
   if (!has_joint_states_) {
     return controller_interface::return_type::OK;
@@ -409,8 +496,8 @@ controller_interface::return_type JoystickController::update(
   // Publish joystick values
   publish_joystick_values();
 
-  // Handle mode switching
-  handle_mode_switching(left_tact_switch_pressed, right_tact_switch_pressed);
+  // Handle all tact switch functionality (mode switching and individual triggers)
+  handle_tact_switches(left_tact_switch_pressed, right_tact_switch_pressed, time);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "Joystick controller update completed");
 
@@ -525,6 +612,19 @@ controller_interface::CallbackReturn JoystickController::on_configure(
   mode_pub_ = get_node()->create_publisher<std_msgs::msg::String>(
     "/leader/joystick_controller_right/joystick_mode", 10);
   prev_tact_switch_ = false;
+
+  // Create publisher for right tact switch trigger
+  tact_trigger_pub_ = get_node()->create_publisher<std_msgs::msg::String>(
+    "/leader/joystick_controller/tact_trigger", 10);
+  prev_right_tact_switch_ = false;
+  prev_left_tact_switch_ = false;
+  both_pressed_flag_ = false;
+
+  // Initialize long press variables
+  left_tact_long_press_triggered_ = false;
+  right_tact_long_press_triggered_ = false;
+  left_tact_press_start_time_ = rclcpp::Time(0);
+  right_tact_press_start_time_ = rclcpp::Time(0);
 
   // Create publisher for cmd_vel
   cmd_vel_pub_ = get_node()->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);

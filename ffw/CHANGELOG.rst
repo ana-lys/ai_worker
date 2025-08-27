@@ -2,8 +2,16 @@
 Changelog for package ffw
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.1.10 (2025-07-22)
+1.1.11 (2025-08-13)
 -------------------
+* Updated URDF for ZED camera
+* Fix velocity limit variable for ffw_swerve_drive_controller
+* Added tactile switch feature to joystick controller
+* Applied Dynamic Brake for Dynamixel Y
+* Contributors: Woojin Wie, Wonho Yun
+
+1.1.10 (2025-07-22)
+--------------------
 * Added start/pause feature for ffw_joint_trajectory_command_broadcaster
 * Merged two joint_trajectory_command_broadcaster into one for ffw_lg2_leader
 * Added ffw_robot_manager package in meta package

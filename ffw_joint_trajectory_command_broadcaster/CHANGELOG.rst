@@ -2,8 +2,12 @@
 Changelog for package ffw_joint_trajectory_command_broadcaster
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.11 (2025-08-13)
+-------------------
+* None
+
 1.1.10 (2025-07-22)
-------------------
+-------------------
 * Added start/pause feature
 * Support multiple joint_trajectory publishers in one node
 * Contributors: Wonho Yun

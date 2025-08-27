@@ -2,8 +2,12 @@
 Changelog for package ffw_moveit_config
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.11 (2025-08-13)
+-------------------
+* None
+
 1.1.10 (2025-07-22)
-------------------
+-------------------
 * Modified MoveIt files
 * Contributors: Woojin Wie
 
