@@ -12,7 +12,7 @@
 class FfwArmTrajectoryCommander : public rclcpp::Node
 {
 public:
-    FfwArmTrajectoryCommander() : Node("dual_arm_trajectory_commander"),
+    FfwArmTrajectoryCommander() : Node("ffw_arm_trajectory_commander"),
                                    left_squeeze_value_(0.0),
                                    right_squeeze_value_(0.0),
                                    has_right_ik_solution_(false),
@@ -21,11 +21,22 @@ public:
         RCLCPP_INFO(this->get_logger(), "🚀 Dual-Arm Trajectory Commander starting...");
 
         // Parameters for trajectory timing
-        this->declare_parameter<double>("trajectory_duration", 0.1);  // 100ms for responsive control
+        this->declare_parameter<double>("trajectory_duration", 0.01);  // 10ms for responsive control
         this->declare_parameter<bool>("enable_gripper_control", true);
+
+        // Gripper mapping parameters
+        this->declare_parameter<double>("vr_squeeze_closed", 0.035);   // VR squeeze value when closed (fist)
+        this->declare_parameter<double>("vr_squeeze_open", 0.095);     // VR squeeze value when open (palm open)
+        this->declare_parameter<double>("gripper_pos_closed", 1.2);    // Gripper position when closed
+        this->declare_parameter<double>("gripper_pos_open", 0.0);      // Gripper position when open
 
         trajectory_duration_ = this->get_parameter("trajectory_duration").as_double();
         enable_gripper_control_ = this->get_parameter("enable_gripper_control").as_bool();
+
+        vr_squeeze_closed_ = this->get_parameter("vr_squeeze_closed").as_double();
+        vr_squeeze_open_ = this->get_parameter("vr_squeeze_open").as_double();
+        gripper_pos_closed_ = this->get_parameter("gripper_pos_closed").as_double();
+        gripper_pos_open_ = this->get_parameter("gripper_pos_open").as_double();
 
         RCLCPP_INFO(this->get_logger(), "Trajectory duration: %.3f seconds", trajectory_duration_);
         RCLCPP_INFO(this->get_logger(), "Gripper control: %s", enable_gripper_control_ ? "enabled" : "disabled");
@@ -69,6 +80,21 @@ private:
             return;
         }
 
+        // Validate joint names and positions have same size
+        if (msg->name.size() != msg->position.size()) {
+            RCLCPP_ERROR(this->get_logger(), "Right IK solution: joint names (%zu) and positions (%zu) size mismatch",
+                        msg->name.size(), msg->position.size());
+            return;
+        }
+
+        // Check for NaN or infinite values
+        for (const auto& pos : msg->position) {
+            if (!std::isfinite(pos)) {
+                RCLCPP_ERROR(this->get_logger(), "Right IK solution contains invalid joint position: %f", pos);
+                return;
+            }
+        }
+
         RCLCPP_DEBUG(this->get_logger(), "🎯 Received RIGHT arm IK solution with %zu joints", msg->position.size());
 
         // Store the latest IK solution
@@ -86,6 +112,21 @@ private:
             return;
         }
 
+        // Validate joint names and positions have same size
+        if (msg->name.size() != msg->position.size()) {
+            RCLCPP_ERROR(this->get_logger(), "Left IK solution: joint names (%zu) and positions (%zu) size mismatch",
+                        msg->name.size(), msg->position.size());
+            return;
+        }
+
+        // Check for NaN or infinite values
+        for (const auto& pos : msg->position) {
+            if (!std::isfinite(pos)) {
+                RCLCPP_ERROR(this->get_logger(), "Left IK solution contains invalid joint position: %f", pos);
+                return;
+            }
+        }
+
         RCLCPP_DEBUG(this->get_logger(), "🎯 Received LEFT arm IK solution with %zu joints", msg->position.size());
 
         // Store the latest IK solution
@@ -100,12 +141,8 @@ private:
     {
         left_squeeze_value_ = msg->data;
 
-        // Calculate corresponding gripper position
-        // VR squeeze: 0.035=closed (fist), 0.095=open (palm open)
-        // Gripper: 1.2=closed, 0=open
-        // Map squeeze value to gripper position (invert mapping)
-        double gripper_position = 1.2 - ((left_squeeze_value_ - 0.035) * 1.2 / (0.095 - 0.035));
-        gripper_position = std::max(0.0, std::min(1.2, gripper_position));
+        // Calculate corresponding gripper position using parameterized mapping
+        double gripper_position = calculateGripperPosition(left_squeeze_value_);
 
         RCLCPP_DEBUG(this->get_logger(), "🤏 Left squeeze: %.3f → gripper: %.3f", left_squeeze_value_, gripper_position);
 
@@ -119,12 +156,8 @@ private:
     {
         right_squeeze_value_ = msg->data;
 
-        // Calculate corresponding gripper position
-        // VR squeeze: 0.035=closed (fist), 0.095=open (palm open)
-        // Gripper: 1.2=closed, 0=open
-        // Map squeeze value to gripper position (invert mapping)
-        double gripper_position = 1.2 - ((right_squeeze_value_ - 0.035) * 1.2 / (0.095 - 0.035));
-        gripper_position = std::max(0.0, std::min(1.2, gripper_position));
+        // Calculate corresponding gripper position using parameterized mapping
+        double gripper_position = calculateGripperPosition(right_squeeze_value_);
 
         RCLCPP_DEBUG(this->get_logger(), "🤏 Right squeeze: %.3f → gripper: %.3f", right_squeeze_value_, gripper_position);
 
@@ -245,20 +278,34 @@ private:
 
     double calculateGripperPosition(double squeeze_value)
     {
-        // VR squeeze mapping to gripper position
-        // VR squeeze: 0.035=closed (fist), 0.095=open (palm open)
-        // Gripper: 1.2=closed, 0=open
-        // Invert the mapping since squeeze increases when closing, but gripper position decreases when opening
-        double gripper_position = 1.2 - ((squeeze_value - 0.035) * 1.2 / (0.095 - 0.035));
+        // Validate input range
+        if (squeeze_value < vr_squeeze_closed_ || squeeze_value > vr_squeeze_open_) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                "VR squeeze value %.3f out of expected range [%.3f, %.3f]",
+                                squeeze_value, vr_squeeze_closed_, vr_squeeze_open_);
+        }
+
+        // Normalize squeeze value to [0, 1] range
+        double normalized = (squeeze_value - vr_squeeze_closed_) / (vr_squeeze_open_ - vr_squeeze_closed_);
+        normalized = std::max(0.0, std::min(1.0, normalized));
+
+        // Map to gripper position (inverted: squeeze increases -> gripper closes)
+        double gripper_position = gripper_pos_closed_ - (normalized * (gripper_pos_closed_ - gripper_pos_open_));
 
         // Clamp to valid range
-        return std::max(0.0, std::min(1.2, gripper_position));
+        return std::max(gripper_pos_open_, std::min(gripper_pos_closed_, gripper_position));
     }
 
 private:
     // Parameters
     double trajectory_duration_;
     bool enable_gripper_control_;
+
+    // Gripper mapping parameters
+    double vr_squeeze_closed_;
+    double vr_squeeze_open_;
+    double gripper_pos_closed_;
+    double gripper_pos_open_;
 
     // ROS interfaces
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr right_ik_solution_sub_;

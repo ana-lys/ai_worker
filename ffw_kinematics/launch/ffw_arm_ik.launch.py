@@ -5,14 +5,14 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     """
-    Launch file for testing the dual arm IK solver and trajectory commander separately.
+    Launch file for testing the ffw arm IK solver and trajectory commander separately.
     This is useful for debugging and development.
     """
 
     # Launch arguments
     trajectory_duration_arg = DeclareLaunchArgument(
         'trajectory_duration',
-        default_value='0.1',
+        default_value='0.01',
         description='Duration for trajectory execution in seconds'
     )
 
@@ -22,27 +22,41 @@ def generate_launch_description():
         description='Enable gripper control via VR squeeze values'
     )
 
-    # Dual Arm IK Solver node only
-    dual_arm_ik_solver_node = Node(
+    max_joint_step_degrees_arg = DeclareLaunchArgument(
+        'max_joint_step_degrees',
+        default_value='20.0',
+        description='Maximum joint movement per IK cycle in degrees'
+    )
+
+    use_hardcoded_joint_limits_arg = DeclareLaunchArgument(
+        'use_hardcoded_joint_limits',
+        default_value='true',
+        description='Use hardcoded joint limits instead of URDF limits'
+    )
+
+    # ffw Arm IK Solver node only
+    ffw_arm_ik_solver_node = Node(
         package='ffw_kinematics',
-        executable='dual_arm_ik_solver',
-        name='dual_arm_ik_solver',
+        executable='ffw_arm_ik_solver',
+        name='ffw_arm_ik_solver',
         output='screen',
         parameters=[{
             'base_link': 'base_link',
             'arm_base_link': 'arm_base_link',
             'right_end_effector_link': 'arm_r_link7',
             'left_end_effector_link': 'arm_l_link7',
-            'right_target_pose_topic': '/right__poses',
-            'left_target_pose_topic': '/left_poses',
+            'right_target_pose_topic': '/vr_hand/right_wrist',
+            'left_target_pose_topic': '/vr_hand/left_wrist',
+            'max_joint_step_degrees': LaunchConfiguration('max_joint_step_degrees'),
+            'use_hardcoded_joint_limits': LaunchConfiguration('use_hardcoded_joint_limits'),
         }]
     )
 
-    # Dual Arm Trajectory Commander node only
-    dual_arm_trajectory_commander_node = Node(
+    # ffw Arm Trajectory Commander node only
+    ffw_arm_trajectory_commander_node = Node(
         package='ffw_kinematics',
-        executable='dual_arm_trajectory_commander',
-        name='dual_arm_trajectory_commander',
+        executable='ffw_arm_trajectory_commander',
+        name='ffw_arm_trajectory_commander',
         output='screen',
         parameters=[{
             'trajectory_duration': LaunchConfiguration('trajectory_duration'),
@@ -54,8 +68,10 @@ def generate_launch_description():
         # Launch arguments
         trajectory_duration_arg,
         enable_gripper_control_arg,
+        max_joint_step_degrees_arg,
+        use_hardcoded_joint_limits_arg,
 
         # Nodes
-        dual_arm_ik_solver_node,
-        dual_arm_trajectory_commander_node,
+        ffw_arm_ik_solver_node,
+        ffw_arm_trajectory_commander_node,
     ])

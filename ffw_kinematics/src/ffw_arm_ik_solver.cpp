@@ -23,7 +23,7 @@
 class FfwArmIKSolver : public rclcpp::Node
 {
 public:
-    FfwArmIKSolver() : Node("dual_arm_ik_solver"),
+    FfwArmIKSolver() : Node("ffw_arm_ik_solver"),
                         lift_joint_index_(-1),
                         setup_complete_(false),
                         has_joint_states_(false)
@@ -36,12 +36,35 @@ public:
         this->declare_parameter<std::string>("right_target_pose_topic", "/vr_hand/right_wrist");
         this->declare_parameter<std::string>("left_target_pose_topic", "/vr_hand/left_wrist");
 
+        // Coordinate transformation parameters (lift_joint origin from URDF)
+        this->declare_parameter<double>("lift_joint_x_offset", 0.0055);
+        this->declare_parameter<double>("lift_joint_y_offset", 0.0);
+        this->declare_parameter<double>("lift_joint_z_offset", 1.4316);
+
+        // IK solver parameters
+        this->declare_parameter<double>("max_joint_step_degrees", 20.0);
+        this->declare_parameter<int>("ik_max_iterations", 10000);
+        this->declare_parameter<double>("ik_tolerance", 1e-3);
+
+        // Joint limits parameters (can be overridden if needed)
+        this->declare_parameter<bool>("use_hardcoded_joint_limits", true);
+
         base_link_ = this->get_parameter("base_link").as_string();
         arm_base_link_ = this->get_parameter("arm_base_link").as_string();
         right_end_effector_link_ = this->get_parameter("right_end_effector_link").as_string();
         left_end_effector_link_ = this->get_parameter("left_end_effector_link").as_string();
         std::string right_target_pose_topic = this->get_parameter("right_target_pose_topic").as_string();
         std::string left_target_pose_topic = this->get_parameter("left_target_pose_topic").as_string();
+
+        lift_joint_x_offset_ = this->get_parameter("lift_joint_x_offset").as_double();
+        lift_joint_y_offset_ = this->get_parameter("lift_joint_y_offset").as_double();
+        lift_joint_z_offset_ = this->get_parameter("lift_joint_z_offset").as_double();
+
+        max_joint_step_degrees_ = this->get_parameter("max_joint_step_degrees").as_double();
+        ik_max_iterations_ = this->get_parameter("ik_max_iterations").as_int();
+        ik_tolerance_ = this->get_parameter("ik_tolerance").as_double();
+
+        use_hardcoded_joint_limits_ = this->get_parameter("use_hardcoded_joint_limits").as_bool();
 
         RCLCPP_INFO(this->get_logger(), "🚀 Dual-Arm IK Solver starting...");
         RCLCPP_INFO(this->get_logger(), "Base link: %s", base_link_.c_str());
@@ -206,7 +229,16 @@ private:
         }
     }
 
-    void setupJointLimits(const urdf::Model& /*model*/)
+    void setupJointLimits(const urdf::Model& model)
+    {
+        if (use_hardcoded_joint_limits_) {
+            setupHardcodedJointLimits();
+        } else {
+            setupUrdfJointLimits(model);
+        }
+    }
+
+    void setupHardcodedJointLimits()
     {
         // Setup right arm joint limits using hardcoded values
         unsigned int right_num_joints = right_chain_.getNrOfJoints();
@@ -251,21 +283,69 @@ private:
         RCLCPP_INFO(this->get_logger(), "✅ Joint limits configured for both arms using hardcoded values");
     }
 
+    void setupUrdfJointLimits(const urdf::Model& model)
+    {
+        RCLCPP_INFO(this->get_logger(), "🔒 Setting up joint limits from URDF...");
+
+        // Setup right arm joint limits from URDF
+        unsigned int right_num_joints = right_chain_.getNrOfJoints();
+        right_q_min_.resize(right_num_joints);
+        right_q_max_.resize(right_num_joints);
+
+        for (size_t i = 0; i < right_joint_names_.size() && i < right_num_joints; i++) {
+            auto joint = model.getJoint(right_joint_names_[i]);
+            if (joint && joint->limits) {
+                right_q_min_(i) = joint->limits->lower;
+                right_q_max_(i) = joint->limits->upper;
+                RCLCPP_INFO(this->get_logger(), "  Right %s: [%.3f, %.3f] rad",
+                           right_joint_names_[i].c_str(), right_q_min_(i), right_q_max_(i));
+            } else {
+                RCLCPP_WARN(this->get_logger(), "No limits found for right joint: %s", right_joint_names_[i].c_str());
+                right_q_min_(i) = -M_PI;
+                right_q_max_(i) = M_PI;
+            }
+        }
+
+        // Setup left arm joint limits from URDF
+        unsigned int left_num_joints = left_chain_.getNrOfJoints();
+        left_q_min_.resize(left_num_joints);
+        left_q_max_.resize(left_num_joints);
+
+        for (size_t i = 0; i < left_joint_names_.size() && i < left_num_joints; i++) {
+            auto joint = model.getJoint(left_joint_names_[i]);
+            if (joint && joint->limits) {
+                left_q_min_(i) = joint->limits->lower;
+                left_q_max_(i) = joint->limits->upper;
+                RCLCPP_INFO(this->get_logger(), "  Left %s: [%.3f, %.3f] rad",
+                           left_joint_names_[i].c_str(), left_q_min_(i), left_q_max_(i));
+            } else {
+                RCLCPP_WARN(this->get_logger(), "No limits found for left joint: %s", left_joint_names_[i].c_str());
+                left_q_min_(i) = -M_PI;
+                left_q_max_(i) = M_PI;
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "✅ Joint limits configured for both arms from URDF");
+    }
+
     void setupSolvers()
     {
         // Right arm solvers
         right_fk_solver_ = std::make_unique<KDL::ChainFkSolverPos_recursive>(right_chain_);
         right_ik_vel_solver_ = std::make_unique<KDL::ChainIkSolverVel_pinv>(right_chain_);
         right_ik_solver_jl_ = std::make_unique<KDL::ChainIkSolverPos_NR_JL>(
-            right_chain_, right_q_min_, right_q_max_, *right_fk_solver_, *right_ik_vel_solver_);
+            right_chain_, right_q_min_, right_q_max_, *right_fk_solver_, *right_ik_vel_solver_,
+            ik_max_iterations_, ik_tolerance_);
 
         // Left arm solvers
         left_fk_solver_ = std::make_unique<KDL::ChainFkSolverPos_recursive>(left_chain_);
         left_ik_vel_solver_ = std::make_unique<KDL::ChainIkSolverVel_pinv>(left_chain_);
         left_ik_solver_jl_ = std::make_unique<KDL::ChainIkSolverPos_NR_JL>(
-            left_chain_, left_q_min_, left_q_max_, *left_fk_solver_, *left_ik_vel_solver_);
+            left_chain_, left_q_min_, left_q_max_, *left_fk_solver_, *left_ik_vel_solver_,
+            ik_max_iterations_, ik_tolerance_);
 
         RCLCPP_INFO(this->get_logger(), "✅ IK solvers created for both arms");
+        RCLCPP_INFO(this->get_logger(), "   Max iterations: %d, Tolerance: %.2e", ik_max_iterations_, ik_tolerance_);
     }
 
     void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
@@ -369,6 +449,15 @@ private:
             return;
         }
 
+        // Validate pose input
+        if (!std::isfinite(msg->pose.position.x) || !std::isfinite(msg->pose.position.y) ||
+            !std::isfinite(msg->pose.position.z) || !std::isfinite(msg->pose.orientation.w) ||
+            !std::isfinite(msg->pose.orientation.x) || !std::isfinite(msg->pose.orientation.y) ||
+            !std::isfinite(msg->pose.orientation.z)) {
+            RCLCPP_ERROR(this->get_logger(), "Received invalid (non-finite) right target pose. Ignoring.");
+            return;
+        }
+
         RCLCPP_INFO(this->get_logger(), "🎯 Received RIGHT arm target pose (base_link frame):");
         RCLCPP_INFO(this->get_logger(), "   Position: x=%.3f, y=%.3f, z=%.3f",
                    msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
@@ -379,11 +468,10 @@ private:
         // Transform pose from base_link to arm_base_link frame
         geometry_msgs::msg::PoseStamped arm_base_pose = *msg;
 
-        // URDF lift_joint origin: xyz="0.0055 0 1.4316"
-        // Transform: base_link -> arm_base_link
-        arm_base_pose.pose.position.x -= 0.0055;  // lift_joint x offset
-        arm_base_pose.pose.position.y -= 0.0;     // lift_joint y offset
-        arm_base_pose.pose.position.z -= (1.4316 + lift_joint_position_); // lift_joint z offset + current lift position
+        // Transform: base_link -> arm_base_link using configured offsets
+        arm_base_pose.pose.position.x -= lift_joint_x_offset_;
+        arm_base_pose.pose.position.y -= lift_joint_y_offset_;
+        arm_base_pose.pose.position.z -= (lift_joint_z_offset_ + lift_joint_position_);
 
         RCLCPP_INFO(this->get_logger(), "🔄 Transformed to arm_base_link frame (RIGHT):");
         RCLCPP_INFO(this->get_logger(), "   Position: x=%.3f, y=%.3f, z=%.3f (lift: %.3f m)",
@@ -402,6 +490,15 @@ private:
             return;
         }
 
+        // Validate pose input
+        if (!std::isfinite(msg->pose.position.x) || !std::isfinite(msg->pose.position.y) ||
+            !std::isfinite(msg->pose.position.z) || !std::isfinite(msg->pose.orientation.w) ||
+            !std::isfinite(msg->pose.orientation.x) || !std::isfinite(msg->pose.orientation.y) ||
+            !std::isfinite(msg->pose.orientation.z)) {
+            RCLCPP_ERROR(this->get_logger(), "Received invalid (non-finite) left target pose. Ignoring.");
+            return;
+        }
+
         RCLCPP_INFO(this->get_logger(), "🎯 Received LEFT arm target pose (base_link frame):");
         RCLCPP_INFO(this->get_logger(), "   Position: x=%.3f, y=%.3f, z=%.3f",
                    msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
@@ -412,11 +509,10 @@ private:
         // Transform pose from base_link to arm_base_link frame
         geometry_msgs::msg::PoseStamped arm_base_pose = *msg;
 
-        // URDF lift_joint origin: xyz="0.0055 0 1.4316"
-        // Transform: base_link -> arm_base_link
-        arm_base_pose.pose.position.x -= 0.0055;  // lift_joint x offset
-        arm_base_pose.pose.position.y -= 0.0;     // lift_joint y offset
-        arm_base_pose.pose.position.z -= (1.4316 + lift_joint_position_); // lift_joint z offset + current lift position
+        // Transform: base_link -> arm_base_link using configured offsets
+        arm_base_pose.pose.position.x -= lift_joint_x_offset_;
+        arm_base_pose.pose.position.y -= lift_joint_y_offset_;
+        arm_base_pose.pose.position.z -= (lift_joint_z_offset_ + lift_joint_position_);
 
         RCLCPP_INFO(this->get_logger(), "🔄 Transformed to arm_base_link frame (LEFT):");
         RCLCPP_INFO(this->get_logger(), "   Position: x=%.3f, y=%.3f, z=%.3f (lift: %.3f m)",
@@ -529,8 +625,8 @@ private:
                 return;
             }
 
-            // Clamp joint movement to max step (e.g., 20 degrees per cycle)
-            const double max_joint_step = 20.0 * M_PI / 180.0; // 20 degrees in radians
+            // Clamp joint movement to max step for safety
+            const double max_joint_step = max_joint_step_degrees_ * M_PI / 180.0; // Convert degrees to radians
             bool clamped = false;
             for (unsigned int i = 0; i < q_result.rows(); i++) {
                 double delta = q_result(i) - (*current_positions_ptr)[i];
@@ -543,7 +639,8 @@ private:
                 }
             }
             if (clamped) {
-                RCLCPP_WARN(this->get_logger(), "⚠️ %s arm joint movement clamped to max %.1f deg per cycle for safety.", arm.c_str(), max_joint_step * 180.0 / M_PI);
+                RCLCPP_WARN(this->get_logger(), "⚠️ %s arm joint movement clamped to max %.1f deg per cycle for safety.",
+                           arm.c_str(), max_joint_step_degrees_);
             }
 
             RCLCPP_INFO(this->get_logger(), "✅ %s arm IK solution found!", arm.c_str());
@@ -656,6 +753,17 @@ private:
     std::string arm_base_link_;
     std::string right_end_effector_link_;
     std::string left_end_effector_link_;
+
+    // Coordinate transformation parameters
+    double lift_joint_x_offset_;
+    double lift_joint_y_offset_;
+    double lift_joint_z_offset_;
+
+    // IK solver parameters
+    double max_joint_step_degrees_;
+    int ik_max_iterations_;
+    double ik_tolerance_;
+    bool use_hardcoded_joint_limits_;
 
     // ROS interfaces
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_description_sub_;
