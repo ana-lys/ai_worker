@@ -19,7 +19,7 @@ public:
         right_hand_subscription_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/vr_hand/right_poses", 10,
             std::bind(&VRHandPoseTransformer::right_hand_pose_callback, this, std::placeholders::_1));
-            
+
         left_hand_subscription_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
             "/vr_hand/left_poses", 10,
             std::bind(&VRHandPoseTransformer::left_hand_pose_callback, this, std::placeholders::_1));
@@ -27,7 +27,7 @@ public:
         // Publishers for target poses to IK solvers
         right_target_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "/right_target_pose", 10);
-            
+
         left_target_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
             "/left_target_pose", 10);
 
@@ -39,7 +39,7 @@ private:
     {
         transform_and_publish_pose(msg, right_target_pose_pub_, "right");
     }
-    
+
     void left_hand_pose_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
     {
         transform_and_publish_pose(msg, left_target_pose_pub_, "left");
@@ -99,7 +99,7 @@ private:
         base_position.x() -= zedm_to_base_offset.x();
         base_position.y() -= zedm_to_base_offset.y();
         base_position.z() -= zedm_to_base_offset.z();
-        
+
         RCLCPP_INFO(this->get_logger(), "[DEBUG] %s VR raw pos: [%.4f, %.4f, %.4f]  ROS pos: [%.4f, %.4f, %.4f]  Offset: [%.4f, %.4f, %.4f]  base_link pos: [%.4f, %.4f, %.4f]",
             hand_name.c_str(),
             vr_position.x(), vr_position.y(), vr_position.z(),
@@ -141,7 +141,7 @@ private:
         target_pose.pose.orientation.y = arm_quaternion.y();
         target_pose.pose.orientation.z = arm_quaternion.z();
         target_pose.pose.orientation.w = arm_quaternion.w();
-        
+
         // Publish target pose
         publisher->publish(target_pose);
 

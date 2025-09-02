@@ -52,6 +52,40 @@ ament_target_dependencies(realtime_ik_solver_jl
   urdf
 )
 
+# Dual Arm IK Solver executable
+add_executable(dual_arm_ik_solver src/dual_arm_ik_solver.cpp)
+
+target_include_directories(dual_arm_ik_solver PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
+target_compile_features(dual_arm_ik_solver PUBLIC c_std_99 cxx_std_17)
+
+ament_target_dependencies(dual_arm_ik_solver
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  std_msgs
+  kdl_parser
+  urdf
+)
+
+# Dual Arm Trajectory Commander executable
+add_executable(dual_arm_trajectory_commander src/dual_arm_trajectory_commander.cpp)
+
+target_include_directories(dual_arm_trajectory_commander PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
+target_compile_features(dual_arm_trajectory_commander PUBLIC c_std_99 cxx_std_17)
+
+ament_target_dependencies(dual_arm_trajectory_commander
+  rclcpp
+  sensor_msgs
+  std_msgs
+  trajectory_msgs
+)
+
 # Pinocchio IK Solver executable
 add_executable(pinocchio_ik_solver src/pinocchio_ik_solver.cpp)
 
@@ -92,7 +126,7 @@ target_link_libraries(pinocchio_ik_solver pinocchio::pinocchio)
 target_link_libraries(vr_hand_pose_transformer Eigen3::Eigen)
 
 # Install C++ executables
-install(TARGETS target_pose_publisher realtime_ik_solver_jl pinocchio_ik_solver vr_hand_pose_transformer
+install(TARGETS target_pose_publisher realtime_ik_solver_jl dual_arm_ik_solver dual_arm_trajectory_commander pinocchio_ik_solver vr_hand_pose_transformer
   DESTINATION lib/${PROJECT_NAME})
 
 
