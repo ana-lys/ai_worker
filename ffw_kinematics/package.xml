@@ -4,8 +4,9 @@
   <name>ffw_kinematics</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="ywh@robotis.com">root</maintainer>
+  <maintainer email="pyo@robotis.com">Pyo</maintainer>
   <license>TODO: License declaration</license>
+  <author email="ywh@robotis.com">Wonho Yun</author>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

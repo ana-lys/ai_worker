@@ -1,25 +1,32 @@
+#!/usr/bin/env python3
+#
+# Copyright 2025 ROBOTIS CO., LTD.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Authors: Wonho Yun
+
 from launch import LaunchDescription
-from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
 
 def generate_launch_description():
-    """
-    Launch file for testing the ffw arm IK solver and trajectory commander separately.
-    This is useful for debugging and development.
-    """
-
-    # Launch arguments
     trajectory_duration_arg = DeclareLaunchArgument(
         'trajectory_duration',
         default_value='0.01',
         description='Duration for trajectory execution in seconds'
-    )
-
-    enable_gripper_control_arg = DeclareLaunchArgument(
-        'enable_gripper_control',
-        default_value='true',
-        description='Enable gripper control via VR squeeze values'
     )
 
     max_joint_step_degrees_arg = DeclareLaunchArgument(
@@ -60,18 +67,13 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'trajectory_duration': LaunchConfiguration('trajectory_duration'),
-            'enable_gripper_control': LaunchConfiguration('enable_gripper_control'),
         }]
     )
 
     return LaunchDescription([
-        # Launch arguments
         trajectory_duration_arg,
-        enable_gripper_control_arg,
         max_joint_step_degrees_arg,
         use_hardcoded_joint_limits_arg,
-
-        # Nodes
         ffw_arm_ik_solver_node,
         ffw_arm_trajectory_commander_node,
     ])
