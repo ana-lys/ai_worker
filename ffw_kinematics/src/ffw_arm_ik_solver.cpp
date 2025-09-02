@@ -23,7 +23,6 @@ FfwArmIKSolver::FfwArmIKSolver()
   setup_complete_(false),
   has_joint_states_(false)
 {
-        // Parameters
   this->declare_parameter<std::string>("base_link", "base_link");
   this->declare_parameter<std::string>("arm_base_link", "arm_base_link");
   this->declare_parameter<std::string>("right_end_effector_link", "arm_r_link7");
@@ -31,7 +30,6 @@ FfwArmIKSolver::FfwArmIKSolver()
   this->declare_parameter<std::string>("right_target_pose_topic", "/vr_hand/right_wrist");
   this->declare_parameter<std::string>("left_target_pose_topic", "/vr_hand/left_wrist");
 
-        // Output topic parameters
   this->declare_parameter<std::string>("right_ik_solution_topic", "/right_arm_ik_solution");
   this->declare_parameter<std::string>("left_ik_solution_topic", "/left_arm_ik_solution");
   this->declare_parameter<std::string>("right_current_pose_topic",
@@ -39,17 +37,17 @@ FfwArmIKSolver::FfwArmIKSolver()
   this->declare_parameter<std::string>("left_current_pose_topic",
     "/left_current_end_effector_pose");
 
-        // Coordinate transformation parameters (lift_joint origin from URDF)
+  // Coordinate transformation parameters (lift_joint origin from URDF)
   this->declare_parameter<double>("lift_joint_x_offset", 0.0055);
   this->declare_parameter<double>("lift_joint_y_offset", 0.0);
   this->declare_parameter<double>("lift_joint_z_offset", 1.4316);
 
-        // IK solver parameters
+  // IK solver parameters
   this->declare_parameter<double>("max_joint_step_degrees", 20.0);
   this->declare_parameter<int>("ik_max_iterations", 10000);
   this->declare_parameter<double>("ik_tolerance", 1e-3);
 
-        // Joint limits parameters (can be overridden if needed)
+  // Joint limits parameters (can be overridden if needed)
   this->declare_parameter<bool>("use_hardcoded_joint_limits", true);
 
   base_link_ = this->get_parameter("base_link").as_string();
@@ -81,44 +79,38 @@ FfwArmIKSolver::FfwArmIKSolver()
   RCLCPP_INFO(this->get_logger(), "Right end effector link: %s", right_end_effector_link_.c_str());
   RCLCPP_INFO(this->get_logger(), "Left end effector link: %s", left_end_effector_link_.c_str());
 
-        // Subscribers
   robot_description_sub_ = this->create_subscription<std_msgs::msg::String>(
-            "/robot_description", rclcpp::QoS(1).transient_local(),
-            std::bind(&FfwArmIKSolver::robotDescriptionCallback, this, std::placeholders::_1));
+    "/robot_description", rclcpp::QoS(1).transient_local(),
+    std::bind(&FfwArmIKSolver::robotDescriptionCallback, this, std::placeholders::_1));
 
   joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/joint_states", 10,
-            std::bind(&FfwArmIKSolver::jointStateCallback, this, std::placeholders::_1));
+    "/joint_states", 10,
+    std::bind(&FfwArmIKSolver::jointStateCallback, this, std::placeholders::_1));
 
-        // Subscribe to target pose topics for IK solving
   right_target_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            right_target_pose_topic, 10,
-            std::bind(&FfwArmIKSolver::rightTargetPoseCallback, this, std::placeholders::_1));
+    right_target_pose_topic, 10,
+    std::bind(&FfwArmIKSolver::rightTargetPoseCallback, this, std::placeholders::_1));
 
   left_target_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            left_target_pose_topic, 10,
-            std::bind(&FfwArmIKSolver::leftTargetPoseCallback, this, std::placeholders::_1));
+    left_target_pose_topic, 10,
+    std::bind(&FfwArmIKSolver::leftTargetPoseCallback, this, std::placeholders::_1));
 
-        // Publishers for IK solutions (joint trajectories)
   right_joint_solution_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-            right_ik_solution_topic, 10);
+    right_ik_solution_topic, 10);
 
   left_joint_solution_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-            left_ik_solution_topic, 10);
+    left_ik_solution_topic, 10);
 
-        // Publishers for current poses (for debugging/visualization)
   right_current_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
-            right_current_pose_topic, 10);
+    right_current_pose_topic, 10);
 
   left_current_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
-            left_current_pose_topic, 10);
+    left_current_pose_topic, 10);
 
-        // Timer for publishing current poses at 10Hz
   pose_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(100),
-            std::bind(&FfwArmIKSolver::publishCurrentPoses, this));
+    std::chrono::milliseconds(100),
+    std::bind(&FfwArmIKSolver::publishCurrentPoses, this));
 
-        // Try to get robot_description from parameter server
   auto param_client = std::make_shared<rclcpp::SyncParametersClient>(this,
     "/robot_state_publisher");
 
@@ -166,28 +158,28 @@ void FfwArmIKSolver::processRobotDescription(const std::string & robot_descripti
     robot_description.size());
 
   try {
-            // Parse URDF
+    // Parse URDF
     urdf::Model model;
     if (!model.initString(robot_description)) {
       RCLCPP_ERROR(this->get_logger(), "Failed to parse URDF");
       return;
     }
 
-            // Build KDL tree
+    // Build KDL tree
     KDL::Tree kdl_tree;
     if (!kdl_parser::treeFromString(robot_description, kdl_tree)) {
       RCLCPP_ERROR(this->get_logger(), "Failed to construct KDL tree");
       return;
     }
 
-            // Extract right arm chain
+    // Extract right arm chain
     if (!kdl_tree.getChain(arm_base_link_, right_end_effector_link_, right_chain_)) {
       RCLCPP_ERROR(this->get_logger(), "Failed to get right arm chain from %s to %s",
                            arm_base_link_.c_str(), right_end_effector_link_.c_str());
       return;
     }
 
-            // Extract left arm chain
+    // Extract left arm chain
     if (!kdl_tree.getChain(arm_base_link_, left_end_effector_link_, left_chain_)) {
       RCLCPP_ERROR(this->get_logger(), "Failed to get left arm chain from %s to %s",
                            arm_base_link_.c_str(), left_end_effector_link_.c_str());
@@ -200,13 +192,13 @@ void FfwArmIKSolver::processRobotDescription(const std::string & robot_descripti
     RCLCPP_INFO(this->get_logger(), "   Left arm: %d joints, %d segments",
                        left_chain_.getNrOfJoints(), left_chain_.getNrOfSegments());
 
-            // Extract joint names
+    // Extract joint names
     extractJointNames();
 
-            // Setup joint limits
+    // Setup joint limits
     setupJointLimits(model);
 
-            // Create solvers for both arms
+    // Create solvers for both arms
     setupSolvers();
 
     setup_complete_ = true;
@@ -218,7 +210,7 @@ void FfwArmIKSolver::processRobotDescription(const std::string & robot_descripti
 
 void FfwArmIKSolver::extractJointNames()
 {
-        // Extract right arm joint names
+  // Extract right arm joint names
   right_joint_names_.clear();
   for (unsigned int i = 0; i < right_chain_.getNrOfSegments(); i++) {
     const KDL::Segment & segment = right_chain_.getSegment(i);
@@ -227,7 +219,7 @@ void FfwArmIKSolver::extractJointNames()
     }
   }
 
-        // Extract left arm joint names
+  // Extract left arm joint names
   left_joint_names_.clear();
   for (unsigned int i = 0; i < left_chain_.getNrOfSegments(); i++) {
     const KDL::Segment & segment = left_chain_.getSegment(i);
@@ -258,18 +250,18 @@ void FfwArmIKSolver::setupJointLimits(const urdf::Model & model)
 
 void FfwArmIKSolver::setupHardcodedJointLimits()
 {
-        // Setup right arm joint limits using hardcoded values
+  // Setup right arm joint limits using hardcoded values
   unsigned int right_num_joints = right_chain_.getNrOfJoints();
   right_q_min_.resize(right_num_joints);
   right_q_max_.resize(right_num_joints);
 
   RCLCPP_INFO(this->get_logger(), "🔒 Setting up right arm joint limits with hardcoded values:");
 
-        // Check if we have the expected number of joints
+  // Check if we have the expected number of joints
   if (right_num_joints != right_min_joint_positions_.size()) {
     RCLCPP_WARN(this->get_logger(),
       "Right arm joint count mismatch: chain has %d joints, hardcoded limits for %zu",
-                       right_num_joints, right_min_joint_positions_.size());
+      right_num_joints, right_min_joint_positions_.size());
   } else {
     for (unsigned int i = 0; i < right_num_joints; i++) {
       right_q_min_(i) = right_min_joint_positions_[i];
@@ -279,24 +271,24 @@ void FfwArmIKSolver::setupHardcodedJointLimits()
     }
   }
 
-        // Setup left arm joint limits using hardcoded values
+  // Setup left arm joint limits using hardcoded values
   unsigned int left_num_joints = left_chain_.getNrOfJoints();
   left_q_min_.resize(left_num_joints);
   left_q_max_.resize(left_num_joints);
 
   RCLCPP_INFO(this->get_logger(), "🔒 Setting up left arm joint limits with hardcoded values:");
 
-        // Check if we have the expected number of joints
+  // Check if we have the expected number of joints
   if (left_num_joints != left_min_joint_positions_.size()) {
     RCLCPP_WARN(this->get_logger(),
       "Left arm joint count mismatch: chain has %d joints, hardcoded limits for %zu",
-                       left_num_joints, left_min_joint_positions_.size());
+      left_num_joints, left_min_joint_positions_.size());
   } else {
     for (unsigned int i = 0; i < left_num_joints; i++) {
       left_q_min_(i) = left_min_joint_positions_[i];
       left_q_max_(i) = left_max_joint_positions_[i];
       RCLCPP_INFO(this->get_logger(), "  Joint %d: [%.3f, %.3f] rad",
-                           i, left_q_min_(i), left_q_max_(i));
+      i, left_q_min_(i), left_q_max_(i));
     }
   }
 
@@ -308,7 +300,7 @@ void FfwArmIKSolver::setupUrdfJointLimits(const urdf::Model & model)
 {
   RCLCPP_INFO(this->get_logger(), "🔒 Setting up joint limits from URDF...");
 
-        // Setup right arm joint limits from URDF
+  // Setup right arm joint limits from URDF
   unsigned int right_num_joints = right_chain_.getNrOfJoints();
   right_q_min_.resize(right_num_joints);
   right_q_max_.resize(right_num_joints);
@@ -328,7 +320,6 @@ void FfwArmIKSolver::setupUrdfJointLimits(const urdf::Model & model)
     }
   }
 
-        // Setup left arm joint limits from URDF
   unsigned int left_num_joints = left_chain_.getNrOfJoints();
   left_q_min_.resize(left_num_joints);
   left_q_max_.resize(left_num_joints);
@@ -353,19 +344,19 @@ void FfwArmIKSolver::setupUrdfJointLimits(const urdf::Model & model)
 
 void FfwArmIKSolver::setupSolvers()
 {
-        // Right arm solvers
+  // Right arm solvers
   right_fk_solver_ = std::make_unique<KDL::ChainFkSolverPos_recursive>(right_chain_);
   right_ik_vel_solver_ = std::make_unique<KDL::ChainIkSolverVel_pinv>(right_chain_);
   right_ik_solver_jl_ = std::make_unique<KDL::ChainIkSolverPos_NR_JL>(
-            right_chain_, right_q_min_, right_q_max_, *right_fk_solver_, *right_ik_vel_solver_,
-            ik_max_iterations_, ik_tolerance_);
+    right_chain_, right_q_min_, right_q_max_, *right_fk_solver_, *right_ik_vel_solver_,
+    ik_max_iterations_, ik_tolerance_);
 
-        // Left arm solvers
+  // Left arm solvers
   left_fk_solver_ = std::make_unique<KDL::ChainFkSolverPos_recursive>(left_chain_);
   left_ik_vel_solver_ = std::make_unique<KDL::ChainIkSolverVel_pinv>(left_chain_);
   left_ik_solver_jl_ = std::make_unique<KDL::ChainIkSolverPos_NR_JL>(
-            left_chain_, left_q_min_, left_q_max_, *left_fk_solver_, *left_ik_vel_solver_,
-            ik_max_iterations_, ik_tolerance_);
+    left_chain_, left_q_min_, left_q_max_, *left_fk_solver_, *left_ik_vel_solver_,
+    ik_max_iterations_, ik_tolerance_);
 
   RCLCPP_INFO(this->get_logger(), "✅ IK solvers created for both arms");
   RCLCPP_INFO(this->get_logger(), "   Max iterations: %d, Tolerance: %.2e", ik_max_iterations_,
@@ -378,7 +369,7 @@ void FfwArmIKSolver::jointStateCallback(const sensor_msgs::msg::JointState::Shar
     return;
   }
 
-        // Extract current lift_joint position for coordinate transformation
+  // Extract current lift_joint position for coordinate transformation
   lift_joint_position_ = 0.0;
   for (size_t i = 0; i < msg->name.size(); i++) {
     if (msg->name[i] == "lift_joint") {
@@ -387,7 +378,7 @@ void FfwArmIKSolver::jointStateCallback(const sensor_msgs::msg::JointState::Shar
     }
   }
 
-        // Extract right arm joint positions
+  // Extract right arm joint positions
   right_current_joint_positions_.assign(right_joint_names_.size(), 0.0);
   bool right_all_joints_found = true;
   for (size_t i = 0; i < right_joint_names_.size(); i++) {
@@ -398,12 +389,12 @@ void FfwArmIKSolver::jointStateCallback(const sensor_msgs::msg::JointState::Shar
     } else {
       right_all_joints_found = false;
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                                    "Joint %s not found in joint_states",
-        right_joint_names_[i].c_str());
+      "Joint %s not found in joint_states",
+      right_joint_names_[i].c_str());
     }
   }
 
-        // Extract left arm joint positions
+  // Extract left arm joint positions
   left_current_joint_positions_.assign(left_joint_names_.size(), 0.0);
   bool left_all_joints_found = true;
   for (size_t i = 0; i < left_joint_names_.size(); i++) {
@@ -430,7 +421,7 @@ void FfwArmIKSolver::checkCurrentJointLimits()
 {
   RCLCPP_INFO(this->get_logger(), "🔍 Checking current joint positions against limits:");
 
-        // Check right arm joints
+  // Check right arm joints
   bool right_all_within_limits = true;
   RCLCPP_INFO(this->get_logger(), "Right arm joints:");
   for (size_t i = 0; i < right_current_joint_positions_.size(); i++) {
@@ -445,7 +436,7 @@ void FfwArmIKSolver::checkCurrentJointLimits()
                        within_limits ? "✅" : "❌");
   }
 
-        // Check left arm joints
+  // Check left arm joints
   bool left_all_within_limits = true;
   RCLCPP_INFO(this->get_logger(), "Left arm joints:");
   for (size_t i = 0; i < left_current_joint_positions_.size(); i++) {
@@ -490,10 +481,10 @@ void FfwArmIKSolver::rightTargetPoseCallback(const geometry_msgs::msg::PoseStamp
   RCLCPP_INFO(this->get_logger(), "Position: x=%.3f, y=%.3f, z=%.3f",
     msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
 
-    // Transform pose from base_link to arm_base_link frame
+  // Transform pose from base_link to arm_base_link frame
   geometry_msgs::msg::PoseStamped arm_base_pose = *msg;
 
-        // Transform: base_link -> arm_base_link using configured offsets
+  // Transform: base_link -> arm_base_link using configured offsets
   arm_base_pose.pose.position.x -= lift_joint_x_offset_;
   arm_base_pose.pose.position.y -= lift_joint_y_offset_;
   arm_base_pose.pose.position.z -= (lift_joint_z_offset_ + lift_joint_position_);
@@ -503,7 +494,7 @@ void FfwArmIKSolver::rightTargetPoseCallback(const geometry_msgs::msg::PoseStamp
                    arm_base_pose.pose.position.x, arm_base_pose.pose.position.y,
                    arm_base_pose.pose.position.z, lift_joint_position_);
 
-        // Solve IK for the transformed target
+  // Solve IK for the transformed target
   solveIK(arm_base_pose, "right");
 }
 
@@ -529,13 +520,10 @@ void FfwArmIKSolver::leftTargetPoseCallback(const geometry_msgs::msg::PoseStampe
   RCLCPP_INFO(this->get_logger(), "   Position: x=%.3f, y=%.3f, z=%.3f",
                    msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
 
-        // VR Publisher에서 이미 모든 좌표 변환을 완료하고 base_link frame으로 보냄
-        // 여기서는 base_link → arm_base_link 변환만 수행
-
-        // Transform pose from base_link to arm_base_link frame
+  // Transform pose from base_link to arm_base_link frame
   geometry_msgs::msg::PoseStamped arm_base_pose = *msg;
 
-        // Transform: base_link -> arm_base_link using configured offsets
+  // Transform: base_link -> arm_base_link using configured offsets
   arm_base_pose.pose.position.x -= lift_joint_x_offset_;
   arm_base_pose.pose.position.y -= lift_joint_y_offset_;
   arm_base_pose.pose.position.z -= (lift_joint_z_offset_ + lift_joint_position_);
@@ -545,7 +533,7 @@ void FfwArmIKSolver::leftTargetPoseCallback(const geometry_msgs::msg::PoseStampe
                    arm_base_pose.pose.position.x, arm_base_pose.pose.position.y,
                    arm_base_pose.pose.position.z, lift_joint_position_);
 
-        // Solve IK for the transformed target
+  // Solve IK for the transformed target
   solveIK(arm_base_pose, "left");
 }
 void FfwArmIKSolver::solveIK(
@@ -554,13 +542,13 @@ void FfwArmIKSolver::solveIK(
 {
   RCLCPP_INFO(this->get_logger(), "🔧 Solving %s arm IK with Joint Limits...", arm.c_str());
 
-        // Convert target pose to KDL Frame
+  // Convert target pose to KDL Frame
   KDL::Frame target_frame;
   target_frame.p.x(target_pose.pose.position.x);
   target_frame.p.y(target_pose.pose.position.y);
   target_frame.p.z(target_pose.pose.position.z);
 
-        // Convert quaternion to rotation matrix
+  // Convert quaternion to rotation matrix
   KDL::Rotation rot = KDL::Rotation::Quaternion(
             target_pose.pose.orientation.x,
             target_pose.pose.orientation.y,
@@ -569,7 +557,7 @@ void FfwArmIKSolver::solveIK(
   );
   target_frame.M = rot;
 
-        // Select arm-specific variables
+  // Select arm-specific variables
   KDL::Chain * chain_ptr;
   std::unique_ptr<KDL::ChainIkSolverPos_NR_JL> * ik_solver_ptr;
   std::vector<std::string> * joint_names_ptr;
@@ -596,13 +584,13 @@ void FfwArmIKSolver::solveIK(
     publisher_ptr = &left_joint_solution_pub_;
   }
 
-        // Get current arm joint positions as initial guess
+  // Get current arm joint positions as initial guess
   KDL::JntArray q_init(chain_ptr->getNrOfJoints());
   for (size_t i = 0; i < current_positions_ptr->size(); i++) {
     q_init(i) = (*current_positions_ptr)[i];
   }
 
-        // Clamp initial guess to joint limits
+  // Clamp initial guess to joint limits
   for (unsigned int i = 0; i < q_init.rows(); i++) {
     if (q_init(i) < (*q_min_ptr)(i)) {
       q_init(i) = (*q_min_ptr)(i);
@@ -619,13 +607,13 @@ void FfwArmIKSolver::solveIK(
   KDL::JntArray q_result(chain_ptr->getNrOfJoints());
   int ik_result = (*ik_solver_ptr)->CartToJnt(q_init, target_frame, q_result);
 
-        // If IK failed, try with different initial guesses within limits
+  // If IK failed, try with different initial guesses within limits
   if (ik_result < 0) {
     RCLCPP_WARN(this->get_logger(),
       "%s arm IK failed with current guess (error: %d), trying alternatives...", arm.c_str(),
       ik_result);
 
-            // Try with center of joint limits as initial guess
+    // Try with center of joint limits as initial guess
     KDL::JntArray q_center(chain_ptr->getNrOfJoints());
     for (unsigned int i = 0; i < chain_ptr->getNrOfJoints(); i++) {
       q_center(i) = ((*q_min_ptr)(i) + (*q_max_ptr)(i)) / 2.0;
@@ -633,7 +621,7 @@ void FfwArmIKSolver::solveIK(
     ik_result = (*ik_solver_ptr)->CartToJnt(q_center, target_frame, q_result);
 
     if (ik_result < 0) {
-                // Try with home position (zeros)
+      // Try with home position (zeros)
       KDL::JntArray q_home(chain_ptr->getNrOfJoints());
       for (unsigned int i = 0; i < q_home.rows(); i++) {
         q_home(i) = 0.0;
@@ -643,7 +631,7 @@ void FfwArmIKSolver::solveIK(
   }
 
   if (ik_result >= 0) {
-            // Verify all joints are within limits
+    // Verify all joints are within limits
     bool all_within_limits = true;
     for (unsigned int i = 0; i < q_result.rows(); i++) {
       if (q_result(i) < (*q_min_ptr)(i) || q_result(i) > (*q_max_ptr)(i)) {
@@ -660,7 +648,7 @@ void FfwArmIKSolver::solveIK(
       return;
     }
 
-            // Clamp joint movement to max step for safety
+    // Clamp joint movement to max step for safety
     const double max_joint_step = max_joint_step_degrees_ * M_PI / 180.0;
     bool clamped = false;
     for (unsigned int i = 0; i < q_result.rows(); i++) {
@@ -682,13 +670,13 @@ void FfwArmIKSolver::solveIK(
 
     RCLCPP_INFO(this->get_logger(), "✅ %s arm IK solution found!", arm.c_str());
 
-            // Create and publish JointTrajectory message with the solution
+    // Create and publish JointTrajectory message with the solution
     auto joint_trajectory = trajectory_msgs::msg::JointTrajectory();
-            // joint_trajectory.header.stamp = this->get_clock()->now();
+    // joint_trajectory.header.stamp = this->get_clock()->now();
     joint_trajectory.header.frame_id = "base_link";
     joint_trajectory.joint_names = *joint_names_ptr;
 
-            // Create trajectory point
+    // Create trajectory point
     auto point = trajectory_msgs::msg::JointTrajectoryPoint();
     point.positions.resize(q_result.rows());
     point.velocities.resize(q_result.rows(), 0.0);
@@ -698,13 +686,13 @@ void FfwArmIKSolver::solveIK(
       point.positions[i] = q_result(i);
     }
 
-            // Set time from start (즉시 실행)
+    // Set time from start (즉시 실행)
     point.time_from_start = rclcpp::Duration::from_nanoseconds(0);
     joint_trajectory.points.push_back(point);
 
     (*publisher_ptr)->publish(joint_trajectory);
 
-            // Log joint solution
+    // Log joint solution
     std::string solution_log = "🎯 " + arm + " arm joint solution: [";
     for (size_t i = 0; i < joint_names_ptr->size(); i++) {
       solution_log += (*joint_names_ptr)[i] + "=" + std::to_string(q_result(i));
@@ -714,7 +702,7 @@ void FfwArmIKSolver::solveIK(
     RCLCPP_INFO(this->get_logger(), "%s", solution_log.c_str());
 
   } else {
-            // Provide detailed error information
+    // Provide detailed error information
     std::string error_msg;
     switch(ik_result) {
       case -1: error_msg = "Failed to converge"; break;
@@ -725,7 +713,7 @@ void FfwArmIKSolver::solveIK(
     RCLCPP_ERROR(this->get_logger(), "❌ %s arm IK failed: %s (code: %d)", arm.c_str(),
       error_msg.c_str(), ik_result);
 
-            // Calculate distance for reachability information
+    // Calculate distance for reachability information
     double distance = sqrt(target_pose.pose.position.x * target_pose.pose.position.x +
                                   target_pose.pose.position.y * target_pose.pose.position.y +
                                   target_pose.pose.position.z * target_pose.pose.position.z);

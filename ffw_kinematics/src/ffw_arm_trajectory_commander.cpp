@@ -38,37 +38,36 @@ FfwArmTrajectoryCommander::FfwArmTrajectoryCommander()
   gripper_pos_open_ = this->get_parameter("gripper_pos_open").as_double();
 
   RCLCPP_INFO(this->get_logger(), "Trajectory duration: %.3f seconds", trajectory_duration_);
-  RCLCPP_INFO(this->get_logger(), "Gripper control: enabled");
 
   right_ik_solution_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-            "/right_arm_ik_solution", 10,
-            std::bind(&FfwArmTrajectoryCommander::rightIKSolutionCallback,
-            this,
-            std::placeholders::_1));
+    "/right_arm_ik_solution", 10,
+    std::bind(&FfwArmTrajectoryCommander::rightIKSolutionCallback,
+    this,
+    std::placeholders::_1));
 
   left_ik_solution_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
-            "/left_arm_ik_solution", 10,
-            std::bind(&FfwArmTrajectoryCommander::leftIKSolutionCallback,
-            this,
-            std::placeholders::_1));
+    "/left_arm_ik_solution", 10,
+    std::bind(&FfwArmTrajectoryCommander::leftIKSolutionCallback,
+    this,
+    std::placeholders::_1));
 
   left_squeeze_sub_ = this->create_subscription<std_msgs::msg::Float32>(
-              "/vr_hand/left_squeeze", 10,
-              std::bind(&FfwArmTrajectoryCommander::leftSqueezeCallback,
-              this,
-              std::placeholders::_1));
+    "/vr_hand/left_squeeze", 10,
+    std::bind(&FfwArmTrajectoryCommander::leftSqueezeCallback,
+    this,
+    std::placeholders::_1));
 
   right_squeeze_sub_ = this->create_subscription<std_msgs::msg::Float32>(
-              "/vr_hand/right_squeeze", 10,
-              std::bind(&FfwArmTrajectoryCommander::rightSqueezeCallback,
-              this,
-              std::placeholders::_1));
+    "/vr_hand/right_squeeze", 10,
+    std::bind(&FfwArmTrajectoryCommander::rightSqueezeCallback,
+    this,
+    std::placeholders::_1));
 
   right_joint_trajectory_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-            "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory", 10);
+    "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory", 10);
 
   left_joint_trajectory_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-            "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory", 10);
+    "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory", 10);
 
   RCLCPP_INFO(this->get_logger(), "Dual-arm trajectory commander initialized");
 }
@@ -85,8 +84,8 @@ void FfwArmTrajectoryCommander::rightIKSolutionCallback(
 
   if (msg->joint_names.size() != point.positions.size()) {
     RCLCPP_ERROR(this->get_logger(),
-            "Right IK solution: joint names (%zu) and positions (%zu) size mismatch",
-                        msg->joint_names.size(), point.positions.size());
+        "Right IK solution: joint names (%zu) and positions (%zu) size mismatch",
+        msg->joint_names.size(), point.positions.size());
     return;
   }
 
@@ -94,7 +93,7 @@ void FfwArmTrajectoryCommander::rightIKSolutionCallback(
   for (const auto & pos : point.positions) {
     if (!std::isfinite(pos)) {
       RCLCPP_ERROR(this->get_logger(),
-                "Right IK solution contains invalid joint position: %f", pos
+        "Right IK solution contains invalid joint position: %f", pos
       );
       return;
     }
@@ -103,12 +102,10 @@ void FfwArmTrajectoryCommander::rightIKSolutionCallback(
   RCLCPP_DEBUG(this->get_logger(), "Received RIGHT arm IK solution with %zu joints",
     point.positions.size());
 
-        // Convert trajectory to joint state format for internal use
   right_ik_solution_.name = msg->joint_names;
   right_ik_solution_.position = point.positions;
   has_right_ik_solution_ = true;
 
-        // Create and send joint trajectory
   sendRightArmTrajectory();
 }
 
