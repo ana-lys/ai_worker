@@ -137,13 +137,14 @@ FfwArmIKSolver::FfwArmIKSolver()
 
   RCLCPP_INFO(this->get_logger(),
     "✅ Dual-arm IK solver initialized. Waiting for target poses on:");
-  RCLCPP_INFO(this->get_logger(), "   Right arm: %s", right_target_pose_topic.c_str());
-  RCLCPP_INFO(this->get_logger(), "   Left arm: %s", left_target_pose_topic.c_str());
+  RCLCPP_INFO(this->get_logger(), "Right arm: %s", right_target_pose_topic.c_str());
+  RCLCPP_INFO(this->get_logger(), "Left arm: %s", left_target_pose_topic.c_str());
   RCLCPP_INFO(this->get_logger(), "Publishing IK solutions on:");
-  RCLCPP_INFO(this->get_logger(), "   Right arm: %s", right_ik_solution_topic.c_str());
-  RCLCPP_INFO(this->get_logger(), "   Left arm: %s", left_ik_solution_topic.c_str());
+  RCLCPP_INFO(this->get_logger(), "Right arm: %s", right_ik_solution_topic.c_str());
+  RCLCPP_INFO(this->get_logger(), "Left arm: %s", left_ik_solution_topic.c_str());
   RCLCPP_INFO(this->get_logger(), "Publishing current poses on:");
-  RCLCPP_INFO(this->get_logger(), "   Right arm: %s", right_current_pose_topic.c_str());
+  RCLCPP_INFO(this->get_logger(), "Right arm: %s", right_current_pose_topic.c_str());
+  RCLCPP_INFO(this->get_logger(), "Left arm: %s", left_current_pose_topic.c_str());
 }
 
 void FfwArmIKSolver::robotDescriptionCallback(const std_msgs::msg::String::SharedPtr msg)
