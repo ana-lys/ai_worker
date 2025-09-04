@@ -18,8 +18,6 @@
 #define FFW_KINEMATICS__FFW_ARM_IK_SOLVER_HPP_
 
 #include <urdf/model.h>
-#include <Eigen/Dense>
-#include <Eigen/Geometry>
 
 #include <algorithm>
 #include <map>
