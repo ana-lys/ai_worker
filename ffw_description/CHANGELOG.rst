@@ -2,6 +2,10 @@
 Changelog for package ffw_description
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.11 (2025-09-04)
+-------------------
+* None
+
 1.1.10 (2025-07-22)
 ------------------
 * Added URDF for ZED camera

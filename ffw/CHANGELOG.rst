@@ -2,6 +2,11 @@
 Changelog for package ffw
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.11 (2025-09-04)
+-------------------
+* Added ffw_kinematics package
+* Contributors: Wonho Yun
+
 1.1.10 (2025-07-22)
 -------------------
 * Added start/pause feature for ffw_joint_trajectory_command_broadcaster

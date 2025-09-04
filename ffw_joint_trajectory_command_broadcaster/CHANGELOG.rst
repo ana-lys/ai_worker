@@ -2,6 +2,10 @@
 Changelog for package ffw_joint_trajectory_command_broadcaster
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.11 (2025-09-04)
+-------------------
+* None
+
 1.1.10 (2025-07-22)
 ------------------
 * Added start/pause feature
