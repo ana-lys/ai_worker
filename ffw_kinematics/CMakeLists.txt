@@ -14,7 +14,6 @@ find_package(std_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(kdl_parser REQUIRED)
 find_package(urdf REQUIRED)
-find_package(pinocchio REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # ffw Arm IK Solver executable
