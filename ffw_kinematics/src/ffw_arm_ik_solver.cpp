@@ -687,7 +687,7 @@ void FfwArmIKSolver::solveIK(
       point.positions[i] = q_result(i);
     }
 
-    // Set time from start (즉시 실행)
+    // Set time from start (immediate execution)
     point.time_from_start = rclcpp::Duration::from_nanoseconds(0);
     joint_trajectory.points.push_back(point);
 
