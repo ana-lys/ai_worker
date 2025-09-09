@@ -17,7 +17,7 @@
 
   <xacro:include filename="$(find ffw_description)/ros2_control/$(arg model)/ffw_bh5_follower.ros2_control.xacro" />
 
-  <xacro:include filename="$(find ffw_description)/gazebo/ffw_bg2_rev4_follower/ffw_bg2_follower.gazebo.xacro" />
+  <xacro:include filename="$(find ffw_description)/gazebo/ffw_bh5_rev1_follower/ffw_bh5_follower.gazebo.xacro" />
 
   <link name="world"/>
 
@@ -75,7 +75,7 @@
 
   <gazebo>
       <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-        <parameters>$(find ffw_bringup)/config/$(arg model)/ffw_bg2_follower_ai_hardware_controller.yaml</parameters>
+        <parameters>$(find ffw_bringup)/config/$(arg model)/ffw_bh5_follower_ai_hardware_controller.yaml</parameters>
       </plugin>
   </gazebo>
 

@@ -78,15 +78,48 @@
   <xacro:SimpleTransmission trans="arm_l_trans6" joint="arm_l_joint6" actuator="arm_l_actuator6"/>
   <xacro:SimpleTransmission trans="arm_l_trans7" joint="arm_l_joint7" actuator="arm_l_actuator7"/>
 
-  <xacro:SimpleTransmission trans="r_tran_r1" joint="r_rh_r1_joint" actuator="r_actuator1" />
-  <xacro:SimpleTransmission trans="r_tran_r2" joint="r_rh_r2" actuator="r_actuator2" />
-  <xacro:SimpleTransmission trans="r_tran_l1" joint="r_rh_l1" actuator="r_actuator3" />
-  <xacro:SimpleTransmission trans="r_tran_l2" joint="r_rh_l2" actuator="r_actuator4" />
+  <xacro:SimpleTransmission trans="hand_l_trans1" joint="hand_l_joint1" actuator="hand_l_actuator1"/>
+  <xacro:SimpleTransmission trans="hand_l_trans2" joint="hand_l_joint2" actuator="hand_l_actuator2"/>
+  <xacro:SimpleTransmission trans="hand_l_trans3" joint="hand_l_joint3" actuator="hand_l_actuator3"/>
+  <xacro:SimpleTransmission trans="hand_l_trans4" joint="hand_l_joint4" actuator="hand_l_actuator4"/>
+  <xacro:SimpleTransmission trans="hand_l_trans5" joint="hand_l_joint5" actuator="hand_l_actuator5"/>
+  <xacro:SimpleTransmission trans="hand_l_trans6" joint="hand_l_joint6" actuator="hand_l_actuator6"/>
+  <xacro:SimpleTransmission trans="hand_l_trans7" joint="hand_l_joint7" actuator="hand_l_actuator7"/>
+  <xacro:SimpleTransmission trans="hand_l_trans8" joint="hand_l_joint8" actuator="hand_l_actuator8"/>
+  <xacro:SimpleTransmission trans="hand_l_trans9" joint="hand_l_joint9" actuator="hand_l_actuator9"/>
+  <xacro:SimpleTransmission trans="hand_l_trans10" joint="hand_l_joint10" actuator="hand_l_actuator10"/>
+  <xacro:SimpleTransmission trans="hand_l_trans11" joint="hand_l_joint11" actuator="hand_l_actuator11"/>
+  <xacro:SimpleTransmission trans="hand_l_trans12" joint="hand_l_joint12" actuator="hand_l_actuator12"/>
+  <xacro:SimpleTransmission trans="hand_l_trans13" joint="hand_l_joint13" actuator="hand_l_actuator13"/>
+  <xacro:SimpleTransmission trans="hand_l_trans14" joint="hand_l_joint14" actuator="hand_l_actuator14"/>
+  <xacro:SimpleTransmission trans="hand_l_trans15" joint="hand_l_joint15" actuator="hand_l_actuator15"/>
+  <xacro:SimpleTransmission trans="hand_l_trans16" joint="hand_l_joint16" actuator="hand_l_actuator16"/>
+  <xacro:SimpleTransmission trans="hand_l_trans17" joint="hand_l_joint17" actuator="hand_l_actuator17"/>
+  <xacro:SimpleTransmission trans="hand_l_trans18" joint="hand_l_joint18" actuator="hand_l_actuator18"/>
+  <xacro:SimpleTransmission trans="hand_l_trans19" joint="hand_l_joint19" actuator="hand_l_actuator19"/>
+  <xacro:SimpleTransmission trans="hand_l_trans20" joint="hand_l_joint20" actuator="hand_l_actuator20"/>
 
-  <xacro:SimpleTransmission trans="l_tran_r1" joint="l_rh_r1_joint" actuator="l_actuator1" />
-  <xacro:SimpleTransmission trans="l_tran_r2" joint="l_rh_r2" actuator="l_actuator2" />
-  <xacro:SimpleTransmission trans="l_tran_l1" joint="l_rh_l1" actuator="l_actuator3" />
-  <xacro:SimpleTransmission trans="l_tran_l2" joint="l_rh_l2" actuator="l_actuator4" />
+  <xacro:SimpleTransmission trans="hand_r_trans1" joint="hand_r_joint1" actuator="hand_r_actuator1"/>
+  <xacro:SimpleTransmission trans="hand_r_trans2" joint="hand_r_joint2" actuator="hand_r_actuator2"/>
+  <xacro:SimpleTransmission trans="hand_r_trans3" joint="hand_r_joint3" actuator="hand_r_actuator3"/>
+  <xacro:SimpleTransmission trans="hand_r_trans4" joint="hand_r_joint4" actuator="hand_r_actuator4"/>
+  <xacro:SimpleTransmission trans="hand_r_trans5" joint="hand_r_joint5" actuator="hand_r_actuator5"/>
+  <xacro:SimpleTransmission trans="hand_r_trans6" joint="hand_r_joint6" actuator="hand_r_actuator6"/>
+  <xacro:SimpleTransmission trans="hand_r_trans7" joint="hand_r_joint7" actuator="hand_r_actuator7"/>
+  <xacro:SimpleTransmission trans="hand_r_trans8" joint="hand_r_joint8" actuator="hand_r_actuator8"/>
+  <xacro:SimpleTransmission trans="hand_r_trans9" joint="hand_r_joint9" actuator="hand_r_actuator9"/>
+  <xacro:SimpleTransmission trans="hand_r_trans10" joint="hand_r_joint10" actuator="hand_r_actuator10"/>
+  <xacro:SimpleTransmission trans="hand_r_trans11" joint="hand_r_joint11" actuator="hand_r_actuator11"/>
+  <xacro:SimpleTransmission trans="hand_r_trans12" joint="hand_r_joint12" actuator="hand_r_actuator12"/>
+  <xacro:SimpleTransmission trans="hand_r_trans13" joint="hand_r_joint13" actuator="hand_r_actuator13"/>
+  <xacro:SimpleTransmission trans="hand_r_trans14" joint="hand_r_joint14" actuator="hand_r_actuator14"/>
+  <xacro:SimpleTransmission trans="hand_r_trans15" joint="hand_r_joint15" actuator="hand_r_actuator15"/>
+  <xacro:SimpleTransmission trans="hand_r_trans16" joint="hand_r_joint16" actuator="hand_r_actuator16"/>
+  <xacro:SimpleTransmission trans="hand_r_trans17" joint="hand_r_joint17" actuator="hand_r_actuator17"/>
+  <xacro:SimpleTransmission trans="hand_r_trans18" joint="hand_r_joint18" actuator="hand_r_actuator18"/>
+  <xacro:SimpleTransmission trans="hand_r_trans19" joint="hand_r_joint19" actuator="hand_r_actuator19"/>
+  <xacro:SimpleTransmission trans="hand_r_trans20" joint="hand_r_joint20" actuator="hand_r_actuator20"/>
+
   </xacro:macro>
 
 </robot>
