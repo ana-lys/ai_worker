@@ -1694,7 +1694,7 @@
         <state_interface name="Present Pressure 9"/>
         <param name="type">virtual_sensor</param>
         <param name="ID">210</param>
-        <param name="comm_id">201</param>
+        <param name="comm_id">202</param>
         <param name="model_num">270</param>
       </gpio>
       <gpio name="dxl236">
