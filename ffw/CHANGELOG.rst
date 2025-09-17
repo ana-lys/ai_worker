@@ -2,6 +2,11 @@
 Changelog for package ffw
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.12 (2025-09-17)
+-------------------
+* Updated docker compose file to mount zed resources
+* Contributors: Woojin Wie
+
 1.1.11 (2025-08-13)
 -------------------
 * Updated URDF for ZED camera
