@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-   <xacro:macro name="rh_5_left" params="prefix parent *origin">
-      <xacro:property name="meshes_file_direction" value="package://ffw_description/meshes/common/rh_5_left/" />
+   <xacro:macro name="hx5_d20_left" params="prefix parent *origin">
+      <xacro:property name="meshes_file_direction" value="package://ffw_description/meshes/common/hx5_d20_left/" />
 
-      <joint name="${prefix}rh_5_left_joint" type="fixed">
+      <joint name="${prefix}hx5_d20_left_joint" type="fixed">
          <xacro:insert_block name="origin" />
          <parent link="${parent}"/>
-         <child link="${prefix}rh_5_left_base" />
+         <child link="${prefix}hx5_d20_left_base" />
       </joint>
 
-      <link name="${prefix}rh_5_left_base">
+      <link name="${prefix}hx5_d20_left_base">
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_base_unit.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_base_unit.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -22,7 +22,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_base_unit.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_base_unit.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -38,7 +38,7 @@
       </link>
       <!-- THUMB -->
       <joint name="${prefix}finger_l_joint1" type="revolute">
-         <parent link="${prefix}rh_5_left_base" />
+         <parent link="${prefix}hx5_d20_left_base" />
          <child link="${prefix}finger_l_link1" />
          <origin xyz="0.0145 -0.02624 0.05394" rpy="0.523599 0 0" />
          <axis xyz="0 0 1" />
@@ -49,7 +49,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -58,7 +58,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -84,7 +84,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_mcp2.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_mcp2.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -93,7 +93,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_mcp2.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_mcp2.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -119,7 +119,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_ip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_ip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -128,7 +128,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_ip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_ip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -154,7 +154,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -163,7 +163,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_thumb_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_thumb_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -195,7 +195,7 @@
       </link>
       <!-- INDEX -->
       <joint name="${prefix}finger_l_joint5" type="revolute">
-         <parent link="${prefix}rh_5_left_base" />
+         <parent link="${prefix}hx5_d20_left_base" />
          <child link="${prefix}finger_l_link5" />
          <origin xyz="-0.0015 -0.03608 0.09575" rpy="0 0 0" />
          <axis xyz="1 0 0" />
@@ -206,7 +206,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -215,7 +215,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -241,7 +241,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -250,7 +250,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -276,7 +276,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -285,7 +285,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -311,7 +311,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -320,7 +320,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -352,7 +352,7 @@
       </link>
       <!-- MIDDLE -->
       <joint name="${prefix}finger_l_joint9" type="revolute">
-         <parent link="${prefix}rh_5_left_base" />
+         <parent link="${prefix}hx5_d20_left_base" />
          <child link="${prefix}finger_l_link9" />
          <origin xyz="-0.0015 -0.00908 0.10353" rpy="0 0 0" />
          <axis xyz="1 0 0" />
@@ -363,7 +363,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -372,7 +372,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -398,7 +398,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -407,7 +407,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -433,7 +433,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -442,7 +442,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -468,7 +468,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -477,7 +477,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -509,7 +509,7 @@
       </link>
       <!-- RING -->
       <joint name="${prefix}finger_l_joint13" type="revolute">
-         <parent link="${prefix}rh_5_left_base" />
+         <parent link="${prefix}hx5_d20_left_base" />
          <child link="${prefix}finger_l_link13" />
          <origin xyz="-0.0015 0.01792 0.09775" rpy="0 0 0" />
          <axis xyz="1 0 0" />
@@ -520,7 +520,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -529,7 +529,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -555,7 +555,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -564,7 +564,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -590,7 +590,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -599,7 +599,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -625,7 +625,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -634,7 +634,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -666,7 +666,7 @@
       </link>
       <!-- PINKY -->
       <joint name="${prefix}finger_l_joint17" type="revolute">
-         <parent link="${prefix}rh_5_left_base" />
+         <parent link="${prefix}hx5_d20_left_base" />
          <child link="${prefix}finger_l_link17" />
          <origin xyz="-0.0015 0.04492 0.07875" rpy="0 0 0" />
          <axis xyz="1 0 0" />
@@ -677,7 +677,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -686,7 +686,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_mcp.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_mcp.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -712,7 +712,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -721,7 +721,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_pip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_pip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -747,7 +747,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -756,7 +756,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_dip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_dip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -782,7 +782,7 @@
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />
@@ -791,7 +791,7 @@
          <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-               <mesh filename="${meshes_file_direction}/rh_5_finger_tip.stl" scale="0.001 0.001 0.001" />
+               <mesh filename="${meshes_file_direction}/hx5_d20_finger_tip.stl" scale="0.001 0.001 0.001" />
             </geometry>
             <material name="grey">
                <color rgba="0.2 0.2 0.2 1" />

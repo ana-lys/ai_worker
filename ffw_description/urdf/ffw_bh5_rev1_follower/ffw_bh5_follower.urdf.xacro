@@ -11,9 +11,9 @@
 
   <!-- <xacro:include filename="$(find ffw_description)/urdf/common/rh_p12_rn_a/rh_p12_rn_a.urdf.xacro" /> -->
 
-  <xacro:include filename="$(find ffw_description)/urdf/common/rh_5_left/rh_5_left.urdf.xacro" />
+  <xacro:include filename="$(find ffw_description)/urdf/common/hx5_d20_left/hx5_d20_left.urdf.xacro" />
 
-  <xacro:include filename="$(find ffw_description)/urdf/common/rh_5_right/rh_5_right.urdf.xacro" />
+  <xacro:include filename="$(find ffw_description)/urdf/common/hx5_d20_right/hx5_d20_right.urdf.xacro" />
 
   <xacro:include filename="$(find ffw_description)/ros2_control/$(arg model)/ffw_bh5_follower.ros2_control.xacro" />
 
@@ -58,17 +58,17 @@
     <origin xyz="0.0055 0 1.4316" rpy="0 0 0" />
   </xacro:ffw_follower_body>
 
-  <xacro:rh_5_left parent="$(arg prefix)arm_l_link7" prefix="$(arg prefix)">
+  <xacro:hx5_d20_left parent="$(arg prefix)arm_l_link7" prefix="$(arg prefix)">
     <origin xyz="0 0 -0.078" rpy="0 3.14159265359 1.5708"/>
-  </xacro:rh_5_left>
+  </xacro:hx5_d20_left>
 
   <!-- <xacro:rh_p12_rn_a parent="$(arg prefix)arm_l_link7" prefix="$(arg prefix)gripper_l_">
     <origin xyz="0 0 -0.078" rpy="0 3.14159265359 3.14159265359"/>
   </xacro:rh_p12_rn_a> -->
 
-  <xacro:rh_5_right parent="$(arg prefix)arm_r_link7" prefix="$(arg prefix)">
+  <xacro:hx5_d20_right parent="$(arg prefix)arm_r_link7" prefix="$(arg prefix)">
     <origin xyz="0 0 -0.078" rpy="0 3.14159265359 -1.5708"/>
-  </xacro:rh_5_right>
+  </xacro:hx5_d20_right>
 
   <xacro:ffw_bh5_follower_system
     use_sim="$(arg use_sim)"
