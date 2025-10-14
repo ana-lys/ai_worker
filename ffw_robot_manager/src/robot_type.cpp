@@ -49,7 +49,7 @@ std::vector<BatteryInfo> FfwSg2Rev1RobotType::get_battery_configurations() const
   BatteryInfo left_battery;
   left_battery.name = "left";
   left_battery.interface_name = "dxl1";
-  left_battery.topic_name = "/ai_worker/hardware/battery/left";
+  left_battery.topic_name = "ai_worker/battery/left/state";
   left_battery.voltage_index = 0; // Will be set during interface discovery
   batteries.push_back(left_battery);
   
@@ -57,7 +57,7 @@ std::vector<BatteryInfo> FfwSg2Rev1RobotType::get_battery_configurations() const
   BatteryInfo right_battery;
   right_battery.name = "right";
   right_battery.interface_name = "dxl61";
-  right_battery.topic_name = "/ai_worker/hardware/battery/right";
+  right_battery.topic_name = "ai_worker/battery/right/state";
   right_battery.voltage_index = 0; // Will be set during interface discovery
   batteries.push_back(right_battery);
   
