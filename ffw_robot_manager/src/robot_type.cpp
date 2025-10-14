@@ -14,9 +14,9 @@
 //
 // Author: Woojin Wie
 
+#include <limits>
 #include "ffw_robot_manager/robot_type.hpp"
 #include "ffw_robot_manager/ubetter_battery_model.hpp"
-#include <limits>
 
 namespace ffw_robot_manager
 {
@@ -51,7 +51,7 @@ std::vector<BatteryInfo> FfwSg2Rev1RobotType::get_battery_configurations() const
   left_battery.name = "left";
   left_battery.interface_name = "dxl1";
   left_battery.topic_name = "ai_worker/battery/left/state";
-  left_battery.voltage_index = std::numeric_limits<size_t>::max();  // Will be set during interface discovery
+  left_battery.voltage_index = std::numeric_limits<size_t>::max();
   batteries.push_back(left_battery);
 
   // Right battery
@@ -59,7 +59,7 @@ std::vector<BatteryInfo> FfwSg2Rev1RobotType::get_battery_configurations() const
   right_battery.name = "right";
   right_battery.interface_name = "dxl61";
   right_battery.topic_name = "ai_worker/battery/right/state";
-  right_battery.voltage_index = std::numeric_limits<size_t>::max();  // Will be set during interface discovery
+  right_battery.voltage_index = std::numeric_limits<size_t>::max();
   batteries.push_back(right_battery);
 
   return batteries;
