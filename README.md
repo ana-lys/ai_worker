@@ -21,5 +21,5 @@
     ```
   - Flash
     ```
-    ./docker_flash_orin.sh
+    ./docker_flash_orin.sh -v v02
     ```
