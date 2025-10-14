@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: Copyright (c) 2023-2024, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/tegra234-gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include "tegra234-p3737-camera-modules-robotis.dtsi"
+
+/ {
+	overlay-name = "Tegra234 p3737-0000+p3701-xxxx Dynamic Overlay";
+
+	fragment-t234-p3737-0000-p3701-0000@0 {
+		target-path = "/";
+		__overlay__ {
+			bus@0 {
+				i2c@31e0000 {
+					rt5640: audio-codec@1c {
+						#sound-dai-cells = <1>;
+						status = "okay";
+					};
+				};
+			};
+
+			sound {
+				nvidia-audio-card,widgets =
+					"Headphone",	"CVB-RT Headphone Jack",
+					"Microphone",	"CVB-RT Mic Jack",
+					"Speaker",	"CVB-RT Int Spk",
+					"Microphone",	"CVB-RT Int Mic";
+
+				nvidia-audio-card,routing =
+					"CVB-RT Headphone Jack",     "CVB-RT HPOL",
+					"CVB-RT Headphone Jack",     "CVB-RT HPOR",
+					"CVB-RT IN1P",		     "CVB-RT Mic Jack",
+					"CVB-RT IN2P",		     "CVB-RT Mic Jack",
+					"CVB-RT Int Spk",	     "CVB-RT SPOLP",
+					"CVB-RT Int Spk",	     "CVB-RT SPORP",
+					"CVB-RT DMIC1",		     "CVB-RT Int Mic",
+					"CVB-RT DMIC2",		     "CVB-RT Int Mic";
+
+				nvidia-audio-card,dai-link@76 {
+					link-name = "rt5640-playback";
+					codec {
+						sound-dai = <&rt5640 0>;
+						prefix = "CVB-RT";
+					};
+				};
+			};
+		};
+	};
+};

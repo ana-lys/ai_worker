@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: Copyright (c) 2017-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+#include "tegra234-camera-re26oc-robotis.dtsi"
+#include <dt-bindings/clock/tegra234-clock.h>
+#include <dt-bindings/gpio/tegra234-gpio.h>
+
+#define CAM0_RST_L	TEGRA234_MAIN_GPIO(H, 3)
+
+/* camera control gpio definitions */
+
+/ {
+	fragment-camera-re26oc@0 {
+		target-path = "/bus@0";
+		__overlay__ {
+			gpio@2200000 {
+				camera-control-output-low {
+					gpio-hog;
+					output-low;
+					gpios = <CAM0_RST_L 0>;
+					label = "cam0-rst";
+				};
+			};
+
+			i2c@3180000 {
+				re26oc_a@1a {
+					/* Define any required hw resources needed by driver */
+					/* ie. clocks, io pins, power sources */
+					clocks = <&bpmp TEGRA234_CLK_EXTPERIPH1>,
+						<&bpmp TEGRA234_CLK_EXTPERIPH1>;
+					clock-names = "extperiph1", "pllp_grtba";
+					mclk = "extperiph1";
+					reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;
+				};
+
+				re26oc_b@1b {
+					/* Define any required hw resources needed by driver */
+					/* ie. clocks, io pins, power sources */
+					clocks = <&bpmp TEGRA234_CLK_EXTPERIPH1>,
+						<&bpmp TEGRA234_CLK_EXTPERIPH1>;
+					clock-names = "extperiph1", "pllp_grtba";
+					mclk = "extperiph1";
+					reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;
+				};
+
+				re26oc_c@1c {
+					/* Define any required hw resources needed by driver */
+					/* ie. clocks, io pins, power sources */
+					clocks = <&bpmp TEGRA234_CLK_EXTPERIPH1>,
+						<&bpmp TEGRA234_CLK_EXTPERIPH1>;
+					clock-names = "extperiph1", "pllp_grtba";
+					mclk = "extperiph1";
+					reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;
+				};
+
+				re26oc_d@1d {
+					/* Define any required hw resources needed by driver */
+					/* ie. clocks, io pins, power sources */
+					clocks = <&bpmp TEGRA234_CLK_EXTPERIPH1>,
+						<&bpmp TEGRA234_CLK_EXTPERIPH1>;
+					clock-names = "extperiph1", "pllp_grtba";
+					mclk = "extperiph1";
+					reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;
+				};
+
+				re26oc_e@1e {
+					/* Define any required hw resources needed by driver */
+					/* ie. clocks, io pins, power sources */
+					clocks = <&bpmp TEGRA234_CLK_EXTPERIPH1>,
+						<&bpmp TEGRA234_CLK_EXTPERIPH1>;
+					clock-names = "extperiph1", "pllp_grtba";
+					mclk = "extperiph1";
+					reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;
+				};
+
+				re26oc_f@1f {
+					/* Define any required hw resources needed by driver */
+					/* ie. clocks, io pins, power sources */
+					clocks = <&bpmp TEGRA234_CLK_EXTPERIPH1>,
+						<&bpmp TEGRA234_CLK_EXTPERIPH1>;
+					clock-names = "extperiph1", "pllp_grtba";
+					mclk = "extperiph1";
+					reset-gpios = <&gpio CAM0_RST_L GPIO_ACTIVE_HIGH>;
+				};
+			};
+		};
+	};
+};

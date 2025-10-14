@@ -1,0 +1,10 @@
+/dts-v1/;
+
+#include "tegra234-mb2-bct-common.dtsi"
+/ {
+    mb2-misc {
+        eeprom {
+            cvb_eeprom_read_size = <0x00>;
+        };
+    };
+};
