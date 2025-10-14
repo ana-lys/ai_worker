@@ -2,6 +2,11 @@
 Changelog for package ffw_robot_manager
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.13 (2025-10-14)
+-------------------
+* Added support for battery monitoring for ffw_sg2_rev1
+* Contributors: Woojin Wie
+
 1.1.12 (2025-09-17)
 -------------------
 * None
