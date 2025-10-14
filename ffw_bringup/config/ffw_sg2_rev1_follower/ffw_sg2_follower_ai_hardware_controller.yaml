@@ -204,3 +204,4 @@
     ros__parameters:
       disable_torque_on_error: false
       set_led_error_on_error: true
+      ffw_type: ffw_sg2_rev1

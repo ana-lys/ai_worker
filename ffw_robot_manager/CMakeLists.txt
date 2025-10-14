@@ -13,6 +13,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   std_srvs
   dynamixel_hardware_interface
   dynamixel_interfaces
+  sensor_msgs
   generate_parameter_library
 )
 
@@ -27,6 +28,9 @@ generate_parameter_library(ffw_robot_manager_parameters
 
 add_library(ffw_robot_manager SHARED
   src/ffw_robot_manager.cpp
+  src/battery_model.cpp
+  src/ubetter_battery_model.cpp
+  src/robot_type.cpp
 )
 target_compile_features(ffw_robot_manager PUBLIC cxx_std_17)
 target_include_directories(ffw_robot_manager PUBLIC
@@ -42,6 +46,7 @@ target_link_libraries(ffw_robot_manager PUBLIC
   ${dynamixel_hardware_interface_TARGETS}
   ${std_srvs_TARGETS}
   ${dynamixel_interfaces_TARGETS}
+  ${sensor_msgs_TARGETS}
 )
 
 pluginlib_export_plugin_description_file(controller_interface ffw_robot_manager_plugin.xml)
