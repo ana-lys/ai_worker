@@ -32,8 +32,9 @@ RUN curl -JLO "https://dl.filippo.io/mkcert/latest?for=linux/${TARGETARCH}" \
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
 
-# Copy requirements.txt first
+# Copy requirements.txt and gen_cert.sh first
 COPY requirements.txt /tmp/requirements.txt
+COPY gen_cert.sh /tmp/gen_cert.sh
 
 RUN mkdir -p ${COLCON_WS}/src && \
     cd ${COLCON_WS}/src && \
@@ -71,7 +72,8 @@ RUN cd /root && \
     cd vuer && \
     pip3 install -e '.[all]'
 
-RUN chmod +x ${COLCON_WS}/src/ai_worker/docker/gen_cert.sh
+RUN chmod +x /tmp/gen_cert.sh && \
+    cp /tmp/gen_cert.sh ${COLCON_WS}/src/ai_worker/docker/gen_cert.sh
 
 EXPOSE 8012
 

@@ -116,6 +116,10 @@ RUN apt-get update && apt-get install -y \
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
 
+# Copy requirements.txt and gen_cert.sh first
+COPY requirements.txt /tmp/requirements.txt
+COPY gen_cert.sh /tmp/gen_cert.sh
+
 ARG TARGETARCH
 
 RUN curl -JLO "https://dl.filippo.io/mkcert/latest?for=linux/${TARGETARCH}" \
@@ -156,19 +160,17 @@ RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc  && \
     echo "export ROS_DOMAIN_ID=30" >> ~/.bashrc && \
     echo "alias vr='ros2 launch ffw_vr vr_publisher.launch.py'" >> ~/.bashrc
 
-# Copy requirements.txt first
-COPY requirements.txt /tmp/requirements.txt
-
 RUN python3 -m pip config set global.break-system-packages true
 
-RUN pip3 install --no-cache-dir -r ${COLCON_WS}/src/ai_worker/docker/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 RUN cd /root && \
     git clone https://github.com/Woojin-Crive/vuer.git && \
     cd vuer && \
     pip3 install -e '.[all]'
 
-RUN chmod +x ${COLCON_WS}/src/ai_worker/docker/gen_cert.sh
+RUN chmod +x /tmp/gen_cert.sh && \
+    cp /tmp/gen_cert.sh ${COLCON_WS}/src/ai_worker/docker/gen_cert.sh
 
 EXPOSE 8012
 
