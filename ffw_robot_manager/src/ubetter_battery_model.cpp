@@ -15,6 +15,7 @@
 // Author: Woojin Wie
 
 #include "ffw_robot_manager/ubetter_battery_model.hpp"
+#include "sensor_msgs/msg/battery_state.hpp"
 
 namespace ffw_robot_manager
 {
@@ -89,7 +90,7 @@ bool UbetterBatteryModel::is_voltage_valid(double voltage_v) const
 
 uint8_t UbetterBatteryModel::get_power_supply_technology() const
 {
-  return 3;  // POWER_SUPPLY_TECHNOLOGY_LIPO
+  return sensor_msgs::msg::BatteryState::POWER_SUPPLY_TECHNOLOGY_LIPO;
 }
 
 }  // namespace ffw_robot_manager
