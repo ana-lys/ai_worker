@@ -9,15 +9,11 @@
 
   <xacro:include filename="$(find ffw_description)/urdf/common/follower/ffw_follower_body.xacro" />
 
-  <!-- <xacro:include filename="$(find ffw_description)/urdf/common/rh_p12_rn_a/rh_p12_rn_a.urdf.xacro" /> -->
-
   <xacro:include filename="$(find ffw_description)/urdf/common/hx5_d20_left/hx5_d20_left.urdf.xacro" />
 
   <xacro:include filename="$(find ffw_description)/urdf/common/hx5_d20_right/hx5_d20_right.urdf.xacro" />
 
-  <xacro:include filename="$(find ffw_description)/ros2_control/$(arg model)/ffw_bh5_follower_one.ros2_control.xacro" />
-<!-- 
-  <xacro:include filename="$(find ffw_description)/ros2_control/$(arg model)/ffw_bh5_follower_left.ros2_control.xacro" /> -->
+  <xacro:include filename="$(find ffw_description)/ros2_control/$(arg model)/ffw_bh5_follower.ros2_control.xacro" />
 
   <xacro:include filename="$(find ffw_description)/gazebo/ffw_bh5_rev1_follower/ffw_bh5_follower.gazebo.xacro" />
 
@@ -62,10 +58,6 @@
     <origin xyz="0 0 -0.078" rpy="0 3.14159265359 1.5708"/>
   </xacro:hx5_d20_left>
 
-  <!-- <xacro:rh_p12_rn_a parent="$(arg prefix)arm_l_link7" prefix="$(arg prefix)gripper_l_">
-    <origin xyz="0 0 -0.078" rpy="0 3.14159265359 3.14159265359"/>
-  </xacro:rh_p12_rn_a> -->
-
   <xacro:hx5_d20_right parent="$(arg prefix)arm_r_link7" prefix="$(arg prefix)">
     <origin xyz="0 0 -0.078" rpy="0 3.14159265359 -1.5708"/>
   </xacro:hx5_d20_right>
@@ -74,11 +66,6 @@
     use_sim="$(arg use_sim)"
     use_fake_hardware="$(arg use_fake_hardware)"
     fake_sensor_commands="$(arg fake_sensor_commands)"/>
-
-  <!-- <xacro:ffw_bh5_follower_left_system
-    use_sim="$(arg use_sim)"
-    use_fake_hardware="$(arg use_fake_hardware)"
-    fake_sensor_commands="$(arg fake_sensor_commands)"/> -->
 
   <gazebo>
       <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
