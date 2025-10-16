@@ -70,27 +70,31 @@ class TestPublisher(Node):
 
         self.timer = self.create_timer(self.timer_period, self.timer_callback) # JointTrajectory
         # self.timer = self.create_timer(self.timer_period, self.timer_callback2) # JointState
+        self.left_hand_start = False
+        self.right_hand_start = False
 
     def timer_callback(self):
-        left_msg = JointTrajectory()
-        left_msg.joint_names = self.left_joint_names
-        left_traj_point = JointTrajectoryPoint()
-        left_temp_hand_joints = np.hstack((self.present_left_thumb_joints, self.present_left_finger_joints[4:]))
-        left_traj_point.positions = left_temp_hand_joints.tolist()
-        left_traj_point.time_from_start.sec = 0
-        left_traj_point.time_from_start.nanosec = 0
-        left_msg.points.append(left_traj_point)
-        self.left_hand_publisher_.publish(left_msg)
+        if self.left_hand_start:
+            left_msg = JointTrajectory()
+            left_msg.joint_names = self.left_joint_names
+            left_traj_point = JointTrajectoryPoint()
+            left_temp_hand_joints = np.hstack((self.present_left_thumb_joints, self.present_left_finger_joints[4:]))
+            left_traj_point.positions = left_temp_hand_joints.tolist()
+            left_traj_point.time_from_start.sec = 0
+            left_traj_point.time_from_start.nanosec = 0
+            left_msg.points.append(left_traj_point)
+            self.left_hand_publisher_.publish(left_msg)
 
-        right_msg = JointTrajectory()
-        right_msg.joint_names = self.right_joint_names
-        right_traj_point = JointTrajectoryPoint()
-        right_temp_hand_joints = np.hstack((self.present_right_thumb_joints, self.present_right_finger_joints[4:]))
-        right_traj_point.positions = right_temp_hand_joints.tolist()
-        right_traj_point.time_from_start.sec = 0
-        right_traj_point.time_from_start.nanosec = 0
-        right_msg.points.append(right_traj_point)
-        self.right_hand_publisher_.publish(right_msg)
+        if self.right_hand_start:
+            right_msg = JointTrajectory()
+            right_msg.joint_names = self.right_joint_names
+            right_traj_point = JointTrajectoryPoint()
+            right_temp_hand_joints = np.hstack((self.present_right_thumb_joints, self.present_right_finger_joints[4:]))
+            right_traj_point.positions = right_temp_hand_joints.tolist()
+            right_traj_point.time_from_start.sec = 0
+            right_traj_point.time_from_start.nanosec = 0
+            right_msg.points.append(right_traj_point)
+            self.right_hand_publisher_.publish(right_msg)
 
     # def timer_callback2(self):
     #     left_msg = JointState()
@@ -112,11 +116,13 @@ class TestPublisher(Node):
         for i in range(len(self.present_left_thumb_joints)):
             idx = self.left_joint_names.index(msg.name[i])
             self.present_left_thumb_joints[idx] = msg.position[i]
+        self.left_hand_start = True
 
     def right_thumb_callback(self, msg):
         for i in range(len(self.present_right_thumb_joints)):
             idx = self.right_joint_names.index(msg.name[i])
             self.present_right_thumb_joints[idx] = msg.position[i]
+        self.right_hand_start = True
 
     def left_finger_callback(self, msg):
         for i in range(len(self.present_left_finger_joints)):
