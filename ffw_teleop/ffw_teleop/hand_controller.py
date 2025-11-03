@@ -10,7 +10,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 class HandPublisher(Node):
 
     def __init__(self):
-        super().__init__('hand_publisher')
+        super().__init__('test_publisher')
         self.left_joint_names = [
             "finger_l_joint1", "finger_l_joint2", "finger_l_joint3", "finger_l_joint4",
             "finger_l_joint5", "finger_l_joint6", "finger_l_joint7", "finger_l_joint8",

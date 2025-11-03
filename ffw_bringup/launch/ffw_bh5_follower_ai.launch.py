@@ -280,12 +280,6 @@ def generate_launch_description():
     #     output='screen',
     # )
 
-    preset_hand_controller = Node(
-        package='ffw_teleop',
-        executable='preset_hand_controller',
-        output='screen',
-    )
-
     init_position_event_handler = RegisterEventHandler(
         event_handler=OnProcessExit(
             target_action=robot_controller_spawner,
@@ -301,31 +295,31 @@ def generate_launch_description():
         condition=IfCondition(init_position)
     )
 
-    # # Camera launch include
-    # bringup_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_bringup'), 'launch'])
-    # camera_launch = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(PathJoinSubstitution([bringup_launch_dir,
-    #                                                         'camera.launch.py'])),
-    #     condition=IfCondition(launch_cameras)
-    # )
+    # Camera launch include
+    bringup_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_bringup'), 'launch'])
+    camera_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([bringup_launch_dir,
+                                                            'camera.launch.py'])),
+        condition=IfCondition(launch_cameras)
+    )
 
-    # # Camera timers with conditional delay based on init_position
-    # camera_timer_20s = TimerAction(period=20.0, actions=[camera_launch],
-    #                                condition=IfCondition(init_position))
-    # camera_timer_10s = TimerAction(period=10.0, actions=[camera_launch],
-    #                                condition=UnlessCondition(init_position))
+    # Camera timers with conditional delay based on init_position
+    camera_timer_20s = TimerAction(period=20.0, actions=[camera_launch],
+                                   condition=IfCondition(init_position))
+    camera_timer_10s = TimerAction(period=10.0, actions=[camera_launch],
+                                   condition=UnlessCondition(init_position))
 
-    # # Teleop launch include
-    # teleop_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_teleop'), 'launch'])
-    # pedal_launch = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
-    #                                                'pedal_hardware.launch.py']))
-    # )
+    # Teleop launch include
+    teleop_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_teleop'), 'launch'])
+    pedal_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
+                                                   'pedal_hardware.launch.py']))
+    )
 
-    # ffw_arm_launch = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
-    #                                                'hand_teleop.launch.py']))
-    # )
+    ffw_arm_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
+                                                   'hand_teleop.launch.py']))
+    )
 
     return LaunchDescription(
         declared_arguments + [
@@ -337,10 +331,12 @@ def generate_launch_description():
             delay_left_hand_current_command_process_after_controllers,
             delay_right_hand_current_command_process_after_controllers,
             init_position_event_handler,
-            # camera_timer_20s,
-            # camera_timer_10s,
-            # ffw_arm_launch,
-            # pedal_launch,
-            preset_hand_controller,
+            camera_timer_20s,
+            camera_timer_10s,
+            # ffw_arm_ik_solver,
+            ffw_arm_launch,
+            # robotis_hand_ik_teleop,
+            # robotis_hand_teleop,
+            pedal_launch,
         ]
     )

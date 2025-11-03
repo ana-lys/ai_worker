@@ -33,7 +33,6 @@ setup(
             'keyboard_control = ffw_teleop.keyboard_control:main',
             'gripper_controller = ffw_teleop.gripper_controller:main',
             'hand_controller = ffw_teleop.hand_controller:main',
-            'preset_hand_controller = ffw_teleop.preset_hand_controller:main',
             'vr_publisher_bg2 = ffw_teleop.vr_publisher_bg2:main',
             'vr_publisher_bh5 = ffw_teleop.vr_publisher_bh5:main',
             'pedal_input = ffw_teleop.pedal_input_node:main',
