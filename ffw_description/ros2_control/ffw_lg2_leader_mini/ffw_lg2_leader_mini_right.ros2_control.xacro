@@ -21,7 +21,7 @@
           </xacro:if>
           <xacro:unless value="${use_fake_hardware}">
             <plugin>dynamixel_hardware_interface/DynamixelHardware</plugin>
-            <param name="port_name">/dev/ttyUSB1</param>
+            <param name="port_name">/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA7NNCO-if00-port0</param>
             <param name="baud_rate">4000000</param>
             <param name="dynamixel_model_folder">/param/dxl_model</param>
             <param name="number_of_joints">8</param>
