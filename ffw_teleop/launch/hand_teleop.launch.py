@@ -136,14 +136,7 @@ def generate_launch_description():
         package='ffw_kinematics',
         executable='hand_ik_solver',
         name='hand_ik_solver',
-        output='screen',
-        remappings=[
-            ('/robot_description', '/robot_description'),
-            ('/vr_hand/right_thumb', '/vr_hand/right_thumb'),
-            ('/vr_hand/left_thumb', '/vr_hand/left_thumb'),
-            ('/right_thumb/joint_states', '/right_thumb/joint_states'),
-            ('/left_thumb/joint_states', '/left_thumb/joint_states'),
-        ]
+        output='screen'
     )
 
     # Hand Controller Node
@@ -151,11 +144,7 @@ def generate_launch_description():
         package='ffw_teleop',
         executable='hand_controller',
         name='hand_controller',
-        output='screen',
-        remappings=[
-            ('/vr_hand/left_thumb', '/vr_hand/left_thumb'),
-            ('/vr_hand/right_thumb', '/vr_hand/right_thumb'),
-        ]
+        output='screen'
     )
 
     # Add the nodes
