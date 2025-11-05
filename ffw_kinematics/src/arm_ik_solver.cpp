@@ -59,6 +59,18 @@ FfwArmIKSolver::FfwArmIKSolver()
   // Joint limits parameters (can be overridden if needed)
   this->declare_parameter<bool>("use_hardcoded_joint_limits", true);
 
+  // Adaptive delay parameters (for smooth movement when IK suddenly solves)
+  this->declare_parameter<double>("min_error", 0.05);  // rad - below this, no delay (fast)
+  this->declare_parameter<double>("max_error", 0.8);   // rad - above this, max delay (slow)
+  this->declare_parameter<double>("min_delay", 0.0);   // sec - minimum delay (fast)
+  this->declare_parameter<double>("max_delay", 0.3);   // sec - maximum delay (slow)
+  this->declare_parameter<double>("target_change_threshold", 1.5);  // rad - threshold for sudden IK solve
+  this->declare_parameter<double>("target_change_max_delay", 0.8);  // sec - max delay when sudden change detected
+
+  // Slow start parameters (only at pedal press start)
+  this->declare_parameter<double>("slow_start_duration", 2.0);  // sec - duration of slow start after first message
+  this->declare_parameter<double>("slow_start_delay", 0.5);    // sec - delay during slow start period
+
   base_link_ = this->get_parameter("base_link").as_string();
   arm_base_link_ = this->get_parameter("arm_base_link").as_string();
   right_end_effector_link_ = this->get_parameter("right_end_effector_link").as_string();
@@ -90,6 +102,29 @@ FfwArmIKSolver::FfwArmIKSolver()
 
   use_hardcoded_joint_limits_ = this->get_parameter("use_hardcoded_joint_limits").as_bool();
 
+  // Get adaptive delay parameters
+  min_error_ = this->get_parameter("min_error").as_double();
+  max_error_ = this->get_parameter("max_error").as_double();
+  min_delay_ = this->get_parameter("min_delay").as_double();
+  max_delay_ = this->get_parameter("max_delay").as_double();
+  target_change_threshold_ = this->get_parameter("target_change_threshold").as_double();
+  target_change_max_delay_ = this->get_parameter("target_change_max_delay").as_double();
+
+  // Get slow start parameters
+  slow_start_duration_ = this->get_parameter("slow_start_duration").as_double();
+  slow_start_delay_ = this->get_parameter("slow_start_delay").as_double();
+
+  // Initialize previous target positions
+  right_previous_target_positions_.clear();
+  left_previous_target_positions_.clear();
+
+  // Initialize slow start tracking (triggered by VR toggle false -> true transition)
+  vr_toggle_state_ = false;
+  right_soft_start_active_ = false;
+  left_soft_start_active_ = false;
+  right_slow_start_end_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+  left_slow_start_end_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+
   RCLCPP_INFO(this->get_logger(), "🚀 Dual-Arm IK Solver starting...");
   RCLCPP_INFO(this->get_logger(), "Base link: %s", base_link_.c_str());
   RCLCPP_INFO(this->get_logger(), "Arm base link: %s", arm_base_link_.c_str());
@@ -103,6 +138,10 @@ FfwArmIKSolver::FfwArmIKSolver()
   joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
     "/joint_states", 10,
     std::bind(&FfwArmIKSolver::jointStateCallback, this, std::placeholders::_1));
+
+  vr_toggle_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+    "/vr_control/toggle", 10,
+    std::bind(&FfwArmIKSolver::vrToggleCallback, this, std::placeholders::_1));
 
   right_target_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
     right_target_pose_topic, 10,
@@ -218,7 +257,7 @@ void FfwArmIKSolver::processRobotDescription(const std::string & robot_descripti
     // Initialize previous solution arrays
     right_previous_solution_.resize(right_chain_.getNrOfJoints());
     left_previous_solution_.resize(left_chain_.getNrOfJoints());
-    
+
     // Initialize with zero positions
     for (unsigned int i = 0; i < right_chain_.getNrOfJoints(); i++) {
       right_previous_solution_(i) = 0.0;
@@ -229,7 +268,7 @@ void FfwArmIKSolver::processRobotDescription(const std::string & robot_descripti
 
     setup_complete_ = true;
     RCLCPP_INFO(this->get_logger(), "🎉 IK solver setup complete!");
-    RCLCPP_INFO(this->get_logger(), "   Hybrid IK: %s (current: %.1f%%, previous: %.1f%%)", 
+    RCLCPP_INFO(this->get_logger(), "   Hybrid IK: %s (current: %.1f%%, previous: %.1f%%)",
                 use_hybrid_ik_ ? "enabled" : "disabled",
                 current_position_weight_ * 100.0, previous_solution_weight_ * 100.0);
   } catch (const std::exception & e) {
@@ -491,6 +530,30 @@ void FfwArmIKSolver::checkCurrentJointLimits()
   }
 }
 
+void FfwArmIKSolver::vrToggleCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  bool new_state = msg->data;
+  
+  // Detect false to true transition - activate soft start
+  if (new_state && !vr_toggle_state_) {
+    right_soft_start_active_ = true;
+    left_soft_start_active_ = true;
+    rclcpp::Time now = this->get_clock()->now();
+    right_slow_start_end_time_ = now + rclcpp::Duration::from_seconds(slow_start_duration_);
+    left_slow_start_end_time_ = now + rclcpp::Duration::from_seconds(slow_start_duration_);
+    RCLCPP_INFO(this->get_logger(), "[ARM IK] VR toggle: false -> true, soft start activated for %.1f sec",
+                slow_start_duration_);
+  }
+  
+  // Reset soft start when toggle becomes false
+  if (!new_state) {
+    right_soft_start_active_ = false;
+    left_soft_start_active_ = false;
+  }
+  
+  vr_toggle_state_ = new_state;
+}
+
 void FfwArmIKSolver::rightTargetPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
 {
   if (!setup_complete_ || !has_joint_states_) {
@@ -619,11 +682,11 @@ void FfwArmIKSolver::solveIK(
   // Get initial guess using hybrid approach
   KDL::JntArray q_init(chain_ptr->getNrOfJoints());
   KDL::JntArray * previous_solution_ptr = (arm == "right") ? &right_previous_solution_ : &left_previous_solution_;
-  
+
   if (use_hybrid_ik_ && has_previous_solution_) {
     // Hybrid: weighted combination of current position and previous solution
     for (size_t i = 0; i < current_positions_ptr->size(); i++) {
-      q_init(i) = current_position_weight_ * (*current_positions_ptr)[i] + 
+      q_init(i) = current_position_weight_ * (*current_positions_ptr)[i] +
                   previous_solution_weight_ * (*previous_solution_ptr)(i);
     }
     RCLCPP_DEBUG(this->get_logger(), "Using hybrid initial guess for %s arm (%.1f%% current + %.1f%% previous)",
@@ -663,6 +726,11 @@ void FfwArmIKSolver::solveIK(
 
   int ik_result = -1;
 
+  // Static counters for throttling IK failure logs per arm
+  static int right_ik_fail_count = 0;
+  static int left_ik_fail_count = 0;
+  static const int LOG_THROTTLE_INTERVAL = 100; // Log every 100 failures
+
   while (true) {
     auto start_time = this->get_clock()->now();
     ik_result = (*ik_solver_ptr)->CartToJnt(q_init, target_frame, q_result);
@@ -673,13 +741,30 @@ void FfwArmIKSolver::solveIK(
     if (ik_result < 0) {
       auto error_msg = (*ik_solver_ptr)->strError(ik_result);
       auto initial_duration = end_time - initial_start_time;
-      RCLCPP_ERROR(this->get_logger(), "%s arm IK failed with current guess (error: %d, %s), (time: %.3f ms, %.1f Hz), (initial time: %.3f ms, %.1f Hz)",
-        arm.c_str(), ik_result, error_msg, duration.seconds() * 1000.0, 1.0 / duration.seconds(), initial_duration.seconds() * 1000.0, 1.0 / initial_duration.seconds());
-      
+
+      // Update counter and log only periodically
+      int& fail_count = (arm == "right") ? right_ik_fail_count : left_ik_fail_count;
+      fail_count++;
+
+      if (fail_count % LOG_THROTTLE_INTERVAL == 1 || fail_count <= 3) {
+        // Log first 3 failures and then every 100th failure
+        RCLCPP_DEBUG(this->get_logger(),
+          "%s arm IK failed (error: %d, %s) - %d failures total, (time: %.3f ms, %.1f Hz), (initial time: %.3f ms, %.1f Hz)",
+          arm.c_str(), ik_result, error_msg, fail_count,
+          duration.seconds() * 1000.0, 1.0 / duration.seconds(),
+          initial_duration.seconds() * 1000.0, 1.0 / initial_duration.seconds());
+      }
+
       if (initial_duration.seconds() > 0.03) {
         return;
       }
     } else{
+      // Reset counter on success
+      if (arm == "right") {
+        right_ik_fail_count = 0;
+      } else {
+        left_ik_fail_count = 0;
+      }
       break;
     }
   }
@@ -778,9 +863,50 @@ void FfwArmIKSolver::solveIK(
       point.positions[i] = q_filtered(i);
     }
 
-    // Set time from start (immediate execution)
-    point.time_from_start = rclcpp::Duration::from_nanoseconds(0);
+    // Calculate adaptive delay based on error and target changes (IK suddenly solving)
+    std::vector<double> current_targets(q_filtered.rows());
+    for (unsigned int i = 0; i < q_filtered.rows(); i++) {
+      current_targets[i] = q_filtered(i);
+    }
+
+    std::vector<double> * previous_targets_ptr = nullptr;
+    if (arm == "right") {
+      previous_targets_ptr = right_previous_target_positions_.empty() ? nullptr : &right_previous_target_positions_;
+      right_previous_target_positions_ = current_targets;
+    } else {
+      previous_targets_ptr = left_previous_target_positions_.empty() ? nullptr : &left_previous_target_positions_;
+      left_previous_target_positions_ = current_targets;
+    }
+
+    double mean_error = 0.0;
+    double max_target_change = 0.0;
+    double adaptive_delay = calculateAdaptiveDelay(
+      current_targets,
+      current_positions_ptr,
+      previous_targets_ptr,
+      arm,
+      mean_error,
+      max_target_change
+    );
+
+    // Set time from start with adaptive delay
+    int64_t delay_ns = static_cast<int64_t>(adaptive_delay * 1e9);
+    point.time_from_start = rclcpp::Duration::from_nanoseconds(delay_ns);
     joint_trajectory.points.push_back(point);
+
+    // Log adaptive delay periodically
+    static int right_log_counter = 0;
+    static int left_log_counter = 0;
+    int& log_counter = (arm == "right") ? right_log_counter : left_log_counter;
+    log_counter++;
+
+    if (log_counter % 100 == 0) {  // Log every ~0.5 second (at 200Hz typical rate)
+      if (mean_error > min_error_ || max_target_change > target_change_threshold_) {
+        RCLCPP_INFO(this->get_logger(),
+          "[%s ARM] Mean error: %.4f rad, target change: %.4f rad, adaptive delay: %.4f sec",
+          arm.c_str(), mean_error, max_target_change, adaptive_delay);
+      }
+    }
 
     (*publisher_ptr)->publish(joint_trajectory);
 
@@ -869,6 +995,117 @@ void FfwArmIKSolver::publishCurrentPoses()
 
     left_current_pose_pub_->publish(left_pose);
   }
+}
+
+double FfwArmIKSolver::calculateAdaptiveDelay(
+  const std::vector<double> & target_positions,
+  const std::vector<double> * current_positions,
+  const std::vector<double> * previous_targets,
+  const std::string & arm,
+  double & mean_error_out,
+  double & max_target_change_out
+)
+{
+  rclcpp::Time now = this->get_clock()->now();
+  bool in_slow_start = false;
+
+  // Check if we're in slow start period (triggered by VR toggle false -> true)
+  if (arm == "right") {
+    in_slow_start = (right_soft_start_active_ &&
+                     now < right_slow_start_end_time_);
+  } else {
+    in_slow_start = (left_soft_start_active_ &&
+                     now < left_slow_start_end_time_);
+  }
+  
+  // Check if soft start should be disabled (synced or timeout)
+  if (in_slow_start) {
+    // Check if joints are synced - disable soft start if synced
+    std::vector<double> diffs;
+    if (current_positions && current_positions->size() == target_positions.size()) {
+      for (size_t i = 0; i < target_positions.size(); i++) {
+        diffs.push_back(std::abs(target_positions[i] - (*current_positions)[i]));
+      }
+    }
+    
+    double mean_error = 0.0;
+    if (!diffs.empty()) {
+      double sum = 0.0;
+      for (double diff : diffs) {
+        sum += diff;
+      }
+      mean_error = sum / diffs.size();
+    }
+    
+    const double sync_threshold = 0.05;  // rad
+    if (mean_error <= sync_threshold) {
+      // Synced - disable soft start
+      if (arm == "right") {
+        right_soft_start_active_ = false;
+      } else {
+        left_soft_start_active_ = false;
+      }
+      in_slow_start = false;
+      RCLCPP_INFO(this->get_logger(), "[%s ARM] Joints synced - soft start disabled",
+                  arm.c_str());
+    }
+  }
+
+  // If in slow start, use fixed delay (ignore error-based calculation)
+  if (in_slow_start) {
+    mean_error_out = 0.0;
+    max_target_change_out = 0.0;
+    return slow_start_delay_;
+  }
+
+  // Calculate error between target and follower
+  std::vector<double> diffs;
+  if (current_positions && current_positions->size() == target_positions.size()) {
+    for (size_t i = 0; i < target_positions.size(); i++) {
+      diffs.push_back(std::abs(target_positions[i] - (*current_positions)[i]));
+    }
+  }
+
+  double mean_error = 0.0;
+  if (!diffs.empty()) {
+    double sum = 0.0;
+    for (double diff : diffs) {
+      sum += diff;
+    }
+    mean_error = sum / diffs.size();
+  } else {
+    mean_error = max_error_;  // Conservative: slow if no data
+  }
+
+  if (mean_error < min_error_) {
+    mean_error = 0.0;
+  }
+
+  // Calculate sudden target change (IK suddenly solving)
+  double max_target_change = 0.0;
+  if (previous_targets && previous_targets->size() == target_positions.size()) {
+    for (size_t i = 0; i < target_positions.size(); i++) {
+      double change = std::abs(target_positions[i] - (*previous_targets)[i]);
+      max_target_change = std::max(max_target_change, change);
+    }
+  }
+
+  // Base delay from error
+  double error_ratio = std::min(mean_error / max_error_, 1.0);
+  double adaptive_delay = min_delay_ + (max_delay_ - min_delay_) * error_ratio;
+
+  // Additional delay if sudden target change detected (IK suddenly solving)
+  if (max_target_change > target_change_threshold_) {
+    // Large target change - IK probably just solved
+    double change_ratio = std::min((max_target_change - target_change_threshold_) / target_change_threshold_, 1.0);
+    double additional_delay = change_ratio * (target_change_max_delay_ - max_delay_);
+    adaptive_delay = std::max(adaptive_delay, max_delay_ + additional_delay);
+  }
+
+  mean_error_out = mean_error;
+  max_target_change_out = max_target_change;
+
+  return adaptive_delay;
 }
 
 int main(int argc, char ** argv)

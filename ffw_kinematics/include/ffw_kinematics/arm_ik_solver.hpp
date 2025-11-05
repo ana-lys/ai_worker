@@ -34,6 +34,7 @@
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory_point.hpp>
@@ -48,6 +49,7 @@ private:
   void robotDescriptionCallback(const std_msgs::msg::String::SharedPtr msg);
   void processRobotDescription(const std::string & robot_description);
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+  void vrToggleCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void rightTargetPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void leftTargetPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
 
@@ -85,6 +87,7 @@ private:
 
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_description_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr vr_toggle_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr right_target_pose_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr left_target_pose_sub_;
 
@@ -151,6 +154,37 @@ private:
   bool setup_complete_;
   bool has_joint_states_;
   bool has_previous_solution_;
+
+  // Adaptive delay parameters (for smooth movement when IK suddenly solves)
+  double min_error_;              // rad - minimum error threshold
+  double max_error_;              // rad - maximum error for scaling
+  double min_delay_;              // sec - minimum delay
+  double max_delay_;              // sec - maximum delay
+  double target_change_threshold_; // rad - threshold for sudden target change
+  double target_change_max_delay_; // sec - max delay when sudden change detected
+
+  // Store previous target positions to detect sudden changes (IK suddenly solving)
+  std::vector<double> right_previous_target_positions_;
+  std::vector<double> left_previous_target_positions_;
+
+  // Slow start tracking (triggered by VR toggle false -> true transition)
+  bool vr_toggle_state_;
+  bool right_soft_start_active_;
+  bool left_soft_start_active_;
+  rclcpp::Time right_slow_start_end_time_;
+  rclcpp::Time left_slow_start_end_time_;
+  double slow_start_duration_;  // sec - duration of slow start period
+  double slow_start_delay_;     // sec - delay during slow start
+
+  // Calculate adaptive delay based on error, target changes, and slow start
+  double calculateAdaptiveDelay(
+    const std::vector<double> & target_positions,
+    const std::vector<double> * current_positions,
+    const std::vector<double> * previous_targets,
+    const std::string & arm,
+    double & mean_error_out,
+    double & max_target_change_out
+  );
 };
 
 #endif  // FFW_KINEMATICS__ARM_IK_SOLVER_HPP_

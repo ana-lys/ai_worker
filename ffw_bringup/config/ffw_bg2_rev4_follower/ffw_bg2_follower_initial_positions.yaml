@@ -61,7 +61,7 @@
       step1: [0.0]
       step2: [-0.1]
       duration: 10.0
-      position_tolerance: 0.1
+      position_tolerance: 0.01
       velocity_tolerance: 0.01
       action_topic: '/lift_controller/follow_joint_trajectory'
       joint_states_topic: '/joint_states'
