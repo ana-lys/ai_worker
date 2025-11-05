@@ -4,6 +4,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
+from std_msgs.msg import Bool
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -63,6 +64,7 @@ class HandPublisher(Node):
 
         self.left_hand_publisher_ = self.create_publisher(JointTrajectory, '/leader/joint_trajectory_command_broadcaster_left_hand/joint_trajectory', 10)
         self.right_hand_publisher_ = self.create_publisher(JointTrajectory, '/leader/joint_trajectory_command_broadcaster_right_hand/joint_trajectory', 10)
+        self.toggle_publisher_ = self.create_publisher(Bool, '/vr_control/toggle', 10)
 
         self.timer_period = 0.01
 
@@ -112,10 +114,10 @@ class HandPublisher(Node):
             left_traj_point.time_from_start.sec = 0
             left_traj_point.time_from_start.nanosec = 0
             left_msg.points.append(left_traj_point)
-            # self.left_hand_publisher_.publish(left_msg)
+            self.left_hand_publisher_.publish(left_msg)
+
             if self.toggle_control_both:
                 # Teleoperation ON
-                self.left_hand_publisher_.publish(left_msg)
                 if self.compare_arrays_smaller(self.toggle_pose_left, left_temp_hand_joints, self.toggle_threshold) and not self.toggle_count_left and self.toggle_release_left:
                     self.toggle_count_left = True
                     self.toggle_t0_left = time.perf_counter()
@@ -149,10 +151,10 @@ class HandPublisher(Node):
             right_traj_point.time_from_start.sec = 0
             right_traj_point.time_from_start.nanosec = 0
             right_msg.points.append(right_traj_point)
-            # self.right_hand_publisher_.publish(right_msg)
+            self.right_hand_publisher_.publish(right_msg)
+
             if self.toggle_control_both:
                 # Teleoperation ON
-                self.right_hand_publisher_.publish(right_msg)
                 if self.compare_arrays_smaller(self.toggle_pose_right, right_temp_hand_joints, self.toggle_threshold) and not self.toggle_count_right and self.toggle_release_right:
                     self.toggle_count_right = True
                     self.toggle_t0_right = time.perf_counter()
@@ -177,18 +179,24 @@ class HandPublisher(Node):
                 else:
                     self.toggle_count_right = False
 
-        if self.toggle_control_left and self.toggle_control_right:
+        if (self.toggle_control_left and self.toggle_control_right) and (self.toggle_count_left and self.toggle_count_right):
             # Teleoperation ON
             self.toggle_control_both = True
             self.toggle_count_left = False
             self.toggle_count_right = False
             self.toggle_release_left = False
             self.toggle_release_right = False
-        elif not self.toggle_control_left and not self.toggle_control_right:
+            bool_msg = Bool()
+            bool_msg.data = True
+            self.toggle_publisher_.publish(bool_msg)
+        elif (not self.toggle_control_left and not self.toggle_control_right) and (self.toggle_count_left and self.toggle_count_right):
             # Teleoperation OFF
             self.toggle_control_both = False
             self.toggle_count_left = False
             self.toggle_count_right = False
+            bool_msg = Bool()
+            bool_msg.data = False
+            self.toggle_publisher_.publish(bool_msg)
 
     def left_thumb_callback(self, msg):
         for i in range(len(self.present_left_thumb_joints)):
