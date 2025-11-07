@@ -42,7 +42,6 @@
     </inertial>
   </link>
 
-  <!-- Left Lidar -->
   <joint name="$(arg prefix)lidar_l_joint" type="fixed">
     <parent link="$(arg prefix)base_link"/>
     <child link="$(arg prefix)lidar_l_link"/>
@@ -51,7 +50,6 @@
   <link name="$(arg prefix)lidar_l_link">
   </link>
 
-  <!-- Right Lidar -->
   <joint name="$(arg prefix)lidar_r_joint" type="fixed">
     <parent link="$(arg prefix)base_link"/>
     <child link="$(arg prefix)lidar_r_link"/>
