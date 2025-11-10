@@ -533,7 +533,7 @@ void FfwArmIKSolver::checkCurrentJointLimits()
 void FfwArmIKSolver::vrToggleCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   bool new_state = msg->data;
-  
+
   // Detect false to true transition - activate soft start
   if (new_state && !vr_toggle_state_) {
     right_soft_start_active_ = true;
@@ -541,16 +541,21 @@ void FfwArmIKSolver::vrToggleCallback(const std_msgs::msg::Bool::SharedPtr msg)
     rclcpp::Time now = this->get_clock()->now();
     right_slow_start_end_time_ = now + rclcpp::Duration::from_seconds(slow_start_duration_);
     left_slow_start_end_time_ = now + rclcpp::Duration::from_seconds(slow_start_duration_);
-    RCLCPP_INFO(this->get_logger(), "[ARM IK] VR toggle: false -> true, soft start activated for %.1f sec",
-                slow_start_duration_);
+    RCLCPP_INFO(this->get_logger(),
+                "🚀 [ARM IK] VR toggle: false -> true, slow start ACTIVATED");
+    RCLCPP_INFO(this->get_logger(),
+                "   Duration: %.1f sec, Delay: %.3f sec (both arms)",
+                slow_start_duration_, slow_start_delay_);
   }
-  
+
   // Reset soft start when toggle becomes false
-  if (!new_state) {
+  if (!new_state && vr_toggle_state_) {
     right_soft_start_active_ = false;
     left_soft_start_active_ = false;
+    RCLCPP_INFO(this->get_logger(),
+                "⏹️  [ARM IK] VR toggle: true -> false, slow start DEACTIVATED");
   }
-  
+
   vr_toggle_state_ = new_state;
 }
 
@@ -1008,57 +1013,23 @@ double FfwArmIKSolver::calculateAdaptiveDelay(
 {
   rclcpp::Time now = this->get_clock()->now();
   bool in_slow_start = false;
+  bool * soft_start_active_ptr = nullptr;
+  rclcpp::Time * slow_start_end_time_ptr = nullptr;
 
   // Check if we're in slow start period (triggered by VR toggle false -> true)
   if (arm == "right") {
+    soft_start_active_ptr = &right_soft_start_active_;
+    slow_start_end_time_ptr = &right_slow_start_end_time_;
     in_slow_start = (right_soft_start_active_ &&
                      now < right_slow_start_end_time_);
   } else {
+    soft_start_active_ptr = &left_soft_start_active_;
+    slow_start_end_time_ptr = &left_slow_start_end_time_;
     in_slow_start = (left_soft_start_active_ &&
                      now < left_slow_start_end_time_);
   }
-  
-  // Check if soft start should be disabled (synced or timeout)
-  if (in_slow_start) {
-    // Check if joints are synced - disable soft start if synced
-    std::vector<double> diffs;
-    if (current_positions && current_positions->size() == target_positions.size()) {
-      for (size_t i = 0; i < target_positions.size(); i++) {
-        diffs.push_back(std::abs(target_positions[i] - (*current_positions)[i]));
-      }
-    }
-    
-    double mean_error = 0.0;
-    if (!diffs.empty()) {
-      double sum = 0.0;
-      for (double diff : diffs) {
-        sum += diff;
-      }
-      mean_error = sum / diffs.size();
-    }
-    
-    const double sync_threshold = 0.05;  // rad
-    if (mean_error <= sync_threshold) {
-      // Synced - disable soft start
-      if (arm == "right") {
-        right_soft_start_active_ = false;
-      } else {
-        left_soft_start_active_ = false;
-      }
-      in_slow_start = false;
-      RCLCPP_INFO(this->get_logger(), "[%s ARM] Joints synced - soft start disabled",
-                  arm.c_str());
-    }
-  }
 
-  // If in slow start, use fixed delay (ignore error-based calculation)
-  if (in_slow_start) {
-    mean_error_out = 0.0;
-    max_target_change_out = 0.0;
-    return slow_start_delay_;
-  }
-
-  // Calculate error between target and follower
+  // Calculate error between target and current positions (used for both sync check and adaptive delay)
   std::vector<double> diffs;
   if (current_positions && current_positions->size() == target_positions.size()) {
     for (size_t i = 0; i < target_positions.size(); i++) {
@@ -1075,6 +1046,55 @@ double FfwArmIKSolver::calculateAdaptiveDelay(
     mean_error = sum / diffs.size();
   } else {
     mean_error = max_error_;  // Conservative: slow if no data
+  }
+
+  // Check if soft start should be disabled (synced or timeout)
+  if (in_slow_start) {
+    // Calculate remaining time
+    double remaining_time = (*slow_start_end_time_ptr - now).seconds();
+
+    // Static counters for throttling slow start status logs
+    static int right_slow_start_log_counter = 0;
+    static int left_slow_start_log_counter = 0;
+    int& slow_start_log_counter = (arm == "right") ? right_slow_start_log_counter : left_slow_start_log_counter;
+    slow_start_log_counter++;
+
+    // Log slow start status periodically (every 50 calls ~ 0.25 sec at 200Hz)
+    if (slow_start_log_counter % 50 == 0) {
+      RCLCPP_INFO(this->get_logger(),
+                  "⏳ [%s ARM] Slow start ACTIVE: remaining %.2f sec, error: %.4f rad, delay: %.3f sec",
+                  arm.c_str(), remaining_time, mean_error, slow_start_delay_);
+    }
+
+    // Check timeout first
+    if (now >= *slow_start_end_time_ptr) {
+      // Timeout - disable soft start
+      *soft_start_active_ptr = false;
+      in_slow_start = false;
+      slow_start_log_counter = 0;  // Reset counter
+      RCLCPP_INFO(this->get_logger(),
+                  "⏰ [%s ARM] Slow start TIMEOUT after %.1f sec - disabled",
+                  arm.c_str(), slow_start_duration_);
+    } else {
+      // Check if joints are synced - disable soft start if synced
+      const double sync_threshold = 0.05;  // rad
+      if (mean_error <= sync_threshold) {
+        // Synced - disable soft start
+        *soft_start_active_ptr = false;
+        in_slow_start = false;
+        slow_start_log_counter = 0;  // Reset counter
+        RCLCPP_INFO(this->get_logger(),
+                    "✅ [%s ARM] Joints SYNCED (error: %.4f rad <= %.4f rad) - slow start disabled early (remaining: %.2f sec)",
+                    arm.c_str(), mean_error, sync_threshold, remaining_time);
+      }
+    }
+  }
+
+  // If in slow start, use fixed delay (ignore error-based calculation)
+  if (in_slow_start) {
+    mean_error_out = 0.0;
+    max_target_change_out = 0.0;
+    return slow_start_delay_;
   }
 
   if (mean_error < min_error_) {
