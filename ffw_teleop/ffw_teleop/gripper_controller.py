@@ -35,6 +35,9 @@ class FfwArmTrajectoryCommander(Node):
         self.right_squeeze_value_ = 0.0
         self.has_right_ik_solution_ = False
         self.has_left_ik_solution_ = False
+        # Store time_from_start from IK solver
+        self.right_ik_time_from_start_ = None
+        self.left_ik_time_from_start_ = None
 
         # Declare parameters
         self.declare_parameter('trajectory_duration', 0.01)  # 10ms
@@ -130,6 +133,8 @@ class FfwArmTrajectoryCommander(Node):
 
         self.right_ik_solution_.name = msg.joint_names
         self.right_ik_solution_.position = point.positions
+        # Store time_from_start from IK solver
+        self.right_ik_time_from_start_ = point.time_from_start
         self.has_right_ik_solution_ = True
 
         self.send_right_arm_trajectory()
@@ -159,6 +164,8 @@ class FfwArmTrajectoryCommander(Node):
 
         self.left_ik_solution_.name = msg.joint_names
         self.left_ik_solution_.position = point.positions
+        # Store time_from_start from IK solver
+        self.left_ik_time_from_start_ = point.time_from_start
         self.has_left_ik_solution_ = True
 
         self.send_left_arm_trajectory()
@@ -211,8 +218,12 @@ class FfwArmTrajectoryCommander(Node):
         point.velocities = [0.0] * len(point.positions)
         point.accelerations = [0.0] * len(point.positions)
 
-        point.time_from_start.sec = 0
-        point.time_from_start.nanosec = 0
+        # Use time_from_start from IK solver if available, otherwise use 0.0
+        if self.right_ik_time_from_start_ is not None:
+            point.time_from_start = self.right_ik_time_from_start_
+        else:
+            point.time_from_start.sec = 0
+            point.time_from_start.nanosec = 0
 
         trajectory_msg.points = [point]
 
@@ -240,8 +251,12 @@ class FfwArmTrajectoryCommander(Node):
         point.velocities = [0.0] * len(point.positions)
         point.accelerations = [0.0] * len(point.positions)
 
-        point.time_from_start.sec = 0
-        point.time_from_start.nanosec = 0
+        # Use time_from_start from IK solver if available, otherwise use 0.0
+        if self.left_ik_time_from_start_ is not None:
+            point.time_from_start = self.left_ik_time_from_start_
+        else:
+            point.time_from_start.sec = 0
+            point.time_from_start.nanosec = 0
 
         trajectory_msg.points = [point]
 
