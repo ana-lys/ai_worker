@@ -44,7 +44,7 @@ FfwArmIKSolver::FfwArmIKSolver()
   this->declare_parameter<double>("lift_joint_z_offset", 1.6316);
 
   // IK solver parameters
-  this->declare_parameter<double>("max_joint_step_degrees", 30.0);
+  this->declare_parameter<double>("max_joint_step_degrees", 50.0);
   this->declare_parameter<int>("ik_max_iterations", 800);
   this->declare_parameter<double>("ik_tolerance", 1e-2);
 
@@ -54,7 +54,7 @@ FfwArmIKSolver::FfwArmIKSolver()
   this->declare_parameter<double>("previous_solution_weight", 0.5); // Weight for previous IK solution
 
   // Low-pass filter between current state and IK target
-  this->declare_parameter<double>("lpf_alpha", 0.2);
+  this->declare_parameter<double>("lpf_alpha", 0.9);
 
   // Joint limits parameters (can be overridden if needed)
   this->declare_parameter<bool>("use_hardcoded_joint_limits", true);
@@ -68,8 +68,12 @@ FfwArmIKSolver::FfwArmIKSolver()
   this->declare_parameter<double>("target_change_max_delay", 0.8);  // sec - max delay when sudden change detected
 
   // Slow start parameters (only at pedal press start)
-  this->declare_parameter<double>("slow_start_duration", 2.0);  // sec - duration of slow start after first message
+  this->declare_parameter<double>("slow_start_duration", 3.0);  // sec - duration of slow start after first message
   this->declare_parameter<double>("slow_start_delay", 0.5);    // sec - delay during slow start period
+  this->declare_parameter<double>("slow_start_sync_threshold", 0.15);  // rad - error threshold for early sync exit
+
+  // Permanent sync threshold (similar to joint_trajectory_command_broadcaster)
+  this->declare_parameter<double>("sync_threshold", 0.01);  // rad - threshold for permanent sync state
 
   base_link_ = this->get_parameter("base_link").as_string();
   arm_base_link_ = this->get_parameter("arm_base_link").as_string();
@@ -113,6 +117,10 @@ FfwArmIKSolver::FfwArmIKSolver()
   // Get slow start parameters
   slow_start_duration_ = this->get_parameter("slow_start_duration").as_double();
   slow_start_delay_ = this->get_parameter("slow_start_delay").as_double();
+  slow_start_sync_threshold_ = this->get_parameter("slow_start_sync_threshold").as_double();
+
+  // Get permanent sync threshold
+  sync_threshold_ = this->get_parameter("sync_threshold").as_double();
 
   // Initialize previous target positions
   right_previous_target_positions_.clear();
@@ -124,6 +132,12 @@ FfwArmIKSolver::FfwArmIKSolver()
   left_soft_start_active_ = false;
   right_slow_start_end_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   left_slow_start_end_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+
+  // Initialize permanent sync state tracking
+  right_joints_synced_ = false;
+  left_joints_synced_ = false;
+  right_first_publish_ = true;
+  left_first_publish_ = true;
 
   RCLCPP_INFO(this->get_logger(), "🚀 Dual-Arm IK Solver starting...");
   RCLCPP_INFO(this->get_logger(), "Base link: %s", base_link_.c_str());
@@ -541,6 +555,11 @@ void FfwArmIKSolver::vrToggleCallback(const std_msgs::msg::Bool::SharedPtr msg)
     rclcpp::Time now = this->get_clock()->now();
     right_slow_start_end_time_ = now + rclcpp::Duration::from_seconds(slow_start_duration_);
     left_slow_start_end_time_ = now + rclcpp::Duration::from_seconds(slow_start_duration_);
+    // Reset sync state when starting slow start (similar to broadcaster)
+    right_joints_synced_ = false;
+    left_joints_synced_ = false;
+    right_first_publish_ = true;
+    left_first_publish_ = true;
     RCLCPP_INFO(this->get_logger(),
                 "🚀 [ARM IK] VR toggle: false -> true, slow start ACTIVATED");
     RCLCPP_INFO(this->get_logger(),
@@ -817,10 +836,13 @@ void FfwArmIKSolver::solveIK(
 
     // Apply low-pass filter: blend current position toward IK target
     KDL::JntArray q_filtered(chain_ptr->getNrOfJoints());
+    double max_lpf_delta = 0.0;
     for (unsigned int i = 0; i < q_result.rows(); i++) {
       const double current_pos = (*current_positions_ptr)[i];
       const double target_pos = q_result(i);
       q_filtered(i) = (1.0 - lpf_alpha_) * current_pos + lpf_alpha_ * target_pos;
+      double lpf_delta = std::abs(q_filtered(i) - current_pos);
+      max_lpf_delta = std::max(max_lpf_delta, lpf_delta);
       // Clamp to joint hard limits
       if (q_filtered(i) < (*q_min_ptr)(i)) { q_filtered(i) = (*q_min_ptr)(i); }
       if (q_filtered(i) > (*q_max_ptr)(i)) { q_filtered(i) = (*q_max_ptr)(i); }
@@ -829,21 +851,34 @@ void FfwArmIKSolver::solveIK(
     // Clamp joint movement to max step for safety (applied to filtered values)
     const double max_joint_step = max_joint_step_degrees_ * M_PI / 180.0;
     bool clamped = false;
+    double max_clamped_delta = 0.0;
     for (unsigned int i = 0; i < q_filtered.rows(); i++) {
       double delta = q_filtered(i) - (*current_positions_ptr)[i];
-      if (std::abs(delta) > max_joint_step) {
+      double abs_delta = std::abs(delta);
+      if (abs_delta > max_joint_step) {
         clamped = true;
         if (delta > 0) {
           q_filtered(i) = (*current_positions_ptr)[i] + max_joint_step;
         } else {
           q_filtered(i) = (*current_positions_ptr)[i] - max_joint_step;
         }
+        max_clamped_delta = std::max(max_clamped_delta, abs_delta);
       }
     }
-    if (clamped) {
-      // RCLCPP_WARN(this->get_logger(),
-      //   "⚠️ %s arm joint movement clamped to max %.1f deg per cycle for safety.",
-      //                      arm.c_str(), max_joint_step_degrees_);
+
+    // Log movement limitations periodically
+    static int movement_log_counter = 0;
+    movement_log_counter++;
+    if (movement_log_counter % 200 == 0) {  // Log every 200 calls (~1 sec at 200Hz)
+      if (clamped) {
+        RCLCPP_WARN(this->get_logger(),
+          "⚠️ [%s ARM] Movement CLAMPED - max step: %.1f deg, max delta: %.4f rad (%.1f deg), LPF alpha: %.3f, max LPF delta: %.4f rad",
+          arm.c_str(), max_joint_step_degrees_, max_clamped_delta, max_clamped_delta * 180.0 / M_PI, lpf_alpha_, max_lpf_delta);
+      } else if (max_lpf_delta > 0.01) {
+        RCLCPP_INFO(this->get_logger(),
+          "📊 [%s ARM] Movement - max LPF delta: %.4f rad (%.1f deg), LPF alpha: %.3f",
+          arm.c_str(), max_lpf_delta, max_lpf_delta * 180.0 / M_PI, lpf_alpha_);
+      }
     }
 
     // RCLCPP_INFO(this->get_logger(), "✅ %s arm IK solution found!", arm.c_str());
@@ -885,6 +920,26 @@ void FfwArmIKSolver::solveIK(
 
     double mean_error = 0.0;
     double max_target_change = 0.0;
+
+    // Log what we're comparing (for debugging)
+    static int comparison_log_counter = 0;
+    comparison_log_counter++;
+    if (comparison_log_counter % 500 == 0) {  // Log every 500 calls (~2.5 sec at 200Hz)
+      if (current_positions_ptr && current_positions_ptr->size() == current_targets.size() &&
+          current_targets.size() > 0) {
+        // Show first joint comparison as example
+        double first_target = current_targets[0];
+        double first_current = (*current_positions_ptr)[0];
+        double first_diff = std::abs(first_target - first_current);
+        RCLCPP_INFO(this->get_logger(),
+          "🔍 [%s ARM] Error calculation: comparing TARGET (IK solution, LPF applied) vs CURRENT (leader joint states)",
+          arm.c_str());
+        RCLCPP_INFO(this->get_logger(),
+          "   Example joint[0]: target=%.4f rad, current=%.4f rad, diff=%.4f rad",
+          first_target, first_current, first_diff);
+      }
+    }
+
     double adaptive_delay = calculateAdaptiveDelay(
       current_targets,
       current_positions_ptr,
@@ -906,10 +961,24 @@ void FfwArmIKSolver::solveIK(
     log_counter++;
 
     if (log_counter % 100 == 0) {  // Log every ~0.5 second (at 200Hz typical rate)
-      if (mean_error > min_error_ || max_target_change > target_change_threshold_) {
+      // Check if permanently synced
+      bool is_synced = (arm == "right") ? right_joints_synced_ : left_joints_synced_;
+      if (is_synced) {
+        // NOTE: mean_error here is the actual calculated error (not 0.0)
+        // Check if error is still within threshold
+        if (mean_error <= sync_threshold_) {
+          RCLCPP_INFO(this->get_logger(),
+            "⚡ [%s ARM] SYNCED - time_from_start: %.4f sec (immediate), actual_mean_error: %.4f rad (within threshold: %.4f rad), LPF: %.3f, max_step: %.1f deg",
+            arm.c_str(), adaptive_delay, mean_error, sync_threshold_, lpf_alpha_, max_joint_step_degrees_);
+        } else {
+          RCLCPP_WARN(this->get_logger(),
+            "⚡ [%s ARM] SYNCED (locked) - time_from_start: %.4f sec (immediate), actual_mean_error: %.4f rad > threshold: %.4f rad (error increased but still using immediate delay), LPF: %.3f, max_step: %.1f deg",
+            arm.c_str(), adaptive_delay, mean_error, sync_threshold_, lpf_alpha_, max_joint_step_degrees_);
+        }
+      } else if (mean_error > min_error_ || max_target_change > target_change_threshold_) {
         RCLCPP_INFO(this->get_logger(),
-          "[%s ARM] Mean error: %.4f rad, target change: %.4f rad, adaptive delay: %.4f sec",
-          arm.c_str(), mean_error, max_target_change, adaptive_delay);
+          "[%s ARM] NOT SYNCED - Mean error: %.4f rad, target change: %.4f rad, adaptive delay: %.4f sec (sync_threshold: %.4f rad), LPF: %.3f, max_step: %.1f deg",
+          arm.c_str(), mean_error, max_target_change, adaptive_delay, sync_threshold_, lpf_alpha_, max_joint_step_degrees_);
       }
     }
 
@@ -1015,21 +1084,31 @@ double FfwArmIKSolver::calculateAdaptiveDelay(
   bool in_slow_start = false;
   bool * soft_start_active_ptr = nullptr;
   rclcpp::Time * slow_start_end_time_ptr = nullptr;
+  bool * joints_synced_ptr = nullptr;
+  bool * first_publish_ptr = nullptr;
 
   // Check if we're in slow start period (triggered by VR toggle false -> true)
   if (arm == "right") {
     soft_start_active_ptr = &right_soft_start_active_;
     slow_start_end_time_ptr = &right_slow_start_end_time_;
+    joints_synced_ptr = &right_joints_synced_;
+    first_publish_ptr = &right_first_publish_;
     in_slow_start = (right_soft_start_active_ &&
                      now < right_slow_start_end_time_);
   } else {
     soft_start_active_ptr = &left_soft_start_active_;
     slow_start_end_time_ptr = &left_slow_start_end_time_;
+    joints_synced_ptr = &left_joints_synced_;
+    first_publish_ptr = &left_first_publish_;
     in_slow_start = (left_soft_start_active_ &&
                      now < left_slow_start_end_time_);
   }
 
   // Calculate error between target and current positions (used for both sync check and adaptive delay)
+  // NOTE: This compares:
+  //   - target_positions: IK solver output (q_filtered) - what we want leader to be at
+  //   - current_positions: Leader's actual current joint positions (from /joint_states)
+  // This is NOT comparing with follower positions - that happens in joint_trajectory_command_broadcaster
   std::vector<double> diffs;
   if (current_positions && current_positions->size() == target_positions.size()) {
     for (size_t i = 0; i < target_positions.size(); i++) {
@@ -1076,16 +1155,15 @@ double FfwArmIKSolver::calculateAdaptiveDelay(
                   "⏰ [%s ARM] Slow start TIMEOUT after %.1f sec - disabled",
                   arm.c_str(), slow_start_duration_);
     } else {
-      // Check if joints are synced - disable soft start if synced
-      const double sync_threshold = 0.05;  // rad
-      if (mean_error <= sync_threshold) {
-        // Synced - disable soft start
+      // Check if joints are synced enough to exit slow start early
+      if (mean_error <= slow_start_sync_threshold_) {
+        // Error is low enough to exit slow start early (but not necessarily permanently synced)
         *soft_start_active_ptr = false;
         in_slow_start = false;
         slow_start_log_counter = 0;  // Reset counter
         RCLCPP_INFO(this->get_logger(),
-                    "✅ [%s ARM] Joints SYNCED (error: %.4f rad <= %.4f rad) - slow start disabled early (remaining: %.2f sec)",
-                    arm.c_str(), mean_error, sync_threshold, remaining_time);
+                    "✅ [%s ARM] Slow start disabled early (error: %.4f rad <= %.4f rad, remaining: %.2f sec) - switching to adaptive delay",
+                    arm.c_str(), mean_error, slow_start_sync_threshold_, remaining_time);
       }
     }
   }
@@ -1095,6 +1173,50 @@ double FfwArmIKSolver::calculateAdaptiveDelay(
     mean_error_out = 0.0;
     max_target_change_out = 0.0;
     return slow_start_delay_;
+  }
+
+  // Update sync status and handle first publish (similar to broadcaster)
+  if (*first_publish_ptr) {
+    *joints_synced_ptr = false;
+    *first_publish_ptr = false;
+    RCLCPP_INFO(this->get_logger(),
+                "First publish [%s ARM] - using adaptive time_from_start based on error",
+                arm.c_str());
+  } else {
+    // Once synced, stay synced permanently
+    bool current_synced = (mean_error <= sync_threshold_);
+    if (!(*joints_synced_ptr) && current_synced) {
+      *joints_synced_ptr = true;
+      RCLCPP_INFO(this->get_logger(),
+                  "Joints synced for the first time [%s ARM] - switching to immediate time_from_start permanently (mean_error: %.4f rad <= %.4f rad)",
+                  arm.c_str(), mean_error, sync_threshold_);
+    }
+  }
+
+  // If permanently synced, return immediate delay (0.0)
+  // NOTE: Store actual mean_error before setting it to 0.0 for logging
+  double actual_mean_error = mean_error;
+  if (*joints_synced_ptr) {
+    mean_error_out = 0.0;  // Return 0.0 for delay calculation, but log actual error
+    max_target_change_out = 0.0;
+    // Log periodically to confirm immediate delay is being used
+    static int right_synced_log_counter = 0;
+    static int left_synced_log_counter = 0;
+    int& synced_log_counter = (arm == "right") ? right_synced_log_counter : left_synced_log_counter;
+    synced_log_counter++;
+    if (synced_log_counter % 100 == 0) {  // Log every 100 calls (~0.5 sec at 200Hz)
+      // Check if error is still below threshold (for information)
+      if (actual_mean_error <= sync_threshold_) {
+        RCLCPP_INFO(this->get_logger(),
+                    "⚡ [%s ARM] PERMANENTLY SYNCED - using immediate delay (0.0 sec), actual_mean_error: %.4f rad (within threshold: %.4f rad)",
+                    arm.c_str(), actual_mean_error, sync_threshold_);
+      } else {
+        RCLCPP_WARN(this->get_logger(),
+                    "⚡ [%s ARM] PERMANENTLY SYNCED (locked) - using immediate delay (0.0 sec), actual_mean_error: %.4f rad > threshold: %.4f rad (error increased but still using immediate delay)",
+                    arm.c_str(), actual_mean_error, sync_threshold_);
+      }
+    }
+    return 0.0;
   }
 
   if (mean_error < min_error_) {

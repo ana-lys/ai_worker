@@ -175,6 +175,14 @@ private:
   rclcpp::Time left_slow_start_end_time_;
   double slow_start_duration_;  // sec - duration of slow start period
   double slow_start_delay_;     // sec - delay during slow start
+  double slow_start_sync_threshold_;  // rad - error threshold for early sync exit
+
+  // Permanent sync state tracking (similar to joint_trajectory_command_broadcaster)
+  bool right_joints_synced_;  // Once true, stays true permanently
+  bool left_joints_synced_;   // Once true, stays true permanently
+  bool right_first_publish_;  // Track first publish after slow start
+  bool left_first_publish_;   // Track first publish after slow start
+  double sync_threshold_;     // rad - threshold for permanent sync (separate from slow_start_sync_threshold_)
 
   // Calculate adaptive delay based on error, target changes, and slow start
   double calculateAdaptiveDelay(
