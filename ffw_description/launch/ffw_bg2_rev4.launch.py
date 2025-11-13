@@ -46,7 +46,7 @@ def generate_launch_description():
                 ]
             ),
             ' ',
-            'use_fake_hardware:=',
+            'use_mock_hardware:=',
             'False',
         ]
     )

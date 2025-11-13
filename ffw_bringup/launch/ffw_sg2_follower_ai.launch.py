@@ -33,10 +33,10 @@ def generate_launch_description():
                               description='Whether to execute rviz2'),
         DeclareLaunchArgument('use_sim', default_value='false',
                               description='Start robot in Gazebo simulation.'),
-        DeclareLaunchArgument('use_fake_hardware', default_value='false',
-                              description='Use fake hardware mirroring command.'),
-        DeclareLaunchArgument('fake_sensor_commands', default_value='false',
-                              description='Enable fake sensor commands.'),
+        DeclareLaunchArgument('use_mock_hardware', default_value='false',
+                              description='Use mock hardware mirroring command.'),
+        DeclareLaunchArgument('mock_sensor_commands', default_value='false',
+                              description='Enable mock sensor commands.'),
         DeclareLaunchArgument('port_name', default_value='/dev/follower',
                               description='Port name for hardware connection.'),
         DeclareLaunchArgument('launch_cameras', default_value='true',
@@ -49,8 +49,8 @@ def generate_launch_description():
 
     start_rviz = LaunchConfiguration('start_rviz')
     use_sim = LaunchConfiguration('use_sim')
-    use_fake_hardware = LaunchConfiguration('use_fake_hardware')
-    fake_sensor_commands = LaunchConfiguration('fake_sensor_commands')
+    use_mock_hardware = LaunchConfiguration('use_mock_hardware')
+    mock_sensor_commands = LaunchConfiguration('mock_sensor_commands')
     port_name = LaunchConfiguration('port_name')
     launch_cameras = LaunchConfiguration('launch_cameras')
     init_position = LaunchConfiguration('init_position')
@@ -66,9 +66,9 @@ def generate_launch_description():
         ' ',
         'use_sim:=', use_sim,
         ' ',
-        'use_fake_hardware:=', use_fake_hardware,
+        'use_mock_hardware:=', use_mock_hardware,
         ' ',
-        'fake_sensor_commands:=', fake_sensor_commands,
+        'mock_sensor_commands:=', mock_sensor_commands,
         ' ',
         'port_name:=', port_name,
         ' ',
