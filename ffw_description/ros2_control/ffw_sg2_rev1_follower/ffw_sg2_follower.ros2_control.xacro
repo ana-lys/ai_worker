@@ -543,6 +543,8 @@
         <param name="[unit info]">
           Present Position,0.00001,m,signed,0.0;
           Goal Position,0.00001,m,signed,0.0;
+          Present Velocity,0.00087381333,m/s,signed,0.0;
+          Goal Velocity,0.00087381333,m/s,signed,0.0;
         </param>
       </gpio>
       <!-- HEAD -->
