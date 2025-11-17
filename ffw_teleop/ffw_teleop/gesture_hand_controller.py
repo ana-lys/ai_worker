@@ -78,7 +78,7 @@ class HandPublisher(Node):
         self.toggle_t1_left = time.perf_counter()
 
         self.toggle_time = 2.0
-        self.toggle_threshold = 0.5
+        self.toggle_threshold = 0.7
 
         self.toggle_control_right = False # teleoperation OFF - False (default), ON - True
         self.toggle_control_left = False # teleoperation OFF - False (default), ON - True

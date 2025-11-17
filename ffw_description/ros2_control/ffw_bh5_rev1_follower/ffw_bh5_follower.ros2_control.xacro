@@ -2707,5 +2707,38 @@
         <param name="Velocity I Gain">1065630</param>
       </gpio>
     </ros2_control>
+
+    <ros2_control name="ffw_bh5_preset_hands" type="system">
+      <xacro:if value="$(arg use_sim)">
+        <hardware>
+          <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+        </hardware>
+      </xacro:if>
+      <xacro:unless value="$(arg use_sim)">
+        <hardware>
+          <xacro:if value="${use_fake_hardware}">
+            <plugin>fake_components/GenericSystem</plugin>
+            <param name="fake_sensor_commands">${fake_sensor_commands}</param>
+            <param name="state_following_offset">0.0</param>
+          </xacro:if>
+          <xacro:unless value="${use_fake_hardware}">
+            <plugin>joint_state_topic_hardware_interface/JointStateTopicSystem</plugin>
+            <param name="joint_commands_topic">/topic_based_joint_commands</param>
+            <param name="joint_states_topic">/topic_based_joint_states</param>
+          </xacro:unless>
+        </hardware>
+      </xacro:unless>
+      <joint name="gripper_r_joint1">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="gripper_l_joint1">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </ros2_control>
+
   </xacro:macro>
 </robot>
