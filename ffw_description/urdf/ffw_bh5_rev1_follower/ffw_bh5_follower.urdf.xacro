@@ -68,9 +68,11 @@
     fake_sensor_commands="$(arg fake_sensor_commands)"/>
 
   <joint name="$(arg prefix)gripper_r_joint1" type="revolute">
-      <parent link="$(arg prefix)base_link" />
-      <child link="$(arg prefix)dummy_link1" />
-      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+    <parent link="$(arg prefix)base_link" />
+    <child link="$(arg prefix)dummy_link1" />
+    <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+    <limit effort="1000" lower="-0.2317" upper="0.6951" velocity="4.8"/>
+    <dynamics damping="0.1"/>
   </joint>
   <link name="$(arg prefix)dummy_link1">
       <visual>
@@ -85,9 +87,11 @@
   </link>
 
   <joint name="$(arg prefix)gripper_l_joint1" type="revolute">
-      <parent link="$(arg prefix)base_link" />
-      <child link="$(arg prefix)dummy_link2" />
-      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+    <parent link="$(arg prefix)base_link" />
+    <child link="$(arg prefix)dummy_link2" />
+    <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+    <limit effort="1000" lower="-0.2317" upper="0.6951" velocity="4.8"/>
+    <dynamics damping="0.1"/>
   </joint>
   <link name="$(arg prefix)dummy_link2">
       <visual>

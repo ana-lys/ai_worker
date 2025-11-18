@@ -256,17 +256,17 @@ def generate_launch_description():
         output='screen',
     )
 
-    # ffw_arm_ik_solver = Node(
-    #     package='ffw_kinematics',
-    #     executable='ffw_arm_ik_solver',
-    #     output='screen',
-    # )
+    ffw_arm_ik_solver = Node(
+        package='ffw_kinematics',
+        executable='ffw_arm_ik_solver',
+        output='screen',
+    )
 
-    # pedal_launch_dir = PathJoinSubstitution([FindPackageShare('dynamixel_hardware_interface_example_2'), 'launch'])
-    # pedal_launch = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(PathJoinSubstitution([pedal_launch_dir,
-    #                                                'hardware.launch.py']))
-    # )
+    pedal_launch_dir = PathJoinSubstitution([FindPackageShare('dynamixel_hardware_interface_example_2'), 'launch'])
+    pedal_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([pedal_launch_dir,
+                                                   'hardware.launch.py']))
+    )
 
     # robotis_hand_ik_teleop = Node(
     #     package='robotis_hand_ik_teleop',
@@ -315,17 +315,17 @@ def generate_launch_description():
     # camera_timer_10s = TimerAction(period=10.0, actions=[camera_launch],
     #                                condition=UnlessCondition(init_position))
 
-    # # Teleop launch include
-    # teleop_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_teleop'), 'launch'])
-    # pedal_launch = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
-    #                                                'pedal_hardware.launch.py']))
-    # )
+    # Teleop launch include
+    teleop_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_teleop'), 'launch'])
+    pedal_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
+                                                   'pedal_hardware.launch.py']))
+    )
 
-    # ffw_arm_launch = IncludeLaunchDescription(
-    #     PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
-    #                                                'hand_teleop.launch.py']))
-    # )
+    ffw_arm_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([teleop_launch_dir,
+                                                   'hand_teleop.launch.py']))
+    )
 
     return LaunchDescription(
         declared_arguments + [
@@ -339,8 +339,8 @@ def generate_launch_description():
             init_position_event_handler,
             # camera_timer_20s,
             # camera_timer_10s,
-            # ffw_arm_launch,
-            # pedal_launch,
+            ffw_arm_launch,
+            pedal_launch,
             # preset_hand_controller,
         ]
     )
