@@ -11,10 +11,10 @@ class HandPublisher(Node):
         super().__init__('hand_publisher')
         self.left_preset_release = np.array([
             1.0, 0.7, 0.5, 0.4,
-            0.0, 0.2, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
-            0.0, 0.2, 0.0, 0.0,
-            0.0, 0.05, 0.0, 0.0
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0
         ])
 
         self.left_preset_grasp = np.array([
@@ -27,7 +27,7 @@ class HandPublisher(Node):
 
         self.right_preset_release = np.array([
             -1.0, -0.7, 0.5, 0.4,
-            0.0, 0.2, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0
@@ -73,14 +73,14 @@ class HandPublisher(Node):
 
         self.trigger_subscriber_ = self.create_subscription(
             JointState,
-            '/topic_based_joint_states',
+            '/topic_based_joint_commands',
             self.trigger_callback,
             10
         )
 
         self.left_hand_publisher_ = self.create_publisher(JointTrajectory, '/leader/joint_trajectory_command_broadcaster_left_hand/joint_trajectory', 10)
         self.right_hand_publisher_ = self.create_publisher(JointTrajectory, '/leader/joint_trajectory_command_broadcaster_right_hand/joint_trajectory', 10)
-        self.trigger_publisher_ = self.create_publisher(JointState, '/topic_based_joint_commands', 10)
+        self.trigger_publisher_ = self.create_publisher(JointState, '/topic_based_joint_states', 10)
 
     def left_trigger_callback(self, msg):
         interpolation_value = 0
@@ -113,6 +113,7 @@ class HandPublisher(Node):
         self.right_hand_publisher_.publish(right_msg)
 
     def trigger_callback(self, msg):
+        self.get_logger().info('Received trigger command')
         left_interpolation_value = 0
         right_interpolation_value = 0
         for i in range(len(msg.name)):

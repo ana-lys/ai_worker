@@ -339,8 +339,8 @@ def generate_launch_description():
             init_position_event_handler,
             # camera_timer_20s,
             # camera_timer_10s,
-            # ffw_arm_launch,
-            # pedal_launch,
-            preset_hand_controller,
+            ffw_arm_launch,
+            pedal_launch,
+            # preset_hand_controller,
         ]
     )
