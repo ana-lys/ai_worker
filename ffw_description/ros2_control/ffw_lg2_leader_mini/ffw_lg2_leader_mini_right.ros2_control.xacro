@@ -21,8 +21,8 @@
           </xacro:if>
           <xacro:unless value="${use_fake_hardware}">
             <plugin>dynamixel_hardware_interface/DynamixelHardware</plugin>
-            <param name="port_name">/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTA7NNCO-if00-port0</param>
-            <param name="baud_rate">4000000</param>
+            <param name="port_name">/dev/serial/by-id/usb-ROBOTIS_OpenRB-150_8877059C503059384C2E3120FF071C32-if00</param>
+            <param name="baud_rate">1000000</param>
             <param name="dynamixel_model_folder">/param/dxl_model</param>
             <param name="number_of_joints">8</param>
             <param name="number_of_transmissions">8</param>
@@ -56,11 +56,11 @@
         </hardware>
       </xacro:unless>
 
-      <!-- <sensor name="sensorxel_r_joy">
+      <sensor name="sensorxel_r_joy">
         <state_interface name="JOYSTICK X VALUE"/>
         <state_interface name="JOYSTICK Y VALUE"/>
         <state_interface name="JOYSTICK TACT SWITCH"/>
-      </sensor> -->
+      </sensor>
       <joint name="gripper_r_joint1">
         <command_interface name="effort"/>
         <state_interface name="position"/>
@@ -88,13 +88,13 @@
         <state_interface name="position"/>
       </joint>
 
-      <!-- <gpio name="sensorxel_r_joy">
+      <gpio name="sensorxel_r_joy">
         <param name="type">sensor</param>
         <param name="ID">10</param>
         <state_interface name="JOYSTICK X VALUE"/>
         <state_interface name="JOYSTICK Y VALUE"/>
         <state_interface name="JOYSTICK TACT SWITCH"/>
-      </gpio> -->
+      </gpio>
       <gpio name="dxl8">
         <param name="type">dxl</param>
         <param name="ID">8</param>
