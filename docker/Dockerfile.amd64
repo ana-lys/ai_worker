@@ -1,6 +1,7 @@
 FROM robotis/ros:jazzy-ros-base-librealsense AS librealsense
 
 FROM ros:jazzy-ros-base AS ai-worker
+ARG TARGETARCH
 
 # Copy binaries from builder stage
 COPY --from=librealsense /opt/librealsense /usr/local/
@@ -19,17 +20,27 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     vim \
     nano \
+    python3-pip \
+    libnss3-tools \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl -JLO "https://dl.filippo.io/mkcert/latest?for=linux/${TARGETARCH}" \
+    && chmod +x mkcert-v*-linux-${TARGETARCH} \
+    && cp mkcert-v*-linux-${TARGETARCH} /usr/local/bin/mkcert \
+    && mkcert -install
 
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
 
+COPY requirements.txt /tmp/requirements.txt
+COPY gen_cert.sh /tmp/gen_cert.sh
+
 RUN mkdir -p ${COLCON_WS}/src && \
     cd ${COLCON_WS}/src && \
-    git clone -b jazzy https://github.com/ROBOTIS-GIT/dynamixel_hardware_interface.git && \
+    git clone -b feature-hx5-d20 https://github.com/ROBOTIS-GIT/dynamixel_hardware_interface.git && \
     git clone -b jazzy https://github.com/ROBOTIS-GIT/dynamixel_interfaces.git && \
     git clone -b jazzy https://github.com/ROBOTIS-GIT/DynamixelSDK.git && \
-    git clone -b jazzy https://github.com/ROBOTIS-GIT/ai_worker.git && \
+    git clone -b feature-bh5-rev1-gz-1018 https://github.com/ROBOTIS-GIT/ai_worker.git && \
     git clone -b r/4.56.4 https://github.com/IntelRealSense/realsense-ros.git && \
     cd realsense-ros && git checkout cbd8b8487d4c0126bb590822db9469414496e62a
 
@@ -39,6 +50,22 @@ RUN cd ${COLCON_WS} && \
     rosdep install -i --from-path src --rosdistro $ROS_DISTRO --skip-keys="librealsense2" -y && \
     rm -rf /var/lib/apt/lists/*
 
+RUN python3 -m pip config set global.break-system-packages true
+
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+RUN cd /root && \
+    git clone https://github.com/Woojin-Crive/vuer.git && \
+    cd vuer && \
+    pip3 install -e '.[all]'
+
+RUN chmod +x /tmp/gen_cert.sh && \
+    cp /tmp/gen_cert.sh ~/
+
+EXPOSE 8012
+
+CMD ["/bin/bash", "-c", "source /opt/ros/jazzy/setup.bash && uvicorn minimal:app --host 0.0.0.0 --port 8012"]
+
 RUN bash -c "source /opt/ros/${ROS_DISTRO}/setup.bash && \
     cd ${COLCON_WS} && \
     colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release"
@@ -47,4 +74,5 @@ RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc  && \
     echo "source ${COLCON_WS}/install/setup.bash" >> ~/.bashrc  && \
     echo "alias cb='colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release'" >> ~/.bashrc && \
     echo "alias ffw_lg2_leader_ai='ros2 launch ffw_bringup ffw_lg2_leader_ai.launch.py'" >> ~/.bashrc && \
-    echo "export ROS_DOMAIN_ID=30" >> ~/.bashrc
+    echo "export ROS_DOMAIN_ID=30" >> ~/.bashrc && \
+    echo "alias vr='ros2 launch ffw_teleop vr_publisher.launch.py'" >> ~/.bashrc

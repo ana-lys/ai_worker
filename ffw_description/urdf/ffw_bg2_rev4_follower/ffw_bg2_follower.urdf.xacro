@@ -13,6 +13,7 @@
 
   <xacro:include filename="$(find ffw_description)/ros2_control/$(arg model)/ffw_bg2_follower.ros2_control.xacro" />
 
+  <xacro:include filename="$(find ffw_description)/ros2_control/$(arg model)/ffw_bg2_follower_left.ros2_control.xacro" />
   <xacro:include filename="$(find ffw_description)/gazebo/$(arg model)/ffw_bg2_follower.gazebo.xacro" />
 
   <link name="world"/>
@@ -100,6 +101,13 @@
     use_sim="$(arg use_sim)"
     use_fake_hardware="$(arg use_fake_hardware)"
     fake_sensor_commands="$(arg fake_sensor_commands)"/>
+
+  <xacro:ffw_bg2_follower_left_system
+    use_sim="$(arg use_sim)"
+    use_fake_hardware="$(arg use_fake_hardware)"
+    fake_sensor_commands="$(arg fake_sensor_commands)"/>
+
+
 
   <gazebo>
       <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">

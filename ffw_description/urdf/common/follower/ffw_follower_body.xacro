@@ -16,6 +16,15 @@
          <dynamics damping="0.1" />
       </joint>
 
+      <!-- <joint name="${prefix}lift_joint" type="fixed">
+         <parent link="${parent}"/>
+         <child link="${prefix}arm_base_link" />
+         <xacro:insert_block name="origin" />
+         <axis xyz="0 0 1" />
+         <limit velocity="4.8" effort="1000" lower="-0.5" upper="0.0" />
+         <dynamics damping="0.1" />
+      </joint> -->
+
       <link name="${prefix}arm_base_link">
          <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />

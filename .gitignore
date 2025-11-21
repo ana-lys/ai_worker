@@ -532,3 +532,5 @@ doc/
 ## GurumDDS
 *.ar
 
+key.pem
+cert.pem

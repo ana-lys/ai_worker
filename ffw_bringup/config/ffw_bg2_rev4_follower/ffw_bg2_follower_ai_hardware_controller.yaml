@@ -30,7 +30,6 @@
         - arm_l_joint5
         - arm_l_joint6
         - arm_l_joint7
-        - gripper_l_joint1
       command_interfaces:
         - position
       state_interfaces:
@@ -50,7 +49,6 @@
         - arm_r_joint5
         - arm_r_joint6
         - arm_r_joint7
-        - gripper_r_joint1
       command_interfaces:
         - position
       state_interfaces:
