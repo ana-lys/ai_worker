@@ -70,7 +70,7 @@ def generate_launch_description():
             'joint_trajectory_command_broadcaster',
             'spring_actuator_controller_left',
             'spring_actuator_controller_right',
-            # 'joystick_controller',
+            'joystick_controller',
             'joint_state_broadcaster',
         ],
         parameters=[robot_description],
