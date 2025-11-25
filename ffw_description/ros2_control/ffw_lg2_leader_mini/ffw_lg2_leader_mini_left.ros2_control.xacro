@@ -27,26 +27,6 @@
             <param name="number_of_joints">8</param>
             <param name="number_of_transmissions">8</param>
             <param name="disable_torque_at_init">true</param>
-            <param name="transmission_to_joint_matrix">
-              1, 0, 0, 0, 0, 0, 0, 0,
-              0, 1, 0, 0, 0, 0, 0, 0,
-              0, 0, 1, 0, 0, 0, 0, 0,
-              0, 0, 0, 1, 0, 0, 0, 0,
-              0, 0, 0, 0, 1, 0, 0, 0,
-              0, 0, 0, 0, 0, 1, 0, 0,
-              0, 0, 0, 0, 0, 0, 1, 0,
-              0, 0, 0, 0, 0, 0, 0, 1
-            </param>
-            <param name="joint_to_transmission_matrix">
-              1, 0, 0, 0, 0, 0, 0, 0,
-              0, 1, 0, 0, 0, 0, 0, 0,
-              0, 0, 1, 0, 0, 0, 0, 0,
-              0, 0, 0, 1, 0, 0, 0, 0,
-              0, 0, 0, 0, 1, 0, 0, 0,
-              0, 0, 0, 0, 0, 1, 0, 0,
-              0, 0, 0, 0, 0, 0, 1, 0,
-              0, 0, 0, 0, 0, 0, 0, 1
-            </param>
             <param name="dynamixel_state_pub_msg_name">dynamixel_hardware_interface/dxl_state</param>
             <param name="get_dynamixel_data_srv_name">dynamixel_hardware_interface/get_dxl_data</param>
             <param name="set_dynamixel_data_srv_name">dynamixel_hardware_interface/set_dxl_data</param>
@@ -101,7 +81,7 @@
         <command_interface name="Goal Current"/>
         <state_interface name="Present Position"/>
         <state_interface name="Present Velocity"/>
-        <param name="Drive Mode">1</param>
+        <param name="Drive Mode">0</param>
         <param name="Operating Mode">0</param>
         <param name="Return Delay Time">0</param>
         <param name="Torque Enable">1</param>
