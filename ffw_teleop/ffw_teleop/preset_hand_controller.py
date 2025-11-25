@@ -9,6 +9,9 @@ class HandPublisher(Node):
 
     def __init__(self):
         super().__init__('hand_publisher')
+
+        self.thumb_preset_threshold = 0.5
+
         self.left_preset_release = np.array([
             1.0, 0.7, 0.5, 0.4,
             0.0, 0.0, 0.0, 0.0,
@@ -82,50 +85,62 @@ class HandPublisher(Node):
         self.right_hand_publisher_ = self.create_publisher(JointTrajectory, '/leader/joint_trajectory_command_broadcaster_right_hand/joint_trajectory', 10)
         self.trigger_publisher_ = self.create_publisher(JointState, '/topic_based_joint_states', 10)
 
-    def left_trigger_callback(self, msg):
-        interpolation_value = 0
-        for i in range(len(msg.points[0].positions)):
-            if msg.joint_names[i] == 'gripper_l_joint1':
-                interpolation_value = self.normalize_value(msg.points[0].positions[i])
-                break
-        left_msg = JointTrajectory()
-        left_msg.joint_names = self.left_joint_names
-        left_traj_point = JointTrajectoryPoint()
-        left_traj_point.positions = (interpolation_value*self.left_preset_grasp + (1-interpolation_value)*self.left_preset_release).tolist()
-        left_traj_point.time_from_start.sec = 0
-        left_traj_point.time_from_start.nanosec = 0
-        left_msg.points.append(left_traj_point)
-        self.left_hand_publisher_.publish(left_msg)
+    # def left_trigger_callback(self, msg):
+    #     interpolation_value = 0
+    #     for i in range(len(msg.points[0].positions)):
+    #         if msg.joint_names[i] == 'gripper_l_joint1':
+    #             interpolation_value = self.normalize_value(msg.points[0].positions[i])
+    #             break
+    #     left_msg = JointTrajectory()
+    #     left_msg.joint_names = self.left_joint_names
+    #     left_traj_point = JointTrajectoryPoint()
+    #     left_traj_point.positions = (interpolation_value*self.left_preset_grasp + (1-interpolation_value)*self.left_preset_release).tolist()
+    #     left_traj_point.time_from_start.sec = 0
+    #     left_traj_point.time_from_start.nanosec = 0
+    #     left_msg.points.append(left_traj_point)
+    #     self.left_hand_publisher_.publish(left_msg)
 
-    def right_trigger_callback(self, msg):
-        interpolation_value = 0
-        for i in range(len(msg.points[0].positions)):
-            if msg.joint_names[i] == 'gripper_r_joint1':
-                interpolation_value = self.normalize_value(msg.points[0].positions[i])
-                break
-        right_msg = JointTrajectory()
-        right_msg.joint_names = self.right_joint_names
-        right_traj_point = JointTrajectoryPoint()
-        right_traj_point.positions = (interpolation_value*self.right_preset_grasp + (1-interpolation_value)*self.right_preset_release).tolist()
-        right_traj_point.time_from_start.sec = 0
-        right_traj_point.time_from_start.nanosec = 0
-        right_msg.points.append(right_traj_point)
-        self.right_hand_publisher_.publish(right_msg)
+    # def right_trigger_callback(self, msg):
+    #     interpolation_value = 0
+    #     for i in range(len(msg.points[0].positions)):
+    #         if msg.joint_names[i] == 'gripper_r_joint1':
+    #             interpolation_value = self.normalize_value(msg.points[0].positions[i])
+    #             break
+    #     right_msg = JointTrajectory()
+    #     right_msg.joint_names = self.right_joint_names
+    #     right_traj_point = JointTrajectoryPoint()
+    #     right_traj_point.positions = (interpolation_value*self.right_preset_grasp + (1-interpolation_value)*self.right_preset_release).tolist()
+    #     right_traj_point.time_from_start.sec = 0
+    #     right_traj_point.time_from_start.nanosec = 0
+    #     right_msg.points.append(right_traj_point)
+    #     self.right_hand_publisher_.publish(right_msg)
 
     def trigger_callback(self, msg):
-        self.get_logger().info('Received trigger command')
         left_interpolation_value = 0
         right_interpolation_value = 0
         for i in range(len(msg.name)):
             if msg.name[i] == 'gripper_l_joint1':
                 left_interpolation_value = self.normalize_value(msg.position[i])
+                thumb_left_interpolation_value = self.normalize_value(left_interpolation_value, self.thumb_preset_threshold, 1.0)
             elif msg.name[i] == 'gripper_r_joint1':
                 right_interpolation_value = self.normalize_value(msg.position[i])
+                thumb_right_interpolation_value = self.normalize_value(right_interpolation_value, self.thumb_preset_threshold, 1.0)
+
+        # left
+        left_interpolated_trajectory = np.zeros((5,4))
+        left_interpolated_trajectory[1:] = left_interpolation_value*self.left_preset_grasp[1:] + (1-left_interpolation_value)*self.left_preset_release[1:]
+        left_interpolated_trajectory[0] = thumb_left_interpolation_value*self.left_preset_grasp[0] + (1-thumb_left_interpolation_value)*self.left_preset_release[0]
+
+        # right
+        right_interpolated_trajectory = np.zeros((5,4))
+        right_interpolated_trajectory[1:] = right_interpolation_value*self.right_preset_grasp[1:] + (1-right_interpolation_value)*self.right_preset_release[1:]
+        right_interpolated_trajectory[0] = thumb_right_interpolation_value*self.right_preset_grasp[0] + (1-thumb_right_interpolation_value)*self.right_preset_release[0]
 
         left_msg = JointTrajectory()
         left_msg.joint_names = self.left_joint_names
         left_traj_point = JointTrajectoryPoint()
-        left_traj_point.positions = (left_interpolation_value*self.left_preset_grasp + (1-left_interpolation_value)*self.left_preset_release).tolist()
+        # left_traj_point.positions = (left_interpolation_value*self.left_preset_grasp + (1-left_interpolation_value)*self.left_preset_release).tolist()
+        left_traj_point.positions = left_interpolated_trajectory.tolist()
         left_traj_point.time_from_start.sec = 0
         left_traj_point.time_from_start.nanosec = 0
         left_msg.points.append(left_traj_point)
@@ -134,7 +149,8 @@ class HandPublisher(Node):
         right_msg = JointTrajectory()
         right_msg.joint_names = self.right_joint_names
         right_traj_point = JointTrajectoryPoint()
-        right_traj_point.positions = (right_interpolation_value*self.right_preset_grasp + (1-right_interpolation_value)*self.right_preset_release).tolist()
+        # right_traj_point.positions = (right_interpolation_value*self.right_preset_grasp + (1-right_interpolation_value)*self.right_preset_release).tolist()
+        right_traj_point.positions = right_interpolated_trajectory.tolist()
         right_traj_point.time_from_start.sec = 0
         right_traj_point.time_from_start.nanosec = 0
         right_msg.points.append(right_traj_point)
@@ -145,11 +161,9 @@ class HandPublisher(Node):
         trigger_msg.position = [left_interpolation_value, right_interpolation_value]
         self.trigger_publisher_.publish(trigger_msg)
 
-    def normalize_value(self, value):
-        min_old = -0.2
-        max_old = 1.2
+    def normalize_value(self, value, min_old = -0.2, max_old = 1.2):
         range_old = max_old - min_old
-        normalized_value = (min(max_old, max(value,min_old)) - min_old) / range_old
+        normalized_value = (min(max_old, max(value, min_old)) - min_old) / range_old
         return normalized_value
 
 def main(args=None):
