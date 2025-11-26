@@ -13,7 +13,8 @@ class HandPublisher(Node):
         self.thumb_preset_threshold = 0.7
 
         self.left_preset_release = np.array([
-            1.0, 0.7, 0.5, 0.4,
+            # 1.0, 0.7, 0.5, 0.4,
+            1.3, 1.2, 0.5, 0.4,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
@@ -29,7 +30,8 @@ class HandPublisher(Node):
         ])
 
         self.right_preset_release = np.array([
-            -1.0, -0.7, 0.5, 0.4,
+            # -1.0, -0.7, 0.5, 0.4,
+            -1.3, -1.2, 0.5, 0.4,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
