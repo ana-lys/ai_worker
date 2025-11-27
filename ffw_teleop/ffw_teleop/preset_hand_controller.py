@@ -10,10 +10,11 @@ class HandPublisher(Node):
     def __init__(self):
         super().__init__('hand_publisher')
 
-        self.thumb_preset_threshold = 0.5
+        self.thumb_preset_threshold = 0.7
 
         self.left_preset_release = np.array([
-            1.0, 0.7, 0.5, 0.4,
+            # 1.0, 0.7, 0.5, 0.4,
+            1.3, 1.2, 0.5, 0.4,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
@@ -29,7 +30,8 @@ class HandPublisher(Node):
         ])
 
         self.right_preset_release = np.array([
-            -1.0, -0.7, 0.5, 0.4,
+            # -1.0, -0.7, 0.5, 0.4,
+            -1.3, -1.2, 0.5, 0.4,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0,
@@ -127,14 +129,14 @@ class HandPublisher(Node):
                 thumb_right_interpolation_value = self.normalize_value(right_interpolation_value, self.thumb_preset_threshold, 1.0)
 
         # left
-        left_interpolated_trajectory = np.zeros((5,4))
-        left_interpolated_trajectory[1:] = left_interpolation_value*self.left_preset_grasp[1:] + (1-left_interpolation_value)*self.left_preset_release[1:]
-        left_interpolated_trajectory[0] = thumb_left_interpolation_value*self.left_preset_grasp[0] + (1-thumb_left_interpolation_value)*self.left_preset_release[0]
+        left_interpolated_trajectory = np.zeros(20)
+        left_interpolated_trajectory[4:] = left_interpolation_value*self.left_preset_grasp[4:] + (1-left_interpolation_value)*self.left_preset_release[4:]
+        left_interpolated_trajectory[:4] = thumb_left_interpolation_value*self.left_preset_grasp[:4] + (1-thumb_left_interpolation_value)*self.left_preset_release[:4]
 
         # right
-        right_interpolated_trajectory = np.zeros((5,4))
-        right_interpolated_trajectory[1:] = right_interpolation_value*self.right_preset_grasp[1:] + (1-right_interpolation_value)*self.right_preset_release[1:]
-        right_interpolated_trajectory[0] = thumb_right_interpolation_value*self.right_preset_grasp[0] + (1-thumb_right_interpolation_value)*self.right_preset_release[0]
+        right_interpolated_trajectory = np.zeros(20)
+        right_interpolated_trajectory[4:] = right_interpolation_value*self.right_preset_grasp[4:] + (1-right_interpolation_value)*self.right_preset_release[4:]
+        right_interpolated_trajectory[:4] = thumb_right_interpolation_value*self.right_preset_grasp[:4] + (1-thumb_right_interpolation_value)*self.right_preset_release[:4]
 
         left_msg = JointTrajectory()
         left_msg.joint_names = self.left_joint_names
