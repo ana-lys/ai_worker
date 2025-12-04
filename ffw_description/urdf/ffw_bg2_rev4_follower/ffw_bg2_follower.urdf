@@ -644,7 +644,7 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Joint -->
+  <!-- Left Joint -->
   <joint name="gripper_l_joint1" type="revolute">
     <parent link="gripper_l_rh_p12_rn_base"/>
     <child link="gripper_l_rh_p12_rn_r1"/>
@@ -676,7 +676,6 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Right Joint 2 -->
   <joint name="gripper_l_joint2" type="revolute">
     <parent link="gripper_l_rh_p12_rn_r1"/>
     <child link="gripper_l_rh_p12_rn_r2"/>
@@ -709,7 +708,6 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Left Joint 1 -->
   <joint name="gripper_l_joint3" type="revolute">
     <parent link="gripper_l_rh_p12_rn_base"/>
     <child link="gripper_l_rh_p12_rn_l1"/>
@@ -742,7 +740,6 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Left Joint 2 -->
   <joint name="gripper_l_joint4" type="revolute">
     <parent link="gripper_l_rh_p12_rn_l1"/>
     <child link="gripper_l_rh_p12_rn_l2"/>
@@ -803,7 +800,7 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Joint -->
+  <!-- Left Joint -->
   <joint name="gripper_r_joint1" type="revolute">
     <parent link="gripper_r_rh_p12_rn_base"/>
     <child link="gripper_r_rh_p12_rn_r1"/>
@@ -835,7 +832,6 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Right Joint 2 -->
   <joint name="gripper_r_joint2" type="revolute">
     <parent link="gripper_r_rh_p12_rn_r1"/>
     <child link="gripper_r_rh_p12_rn_r2"/>
@@ -868,7 +864,6 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Left Joint 1 -->
   <joint name="gripper_r_joint3" type="revolute">
     <parent link="gripper_r_rh_p12_rn_base"/>
     <child link="gripper_r_rh_p12_rn_l1"/>
@@ -901,7 +896,6 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Left Joint 2 -->
   <joint name="gripper_r_joint4" type="revolute">
     <parent link="gripper_r_rh_p12_rn_l1"/>
     <child link="gripper_r_rh_p12_rn_l2"/>
