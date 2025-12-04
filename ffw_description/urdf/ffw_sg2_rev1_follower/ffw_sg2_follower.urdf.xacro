@@ -17,6 +17,14 @@
 
   <xacro:include filename="$(find ffw_description)/gazebo/$(arg model)/ffw_sg2_follower.gazebo.xacro" />
 
+  <link name="world"/>
+
+  <joint name="$(arg prefix)world_fixed" type="fixed">
+    <parent link="world"/>
+    <child link="$(arg prefix)base_link"/>
+    <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+  </joint>
+
   <link name="$(arg prefix)base_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
