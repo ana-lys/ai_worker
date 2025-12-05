@@ -53,6 +53,7 @@ setup(
     entry_points={
         'console_scripts': [
             'joint_trajectory_executor = ffw_bringup.joint_trajectory_executor:main',
+            'head_eef_tracker = ffw_bringup.head_eef_tracker:main',
         ],
     },
 )

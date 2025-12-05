@@ -33,28 +33,34 @@ def generate_launch_description():
                               description='Whether to execute rviz2'),
         DeclareLaunchArgument('use_sim', default_value='false',
                               description='Start robot in Gazebo simulation.'),
-        DeclareLaunchArgument('use_fake_hardware', default_value='false',
-                              description='Use fake hardware mirroring command.'),
-        DeclareLaunchArgument('fake_sensor_commands', default_value='false',
-                              description='Enable fake sensor commands.'),
+        DeclareLaunchArgument('use_mock_hardware', default_value='false',
+                              description='Use mock hardware mirroring command.'),
+        DeclareLaunchArgument('mock_sensor_commands', default_value='false',
+                              description='Enable mock sensor commands.'),
         DeclareLaunchArgument('port_name', default_value='/dev/follower',
                               description='Port name for hardware connection.'),
         DeclareLaunchArgument('launch_cameras', default_value='true',
                               description='Whether to launch cameras.'),
+        DeclareLaunchArgument('launch_lidar', default_value='true',
+                              description='Whether to launch lidar.'),
         DeclareLaunchArgument('init_position', default_value='true',
                               description='Whether to launch the init_position node.'),
         DeclareLaunchArgument('model', default_value='ffw_sg2_rev1_follower',
                               description='Robot model name.'),
+        DeclareLaunchArgument('use_head_eef_tracker', default_value='false',
+                              description='Whether to launch the head EEF tracker node.'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
     use_sim = LaunchConfiguration('use_sim')
-    use_fake_hardware = LaunchConfiguration('use_fake_hardware')
-    fake_sensor_commands = LaunchConfiguration('fake_sensor_commands')
+    use_mock_hardware = LaunchConfiguration('use_mock_hardware')
+    mock_sensor_commands = LaunchConfiguration('mock_sensor_commands')
     port_name = LaunchConfiguration('port_name')
     launch_cameras = LaunchConfiguration('launch_cameras')
+    launch_lidar = LaunchConfiguration('launch_lidar')
     init_position = LaunchConfiguration('init_position')
     model = LaunchConfiguration('model')
+    use_head_eef_tracker = LaunchConfiguration('use_head_eef_tracker')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -66,9 +72,9 @@ def generate_launch_description():
         ' ',
         'use_sim:=', use_sim,
         ' ',
-        'use_fake_hardware:=', use_fake_hardware,
+        'use_mock_hardware:=', use_mock_hardware,
         ' ',
-        'fake_sensor_commands:=', fake_sensor_commands,
+        'mock_sensor_commands:=', mock_sensor_commands,
         ' ',
         'port_name:=', port_name,
         ' ',
@@ -275,6 +281,28 @@ def generate_launch_description():
     camera_timer_10s = TimerAction(period=10.0, actions=[camera_launch],
                                    condition=UnlessCondition(init_position))
 
+    # Lidar launch include
+    lidar_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([bringup_launch_dir,
+                                                            'lidar_dual.launch.py'])),
+        condition=IfCondition(launch_lidar)
+    )
+
+    # Lidar timers with conditional delay based on init_position
+    lidar_timer_20s = TimerAction(period=20.0, actions=[lidar_launch],
+                                  condition=IfCondition(init_position))
+    lidar_timer_10s = TimerAction(period=10.0, actions=[lidar_launch],
+                                  condition=UnlessCondition(init_position))
+
+    # Head EEF Tracker node
+    head_eef_tracker_node = Node(
+        package='ffw_bringup',
+        executable='head_eef_tracker',
+        name='head_eef_tracker',
+        output='screen',
+        condition=IfCondition(use_head_eef_tracker),
+    )
+
     return LaunchDescription(
         declared_arguments + [
             control_node,
@@ -288,5 +316,8 @@ def generate_launch_description():
             swerve_controller_switch_event_handler,
             camera_timer_20s,
             camera_timer_10s,
+            lidar_timer_20s,
+            lidar_timer_10s,
+            head_eef_tracker_node,
         ]
     )

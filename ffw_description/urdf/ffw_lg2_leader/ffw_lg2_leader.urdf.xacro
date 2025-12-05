@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ffw_lg2_leader">
   <xacro:arg name="use_sim" default="false" />
-  <xacro:arg name="use_fake_hardware" default="false" />
-  <xacro:arg name="fake_sensor_commands" default="false" />
+  <xacro:arg name="use_mock_hardware" default="false" />
+  <xacro:arg name="mock_sensor_commands" default="false" />
   <xacro:arg name="prefix" default="" />
 
   <xacro:include filename="$(find ffw_description)/urdf/common/leader/ffw_leader_body.urdf.xacro" />
@@ -37,12 +37,12 @@
 
   <xacro:ffw_lg2_leader_left_system
       use_sim="$(arg use_sim)"
-      use_fake_hardware="$(arg use_fake_hardware)"
-      fake_sensor_commands="$(arg fake_sensor_commands)" />
+      use_mock_hardware="$(arg use_mock_hardware)"
+      mock_sensor_commands="$(arg mock_sensor_commands)" />
 
   <xacro:ffw_lg2_leader_right_system
       use_sim="$(arg use_sim)"
-      use_fake_hardware="$(arg use_fake_hardware)"
-      fake_sensor_commands="$(arg fake_sensor_commands)" />
+      use_mock_hardware="$(arg use_mock_hardware)"
+      mock_sensor_commands="$(arg mock_sensor_commands)" />
 
 </robot>

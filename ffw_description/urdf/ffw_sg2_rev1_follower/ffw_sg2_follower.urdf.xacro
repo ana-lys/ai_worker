@@ -2,8 +2,8 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ffw_sg2_follower">
   <xacro:property name="meshes_file_direction" value="package://ffw_description/meshes/$(arg model)" />
   <xacro:arg name="use_sim" default="false" />
-  <xacro:arg name="use_fake_hardware" default="false" />
-  <xacro:arg name="fake_sensor_commands" default="false" />
+  <xacro:arg name="use_mock_hardware" default="false" />
+  <xacro:arg name="mock_sensor_commands" default="false" />
   <xacro:arg name="prefix" default="" />
   <xacro:arg name="model" default="ffw_sg2_rev1_follower" />
 
@@ -40,6 +40,30 @@
        iyy="3.983747500e+04" iyz="1.716567300e-01"
        izz="2.846139500e+04" />
     </inertial>
+  </link>
+
+  <joint name="$(arg prefix)lidar_l_joint" type="fixed">
+    <parent link="$(arg prefix)base_link"/>
+    <child link="$(arg prefix)lidar_l_link"/>
+    <origin xyz="-0.111881 0.240 0.34432" rpy="0 0 1.57079632679"/>
+  </joint>
+  <link name="$(arg prefix)lidar_l_link">
+  </link>
+
+  <joint name="$(arg prefix)lidar_r_joint" type="fixed">
+    <parent link="$(arg prefix)base_link"/>
+    <child link="$(arg prefix)lidar_r_link"/>
+    <origin xyz="-0.111881 -0.240 0.34432" rpy="0 0 -1.57079632679"/>
+  </joint>
+  <link name="$(arg prefix)lidar_r_link">
+  </link>
+
+  <joint name="$(arg prefix)imu_joint" type="fixed">
+    <parent link="$(arg prefix)base_link"/>
+    <child link="$(arg prefix)imu_link"/>
+    <origin xyz="-0.1464 0.0 0.26" rpy="0 0 0"/>
+  </joint>
+  <link name="$(arg prefix)imu_link">
   </link>
 
   <link name="$(arg prefix)lift_link">
@@ -311,18 +335,18 @@
 
   <xacro:ffw_sg2_follower_system
     use_sim="$(arg use_sim)"
-    use_fake_hardware="$(arg use_fake_hardware)"
-    fake_sensor_commands="$(arg fake_sensor_commands)"/>
+    use_mock_hardware="$(arg use_mock_hardware)"
+    mock_sensor_commands="$(arg mock_sensor_commands)"/>
 
   <xacro:ffw_sg2_base_system
     use_sim="$(arg use_sim)"
-    use_fake_hardware="$(arg use_fake_hardware)"
-    fake_sensor_commands="$(arg fake_sensor_commands)"/>
+    use_mock_hardware="$(arg use_mock_hardware)"
+    mock_sensor_commands="$(arg mock_sensor_commands)"/>
 
   <xacro:ffw_sg2_sensor_system
     use_sim="$(arg use_sim)"
-    use_fake_hardware="$(arg use_fake_hardware)"
-    fake_sensor_commands="$(arg fake_sensor_commands)"/>
+    use_mock_hardware="$(arg use_mock_hardware)"
+    mock_sensor_commands="$(arg mock_sensor_commands)"/>
 
   <gazebo>
       <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
