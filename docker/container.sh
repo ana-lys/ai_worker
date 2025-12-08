@@ -36,6 +36,8 @@ start_container() {
     sudo cp "${SCRIPT_DIR}/99-u2d2.rules" /etc/udev/rules.d/99-u2d2.rules
     # Copy udev rules for AI Worker (follower/leader symlinks)
     sudo cp "${SCRIPT_DIR}/99-ai-worker.rules" /etc/udev/rules.d/99-ai-worker.rules
+    # Copy udev rules for FFW LG2 Mini (leader symlinks)
+    sudo cp "${SCRIPT_DIR}/99-ffw-lg2-mini.rules" /etc/udev/rules.d/99-ffw-lg2-mini.rules
 
     # Reload udev rules
     echo "Reloading udev rules..."
