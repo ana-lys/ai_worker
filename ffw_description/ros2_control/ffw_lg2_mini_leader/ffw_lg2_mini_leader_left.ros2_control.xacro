@@ -100,7 +100,7 @@
         <param name="type">dxl</param>
         <param name="ID">32</param>
         <state_interface name="Present Position"/>
-        <param name="Drive Mode">1</param>
+        <param name="Drive Mode">0</param>
         <param name="Operating Mode">3</param>
         <param name="Return Delay Time">0</param>
         <param name="Torque Enable">0</param>
