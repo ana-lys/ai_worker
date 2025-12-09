@@ -2,6 +2,13 @@
 Changelog for package ffw_bringup
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.15 (2025-12-09)
+-------------------
+* Added head eef tracker feature
+* Added support for FFW SG2 lakibeam lidar
+* Fixed deprecated fake_hardware to mock_hardware
+* Contributors: Woojin Wie, Wonho Yun
+
 1.1.14 (2025-10-14)
 -------------------
 * None

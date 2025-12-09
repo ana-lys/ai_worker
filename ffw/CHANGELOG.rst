@@ -2,6 +2,14 @@
 Changelog for package ffw
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.15 (2025-12-09)
+-------------------
+* Fixed Position and Velocity Unit for lift
+* Added Support for FFW SG2 lakibeam lidar
+* Added head eef tracker feature
+* Fixed deprecated fake_hardware to mock_hardware
+* Contributors: Woojin Wie, Wonho Yun
+
 1.1.14 (2025-10-14)
 -------------------
 * Corrected the battery monitoring feature when exceeding the maximum voltage
