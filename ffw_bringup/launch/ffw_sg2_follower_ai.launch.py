@@ -49,8 +49,15 @@ def generate_launch_description():
                               description='Robot model name.'),
         DeclareLaunchArgument('use_head_eef_tracker', default_value='false',
                               description='Whether to launch the head EEF tracker node.'),
-        DeclareLaunchArgument('init_position_file', default_value='ffw_sg2_follower_initial_positions.yaml',
-                              description='Initial position file.'),
+        DeclareLaunchArgument(
+            'init_position_file',
+            default_value='ffw_sg2_follower_initial_positions.yaml',
+            description='Initial position file.'),
+        DeclareLaunchArgument(
+            'ros2_control_type',
+            default_value='ffw_sg2_rev1',
+            description='Type of ros2_control',
+        ),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -64,6 +71,7 @@ def generate_launch_description():
     model = LaunchConfiguration('model')
     use_head_eef_tracker = LaunchConfiguration('use_head_eef_tracker')
     init_position_file = LaunchConfiguration('init_position_file')
+    ros2_control_type = LaunchConfiguration('ros2_control_type')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -84,6 +92,8 @@ def generate_launch_description():
         'model:=', model,
         ' ',
         'init_position_file:=', init_position_file,
+        ' ',
+        'ros2_control_type:=', ros2_control_type,
     ])
 
     controller_manager_config = PathJoinSubstitution([
