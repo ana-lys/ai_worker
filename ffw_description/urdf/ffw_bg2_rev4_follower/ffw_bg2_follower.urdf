@@ -800,7 +800,7 @@
       <inertia ixx="0.000001" ixy="0.0" ixz="0.0" iyy="0.000001" iyz="0.0" izz="0.000001"/>
     </inertial>
   </link>
-  <!-- Left Joint -->
+  <!-- Right Joint -->
   <joint name="gripper_r_joint1" type="revolute">
     <parent link="gripper_r_rh_p12_rn_base"/>
     <child link="gripper_r_rh_p12_rn_r1"/>
