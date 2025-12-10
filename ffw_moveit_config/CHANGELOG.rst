@@ -4,7 +4,8 @@ Changelog for package ffw_moveit_config
 
 1.1.15 (2025-12-09)
 -------------------
-* None
+* Modified joint limits
+* Contributors: Woojin Wie
 
 1.1.14 (2025-10-14)
 -------------------
