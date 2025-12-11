@@ -1,0 +1,5 @@
+string[] joint_names
+float64[] joint_positions
+---
+bool in_collision
+float64 min_distance

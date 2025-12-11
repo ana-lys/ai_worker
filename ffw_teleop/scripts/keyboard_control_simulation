@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+import sys
+from ffw_teleop.keyboard_control_simulation import main
+if __name__ == '__main__':
+    sys.exit(main())

@@ -194,7 +194,7 @@
     <child link="arm_l_link2"/>
     <origin rpy="0 0 0" xyz="0 0.123 0"/>
     <axis xyz="1 0 0"/>
-    <limit effort="1000" lower="0.0" upper="3.14" velocity="4.8"/>
+    <limit effort="1000" lower="-0.1" upper="3.14" velocity="4.8"/>
     <dynamics damping="0.1"/>
   </joint>
   <link name="arm_l_link2">
@@ -437,7 +437,7 @@
     <child link="arm_r_link2"/>
     <origin rpy="0 0 0" xyz="0 -0.123 0"/>
     <axis xyz="1 0 0"/>
-    <limit effort="1000" lower="-3.14" upper="0" velocity="4.8"/>
+    <limit effort="1000" lower="-3.14" upper="0.1" velocity="4.8"/>
     <dynamics damping="0.1"/>
   </joint>
   <link name="arm_r_link2">

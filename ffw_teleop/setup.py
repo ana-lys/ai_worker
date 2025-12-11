@@ -16,6 +16,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', ['launch/slider_control_with_collision.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -28,8 +29,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'keyborad_control = ffw_teleop.keyboard_control:main',
+            'keyboard_control = ffw_teleop.keyboard_control:main',
+            'keyboard_control_simulation = ffw_teleop.keyboard_control_simulation:main',
             'mobile_teleop = ffw_teleop.mobile_teleop:main',
+            'trajectory_test = ffw_teleop.trajectory_test:main',
         ],
     },
 )
