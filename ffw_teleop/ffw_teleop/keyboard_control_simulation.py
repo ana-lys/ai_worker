@@ -395,7 +395,10 @@ class SliderSimControl(Node):
     def load_joint_limits_from_urdf(self):
         """Load joint limits directly from URDF file"""
         limits = {}
-        urdf_file = '/home/analys/robotis_ws/src/ai_worker/ffw_description/urdf/ffw_sg2_rev1_follower/ffw_sg2_follower.urdf'
+        package_share_directory = get_package_share_directory('ffw_description')
+    
+        # Construct the full path to your URDF file
+        urdf_file = os.path.join(package_share_directory, 'urdf', 'ffw_sg2_rev1_follower', 'ffw_sg2_follower.urdf')
         try:
             if not os.path.exists(urdf_file):
                 self.get_logger().warn(f'URDF file not found: {urdf_file}')
