@@ -123,10 +123,10 @@ class SliderSimControl(Node):
             self.last_valid_config[ctrl_key] = [0.0] * len(ctrl['joints'])
         
         # PD controller gains
-        self.kp = 5.0  # Proportional gain
+        self.kp = 3.0  # Proportional gain
         self.kd = 0.5  # Derivative gain
         self.dt = 0.02  # 50Hz = 0.02s
-        self.v_max = 2.0  # rad/s clamp for commanded velocity
+        self.v_max = 1.0  # rad/s clamp for commanded velocity
 
         self.subscription = self.create_subscription(
             JointState, '/joint_states', self.joint_state_callback, 10

@@ -532,3 +532,6 @@ doc/
 ## GurumDDS
 *.ar
 
+# Ignore collision checker 3rd-party binaries
+ffw_collision_checker/3rd_party/
+
