@@ -17,3 +17,9 @@ To access datasets and pre-trained models for our open-source platforms, see:
 
 To use the Docker image for running ROS packages and Physical AI tools with the AI Worker, visit:
   - [Docker Images](https://hub.docker.com/r/robotis/ros/tags)
+
+Changes:
+
+- Collision check server using mujoco
+
+- Radio control 
