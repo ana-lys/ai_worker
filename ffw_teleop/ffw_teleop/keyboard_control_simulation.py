@@ -1,29 +1,10 @@
-#!/usr/bin/env python3
-#
-# Copyright 2025 ROBOTIS CO., LTD.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Fast slider control for simulation with smart collision checking
-
 import tkinter as tk
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from ffw_collision_checker.srv import CheckCollision
+from ffw_collision_checker.msg import CollisionCheck
 from urdf_parser_py.urdf import URDF
-import subprocess
 from ament_index_python.packages import get_package_share_directory
 import os
 import time
@@ -43,22 +24,15 @@ class SliderSimControl(Node):
     def __init__(self):
         super().__init__('slider_sim_control')
         
-        # Collision checking service client
-        self.collision_client = self.create_client(CheckCollision, 'check_collision')
-        self.get_logger().info('Waiting for collision checker service...')
-        self.collision_client.wait_for_service(timeout_sec=5.0)
-        if not self.collision_client.service_is_ready():
-            self.get_logger().warn('Collision checker service not available - running without collision checking!')
+        # Collision state
+        self.in_collision = False
+        self.collision_details = []
+        self.last_collision_warn_time = 0.0
         
-        # Collision checking state
-        self.collision_check_interval = 0.1  # 10Hz (every 100ms)
-        self.last_collision_check_time = 0.0
-        self.collision_prediction_horizon = 0.3  # Predict 300ms ahead
-        self.last_valid_config = {}  # Track last valid (collision-free) configuration per controller
-        
-        # Load joint limits directly from URDF file
+        # Load joint limits from URDF
         self.joint_limits = self.load_joint_limits_from_urdf()
 
+        # Controller configuration
         self.controllers = {
             'arm_l': {
                 'joints': [
@@ -66,11 +40,10 @@ class SliderSimControl(Node):
                     'arm_l_joint4', 'arm_l_joint5', 'arm_l_joint6', 'arm_l_joint7',
                     'gripper_l_joint1'
                 ],
-                'current': [0.0] * 8,
+                'current_pos': [0.0] * 8,
+                'current_vel': [0.0] * 8,
                 'target': [0.0] * 8,
-                'prev_error': [0.0] * 8,
-                'commanded_pos': [0.0] * 8,
-                'limits': [(-3.14, 3.14)] * 8,
+                'commanded': [0.0] * 8,
                 'publisher': self.create_publisher(
                     JointTrajectory,
                     '/leader/joint_trajectory_command_broadcaster_left/joint_trajectory', 10)
@@ -81,32 +54,29 @@ class SliderSimControl(Node):
                     'arm_r_joint4', 'arm_r_joint5', 'arm_r_joint6', 'arm_r_joint7',
                     'gripper_r_joint1'
                 ],
-                'current': [0.0] * 8,
+                'current_pos': [0.0] * 8,
+                'current_vel': [0.0] * 8,
                 'target': [0.0] * 8,
-                'prev_error': [0.0] * 8,
-                'commanded_pos': [0.0] * 8,
-                'limits': [(-3.14, 3.14)] * 8,
+                'commanded': [0.0] * 8,
                 'publisher': self.create_publisher(
                     JointTrajectory,
                     '/leader/joint_trajectory_command_broadcaster_right/joint_trajectory', 10)
             },
             'head': {
                 'joints': ['head_joint1', 'head_joint2'],
-                'current': [0.0] * 2,
+                'current_pos': [0.0] * 2,
+                'current_vel': [0.0] * 2,
                 'target': [0.0] * 2,
-                'prev_error': [0.0] * 2,
-                'commanded_pos': [0.0] * 2,
-                'limits': [(-1.0, 1.0)] * 2,
+                'commanded': [0.0] * 2,
                 'publisher': self.create_publisher(
                     JointTrajectory, '/leader/joystick_controller_left/joint_trajectory', 10)
             },
             'lift': {
                 'joints': ['lift_joint'],
-                'current': [0.0],
+                'current_pos': [0.0],
+                'current_vel': [0.0],
                 'target': [0.0],
-                'prev_error': [0.0],
-                'commanded_pos': [0.0],
-                'limits': [(-1.0, 0.0)],
+                'commanded': [0.0],
                 'publisher': self.create_publisher(
                     JointTrajectory, '/leader/joystick_controller_right/joint_trajectory', 10)
             }
@@ -118,213 +88,226 @@ class SliderSimControl(Node):
                 self.joint_limits.get(joint, (-3.14, 3.14))
                 for joint in ctrl['joints']
             ]
-            self.get_logger().info(f'Controller {ctrl_key} limits: {list(zip(ctrl["joints"], ctrl["limits"]))}')
-            # Initialize last valid config to zero/home position
-            self.last_valid_config[ctrl_key] = [0.0] * len(ctrl['joints'])
+            self.get_logger().info(f'{ctrl_key}: {list(zip(ctrl["joints"], ctrl["limits"]))}')
         
-        # PD controller gains
-        self.kp = 3.0  # Proportional gain
-        self.kd = 0.5  # Derivative gain
-        self.dt = 0.02  # 50Hz = 0.02s
-        self.v_max = 1.0  # rad/s clamp for commanded velocity
+        # PD Control parameters
+        self.kp = 15.0  # Proportional gain
+        self.kd = 1.0  # Derivative gain (damping)
+        self.v_max = 2.5  # Max velocity (rad/s)
+        self.position_threshold = 0.005  # Movement threshold
 
-        self.subscription = self.create_subscription(
+        # Joint state subscription - this drives the control loop now
+        self.joint_state_sub = self.create_subscription(
             JointState, '/joint_states', self.joint_state_callback, 10
         )
+        
+        # Collision check subscription
+        self.collision_sub = self.create_subscription(
+            CollisionCheck, '/collision_check', self.collision_callback, 10
+        )
+        
+        self.first_state_received = False
 
+        # GUI setup
         self.running = True
         self.sliders = {}
         self.value_labels = {}
-        self.dragging = set()
-        self.gui_updating = False  # suppress on_slider_drag during programmatic updates
+        self.gui_updating = False
 
         self.root = tk.Tk()
-        self.root.title('Slider Simulation Control')
+        self.root.title('Slider Simulation Control - PD Controller')
         self.build_gui()
+
+    def collision_callback(self, msg):
+        """Handle collision check messages"""
+        self.in_collision = msg.in_collision
         
-        # Control loop - 20ms = 50Hz for smooth streaming
-        self.root.after(int(self.dt * 1000), self.control_loop)
+        if self.in_collision:
+            # Store collision details
+            self.collision_details = []
+            for i in range(len(msg.distances)):
+                if msg.distances[i] < 0:  # Only store actual collisions
+                    self.collision_details.append({
+                        'geom1': msg.geom1_names[i],
+                        'geom2': msg.geom2_names[i],
+                        'distance': msg.distances[i]
+                    })
+            
+            # Update GUI to show collision
+            self.update_collision_display()
+            
+            # Log collision
+            collision_info = ', '.join([
+                f"{c['geom1']} <-> {c['geom2']} (dist: {c['distance']:.4f})"
+                for c in self.collision_details
+            ])
+            self.get_logger().error(f'COLLISION DETECTED: {collision_info}')
+        else:
+            # Clear collision display
+            if hasattr(self, 'collision_label'):
+                self.collision_label.config(
+                    text='NO COLLISION',
+                    bg='green',
+                    fg='white'
+                )
+
+    def update_collision_display(self):
+        """Update GUI to show collision information"""
+        if not hasattr(self, 'collision_label'):
+            return
+        
+        if self.in_collision and self.collision_details:
+            collision_text = 'COLLISION DETECTED!\n'
+            for c in self.collision_details[:3]:  # Show first 3 collisions
+                collision_text += f"{c['geom1']} ↔ {c['geom2']}\n"
+                collision_text += f"Penetration: {abs(c['distance']):.4f}m\n"
+            
+            self.collision_label.config(
+                text=collision_text,
+                bg='red',
+                fg='white'
+            )
+        else:
+            self.collision_label.config(
+                text='NO COLLISION',
+                bg='green',
+                fg='white'
+            )
 
     def joint_state_callback(self, msg):
-        """Update current positions from feedback"""
-        for ctrl_key, ctrl in self.controllers.items():
+        """Update current positions/velocities and run control loop"""
+        # Update current state from feedback
+        for ctrl in self.controllers.values():
             for i, joint in enumerate(ctrl['joints']):
                 if joint in msg.name:
                     idx = msg.name.index(joint)
-                    ctrl['current'][i] = msg.position[idx]
+                    ctrl['current_pos'][i] = msg.position[idx]
+                    ctrl['current_vel'][i] = msg.velocity[idx] if msg.velocity else 0.0
+                    
+                    # Initialize commanded and target on first feedback
+                    if not self.first_state_received:
+                        ctrl['commanded'][i] = msg.position[idx]
+                        ctrl['target'][i] = msg.position[idx]
+        
+        if not self.first_state_received:
+            self.first_state_received = True
+            self.update_gui_from_state()
+            self.get_logger().info('First state received, initialized positions')
+        
+        # Run control loop driven by joint state updates (~30Hz)
+        # HALT if collision detected
+        if not self.in_collision:
+            self.control_loop()
+        else:
+            # Throttled warning using time.time()
+            current_time = time.time()
+            if current_time - self.last_collision_warn_time > 1.0:
+                self.get_logger().warn('Control halted due to collision!')
+                self.last_collision_warn_time = current_time
 
-    def on_slider_drag(self, ctrl_key, joint_idx, value):
-        """Called while dragging slider"""
+    def update_gui_from_state(self):
+        """Update GUI sliders to match current robot state"""
+        self.gui_updating = True
+        for ctrl_key, ctrl in self.controllers.items():
+            for i in range(len(ctrl['joints'])):
+                if (ctrl_key, i) in self.sliders:
+                    self.sliders[(ctrl_key, i)].set(ctrl['current_pos'][i])
+                if (ctrl_key, i) in self.value_labels:
+                    self.value_labels[(ctrl_key, i)].config(text=f'{ctrl["current_pos"][i]:.2f}')
+        self.gui_updating = False
+
+    def on_slider_change(self, ctrl_key, joint_idx, value):
+        """Update target when slider moves"""
         if self.gui_updating:
             return
-        self.dragging.add((ctrl_key, joint_idx))
         ctrl = self.controllers[ctrl_key]
         ctrl['target'][joint_idx] = float(value)
         if (ctrl_key, joint_idx) in self.value_labels:
             self.value_labels[(ctrl_key, joint_idx)].config(text=f'{float(value):.2f}')
 
-    def on_slider_release(self, event, ctrl_key, joint_idx):
-        """Called when slider is released"""
-        self.dragging.discard((ctrl_key, joint_idx))
-
-    def should_check_collision(self, ctrl_key, predicted_positions):
-        """Determine if collision check is needed based on time"""
-        current_time = time.time()
-        
-        # Time-based check (10Hz)
-        time_since_last_check = current_time - self.last_collision_check_time
-        if time_since_last_check < self.collision_check_interval:
-            return False
-        
-        return True
-
-    def predict_future_position(self, ctrl_key, horizon_time):
-        """Predict joint positions after horizon_time seconds"""
-        ctrl = self.controllers[ctrl_key]
-        predicted = []
-        
-        for i in range(len(ctrl['joints'])):
-            # Current commanded position + velocity * horizon
-            if 'prev_velocity' in ctrl:
-                v_current = ctrl['prev_velocity'][i]
-            else:
-                v_current = 0.0
-            
-            # Predict: p_future = p_current + v * t
-            p_future = ctrl['commanded_pos'][i] + v_current * horizon_time
-            
-            # Clamp to joint limits
-            min_limit, max_limit = ctrl['limits'][i]
-            p_future = max(min_limit, min(max_limit, p_future))
-            
-            predicted.append(p_future)
-        
-        return predicted
-
-    def check_collision(self, joint_names, joint_positions):
-        """Check if given joint configuration causes collision"""
-        request = CheckCollision.Request()
-        request.joint_names = joint_names
-        request.joint_positions = joint_positions
-        
-        try:
-            future = self.collision_client.call_async(request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=0.05)  # Longer timeout for 10Hz
-            if future.done():
-                response = future.result()
-                if response.in_collision:
-                    self.get_logger().info(f'Collision! min_distance={response.min_distance:.4f}')
-                return response.in_collision
-            else:
-                self.get_logger().warn('Collision check timeout')
-                return False  # Allow movement if check times out
-        except Exception as e:
-            self.get_logger().error(f'Collision check failed: {e}')
-            return False  # Allow movement on error
-
     def control_loop(self):
-        """Control loop with PD controller - publish p/v/a at 50Hz"""
-        threshold = 0.01  # Small deadband
+        """PD control loop - runs at joint_state rate (~30Hz)"""
+        if not self.first_state_received:
+            return
         
         for ctrl_key, ctrl in self.controllers.items():
-            needs_update = any(
-                abs(ctrl['target'][i] - ctrl['current'][i]) > threshold
-                for i in range(len(ctrl['joints']))
-            )
+            new_positions = []
+            velocities = []
+            needs_update = False
             
-            if needs_update:
-                traj = JointTrajectory()
-                traj.joint_names = ctrl['joints']
+            # Calculate new commanded positions using PD control
+            for i in range(len(ctrl['joints'])):
+                # PD control: u = Kp * e - Kd * v
+                pos_error = ctrl['target'][i] - ctrl['current_pos'][i]
                 
-                # Initialize histories on first update
-                if 'prev_velocity' not in ctrl:
-                    ctrl['prev_velocity'] = [0.0] * len(ctrl['joints'])
-                    for i in range(len(ctrl['joints'])):
-                        ctrl['commanded_pos'][i] = ctrl['current'][i]
-
-                positions = []
-                velocities = []
-                accelerations = []
-
-                for i in range(len(ctrl['joints'])):
-                    error = ctrl['target'][i] - ctrl['current'][i]
-                    d_error = (error - ctrl['prev_error'][i]) / self.dt
+                if abs(pos_error) > self.position_threshold:
+                    needs_update = True
                     
-                    # PD control to compute desired velocity
-                    v_cmd = self.kp * error + self.kd * d_error
-                    # Clamp
+                    # PD control with velocity damping
+                    v_cmd = self.kp * pos_error - self.kd * ctrl['current_vel'][i]
+                    
+                    # Velocity limiting
                     v_cmd = max(-self.v_max, min(self.v_max, v_cmd))
                     
-                    # Derive acceleration from velocity change
-                    a_cmd = (v_cmd - ctrl['prev_velocity'][i]) / self.dt
-
-                    # Increment from LAST COMMANDED position, not current feedback
-                    p_cmd = ctrl['commanded_pos'][i] + v_cmd * self.dt
-
-                    if abs(error) > 0.1:
-                        print(" %i %f %f %f" % (i, p_cmd , v_cmd, a_cmd))
+                    # Integrate from current position (not commanded)
+                    dt = 1.0 / 30.0  # Assume 30Hz joint_state
+                    p_new = ctrl['current_pos'][i] + v_cmd * dt
                     
-                    positions.append(p_cmd)
-                    velocities.append(v_cmd)
-                    accelerations.append(a_cmd)
-
-                    # Update histories
-                    ctrl['prev_error'][i] = error
-                    ctrl['prev_velocity'][i] = v_cmd
-                    ctrl['commanded_pos'][i] = p_cmd
-
-                # Smart collision checking: predict future position and check at 10Hz
-                if self.collision_client.service_is_ready():
-                    # Predict where we'll be after the horizon
-                    predicted_pos = self.predict_future_position(ctrl_key, self.collision_prediction_horizon)
-                    
-                    if self.should_check_collision(ctrl_key, predicted_pos):
-                        if self.check_collision(ctrl['joints'], predicted_pos):
-                            self.get_logger().warn(f'Collision predicted for {ctrl_key}! Rolling back to last valid config.')
-                            
-                            # Rollback: restore both target and GUI sliders to last valid config
-                            last_valid = self.last_valid_config[ctrl_key]
-                            for i in range(len(ctrl['joints'])):
-                                ctrl['target'][i] = last_valid[i]
-                                # Update GUI slider to reflect rollback
-                                if (ctrl_key, i) in self.sliders:
-                                    self.gui_updating = True
-                                    self.sliders[(ctrl_key, i)].set(last_valid[i])
-                                    self.gui_updating = False
-                                if (ctrl_key, i) in self.value_labels:
-                                    self.value_labels[(ctrl_key, i)].config(text=f'{last_valid[i]:.2f}')
-                            continue
-                        
-                        # Update last check time and save as valid config
-                        self.last_collision_check_time = time.time()
-                        self.last_valid_config[ctrl_key] = predicted_pos.copy()
+                    # Clamp to joint limits
+                    min_limit, max_limit = ctrl['limits'][i]
+                    p_new = max(min_limit, min(max_limit, p_new))
+                else:
+                    v_cmd = 0.0
+                    p_new = ctrl['current_pos'][i]
                 
-                point = JointTrajectoryPoint()
-                point.positions = positions
-                point.velocities = velocities
-                point.accelerations = accelerations
-                point.time_from_start.sec = 0
-                point.time_from_start.nanosec = 0
-
-                traj.points.append(point)
-                ctrl['publisher'].publish(traj)
-
-        # Schedule next loop
-        self.root.after(int(self.dt * 1000), self.control_loop)
+                new_positions.append(p_new)
+                velocities.append(v_cmd)
+            
+            if not needs_update:
+                continue
+            
+            # Update commanded positions
+            ctrl['commanded'] = new_positions
+            
+            # Publish trajectory
+            traj = JointTrajectory()
+            traj.joint_names = ctrl['joints']
+            point = JointTrajectoryPoint()
+            point.positions = new_positions
+            point.velocities = velocities
+            point.time_from_start.sec = 0
+            point.time_from_start.nanosec = 0
+            traj.points.append(point)
+            ctrl['publisher'].publish(traj)
 
     def build_gui(self):
+        """Build the GUI interface"""
         title = tk.Label(
             self.root,
-            text='🎮 SLIDER SIMULATION CONTROL 🎮\n0.02s horizon | 50Hz control | 10Hz collision check',
+            text='SLIDER SIMULATION CONTROL\nPD Controller (~30Hz from joint_state)',
             font=('Arial', 11, 'bold'),
             fg='white',
             bg='green',
             pady=10
         )
-        title.grid(row=0, column=0, columnspan=4, sticky='ew')
+        title.grid(row=0, column=0, columnspan=5, sticky='ew')
         
-        row = 1
+        # Collision status display
+        self.collision_label = tk.Label(
+            self.root,
+            text='NO COLLISION',
+            font=('Arial', 14, 'bold'),
+            bg='green',
+            fg='white',
+            pady=15,
+            relief=tk.RAISED,
+            borderwidth=3
+        )
+        self.collision_label.grid(row=1, column=0, columnspan=5, sticky='ew', padx=10, pady=5)
+        
+        row = 2
         for ctrl_key, ctrl in self.controllers.items():
+            # Controller header
             header = tk.Label(
                 self.root,
                 text=ctrl_key.upper(),
@@ -332,18 +315,22 @@ class SliderSimControl(Node):
                 bg='lightgray',
                 pady=5
             )
-            header.grid(row=row, column=0, columnspan=4, sticky='ew')
+            header.grid(row=row, column=0, columnspan=5, sticky='ew')
             row += 1
             
+            # Joint sliders
             for i, joint in enumerate(ctrl['joints']):
                 min_limit, max_limit = ctrl['limits'][i]
 
+                # Joint name
                 name_label = tk.Label(self.root, text=joint, width=20, anchor='w')
                 name_label.grid(row=row, column=0, padx=5, pady=2, sticky='w')
 
+                # Min limit label
                 min_label = tk.Label(self.root, text=f'{min_limit:.2f}', width=6, anchor='e', fg='blue')
                 min_label.grid(row=row, column=1, padx=(5,0), pady=2, sticky='e')
 
+                # Slider
                 slider = tk.Scale(
                     self.root,
                     from_=min_limit,
@@ -352,35 +339,53 @@ class SliderSimControl(Node):
                     orient=tk.HORIZONTAL,
                     length=250,
                     showvalue=False,
-                    command=lambda val, c=ctrl_key, j=i: self.on_slider_drag(c, j, val)
+                    command=lambda val, c=ctrl_key, j=i: self.on_slider_change(c, j, val)
                 )
                 slider.set(0.0)
                 slider.grid(row=row, column=2, padx=0, pady=2)
-                slider.bind('<ButtonRelease-1>', 
-                           lambda e, c=ctrl_key, j=i: self.on_slider_release(e, c, j))
                 self.sliders[(ctrl_key, i)] = slider
 
+                # Max limit label
                 max_label = tk.Label(self.root, text=f'{max_limit:.2f}', width=6, anchor='w', fg='red')
                 max_label.grid(row=row, column=3, padx=(0,5), pady=2, sticky='w')
 
+                # Current value label
                 value_label = tk.Label(self.root, text='0.00', width=8, font=('Courier', 10))
                 value_label.grid(row=row, column=4, padx=5, pady=2)
                 self.value_labels[(ctrl_key, i)] = value_label
 
                 row += 1
         
+        # Control buttons frame
+        button_frame = tk.Frame(self.root)
+        button_frame.grid(row=row, column=0, columnspan=5, pady=10, sticky='ew')
+        
+        # Reset button
         reset_btn = tk.Button(
-            self.root,
+            button_frame,
             text='RESET ALL TO ZERO',
             command=self.reset_all,
             bg='orange',
             font=('Arial', 10, 'bold'),
             pady=5
         )
-        reset_btn.grid(row=row, column=0, columnspan=4, pady=10, sticky='ew')
+        reset_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+        
+        # Clear collision button
+        clear_collision_btn = tk.Button(
+            button_frame,
+            text='CLEAR COLLISION & RESUME',
+            command=self.clear_collision,
+            bg='blue',
+            fg='white',
+            font=('Arial', 10, 'bold'),
+            pady=5
+        )
+        clear_collision_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
 
     def reset_all(self):
-        """Reset all joints to zero"""
+        """Reset all joints to zero (or closest valid position)"""
+        self.gui_updating = True
         for ctrl_key, ctrl in self.controllers.items():
             for i in range(len(ctrl['joints'])):
                 min_limit, max_limit = ctrl['limits'][i]
@@ -390,30 +395,45 @@ class SliderSimControl(Node):
                     self.sliders[(ctrl_key, i)].set(zero)
                 if (ctrl_key, i) in self.value_labels:
                     self.value_labels[(ctrl_key, i)].config(text=f'{zero:.2f}')
-        self.get_logger().info('Reset all joints')
+        self.gui_updating = False
+        self.get_logger().info('Reset all joints to zero')
+
+    def clear_collision(self):
+        """Clear collision state and resume control"""
+        self.in_collision = False
+        self.collision_details = []
+        self.update_collision_display()
+        self.get_logger().info('Collision cleared, resuming control')
 
     def load_joint_limits_from_urdf(self):
-        """Load joint limits directly from URDF file"""
+        """Load joint limits from URDF file"""
         limits = {}
-        package_share_directory = get_package_share_directory('ffw_description')
-    
-        # Construct the full path to your URDF file
-        urdf_file = os.path.join(package_share_directory, 'urdf', 'ffw_sg2_rev1_follower', 'ffw_sg2_follower.urdf')
         try:
+            package_share_directory = get_package_share_directory('ffw_description')
+            urdf_file = os.path.join(
+                package_share_directory, 
+                'urdf', 
+                'ffw_sg2_rev1_follower', 
+                'ffw_sg2_follower.urdf'
+            )
+            
             if not os.path.exists(urdf_file):
                 self.get_logger().warn(f'URDF file not found: {urdf_file}')
                 return limits
+            
             self.get_logger().info(f'Loading URDF from: {urdf_file}')
             with open(urdf_file, 'r') as f:
                 urdf_string = f.read()
+            
             robot = URDF.from_xml_string(urdf_string)
             for joint in robot.joints:
                 if joint.limit is not None:
                     limits[joint.name] = (joint.limit.lower, joint.limit.upper)
-                    self.get_logger().info(f'  {joint.name}: ({joint.limit.lower:.4f}, {joint.limit.upper:.4f})')
-            self.get_logger().info(f'Loaded limits for {len(limits)} joints from URDF')
+            
+            self.get_logger().info(f'Loaded limits for {len(limits)} joints')
         except Exception as e:
             self.get_logger().error(f'Failed to load joint limits: {e}')
+        
         return limits
 
 

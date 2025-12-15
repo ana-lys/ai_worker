@@ -1,271 +1,393 @@
 #include <rclcpp/rclcpp.hpp>
-#include <moveit/planning_scene_monitor/planning_scene_monitor.hpp>
-#include <moveit/collision_detection/collision_tools.hpp>
-#include <moveit/robot_state/robot_state.hpp>
-
-#include "ffw_collision_checker/srv/check_collision.hpp"
-
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <mujoco/mujoco.h>
+#include <GLFW/glfw3.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
-#include <regex>
-#include <fstream>
-#include <sstream>
+#include <string>
+#include <vector>
+#include <map>
+#include <mutex>
 
-class CollisionCheckerServer : public rclcpp::Node
+// Custom message for collision check results
+// You'll need to create this message type in your package:
+// bool in_collision
+// float64[] distances
+// string[] geom1_names
+// string[] geom2_names
+#include <ffw_collision_checker/msg/collision_check.hpp>
+
+class CollisionCheckerPublisher : public rclcpp::Node
 {
 public:
-  CollisionCheckerServer() : Node("collision_checker_server")
+  CollisionCheckerPublisher() : Node("collision_checker_publisher")
   {
-    loadRobotDescription();   // <-- MUST happen before planning scene creation
+    declare_parameter("use_gui", false);
+    
+    use_gui_ = get_parameter("use_gui").as_bool();
+    
+    loadMujocoModel("robotis_ffw/scene.xml");
+    
+    if (use_gui_) {
+      initializeGui();
+    }
   }
 
   void init()
   {
-    psm_ = std::make_shared<planning_scene_monitor::PlanningSceneMonitor>(
-        shared_from_this(),
-        "robot_description",
-        "robot_description_semantic");
+    // Subscribe to joint states
+    joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+      "/joint_states", 10,
+      std::bind(&CollisionCheckerPublisher::jointStateCallback, this, std::placeholders::_1));
 
-    if (!psm_->getPlanningScene())
-    {
-      RCLCPP_ERROR(get_logger(), "PlanningSceneMonitor failed to load planning scene!");
-      return;
+    // Create publisher for collision check results
+    collision_pub_ = this->create_publisher<ffw_collision_checker::msg::CollisionCheck>(
+      "/collision_check", 10);
+
+    RCLCPP_INFO(get_logger(), "Collision checker publisher ready!");
+  }
+
+  bool useGui() const { return use_gui_; }
+
+  void spinGui()
+  {
+    if (!use_gui_ || !window_) return;
+    
+    while (!glfwWindowShouldClose(window_) && rclcpp::ok()) {
+      glfwPollEvents();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+  }
 
-    psm_->startSceneMonitor();
-    psm_->startStateMonitor();
-    psm_->startWorldGeometryMonitor();
-
-    service_ = this->create_service<ffw_collision_checker::srv::CheckCollision>(
-        "check_collision",
-        std::bind(&CollisionCheckerServer::callback, this,
-                  std::placeholders::_1, std::placeholders::_2));
-
-    RCLCPP_INFO(get_logger(), "Collision checker ready!");
+  ~CollisionCheckerPublisher()
+  {
+    if (use_gui_ && window_) {
+      mjv_freeScene(&scn_);
+      mjr_freeContext(&con_);
+      glfwDestroyWindow(window_);
+      glfwTerminate();
+    }
+    
+    if (mj_data_) mj_deleteData(mj_data_);
+    if (mj_model_) mj_deleteModel(mj_model_);
   }
 
 private:
+  mjModel* mj_model_ = nullptr;
+  mjData* mj_data_ = nullptr;
 
-  planning_scene_monitor::PlanningSceneMonitorPtr psm_;
-  rclcpp::Service<ffw_collision_checker::srv::CheckCollision>::SharedPtr service_;
 
- void callback(
-    const std::shared_ptr<ffw_collision_checker::srv::CheckCollision::Request> req,
-    std::shared_ptr<ffw_collision_checker::srv::CheckCollision::Response> res)
-{
-  planning_scene_monitor::LockedPlanningSceneRO scene(psm_);
-  if (!scene)
-  {
-    RCLCPP_ERROR(get_logger(), "Failed to lock planning scene.");
-    res->in_collision = true;
-    res->min_distance = 0.0;
-    return;
-  }
+  // Separate data for collision solver computations
+  mjData* mj_data_solver_ = nullptr;
+  
+  // Visualization data
+  bool use_gui_ = false;
+  bool collision_solver = false;
 
-  moveit::core::RobotState robot_state(scene->getCurrentState());
-  const auto model = robot_state.getRobotModel();
+  GLFWwindow* window_ = nullptr;
+  mjvCamera cam_;
+  mjvOption opt_;
+  mjvScene scn_;
+  mjrContext con_;
+  
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  rclcpp::Publisher<ffw_collision_checker::msg::CollisionCheck>::SharedPtr collision_pub_;
+  
+  std::vector<double> latest_qpos_;
+  std::vector<double> latest_qvel_;
 
-  for (size_t i = 0; i < req->joint_names.size(); ++i)
-  {
-    if (!model->hasJointModel(req->joint_names[i]))
-    {
-      RCLCPP_WARN(get_logger(), "Joint %s not in robot model", req->joint_names[i].c_str());
-      continue;
-    }
-    robot_state.setJointPositions(req->joint_names[i], {req->joint_positions[i]});
-  }
+  std::vector<int> msg_idx_to_qpos_;
+  std::vector<int> msg_idx_to_qvel_;
 
-  robot_state.update();
+  std::vector<std::pair<int, int>> mimic_pos_adr_pairs_;
+  std::vector<std::pair<int, int>> mimic_vel_adr_pairs_;
 
-  collision_detection::CollisionRequest creq;
-  collision_detection::CollisionResult cres;
-  creq.distance = true;
-  creq.contacts = true;
-  creq.max_contacts = 10;  // Get up to 10 contact points
-  creq.max_contacts_per_pair = 1;  // One contact per link pair
+  bool state_map_initialized_ = false;
 
-  scene->checkSelfCollision(creq, cres, robot_state);
+  std::map<std::string, int> joint_name_to_qpos_adr_;
+  std::map<std::string, int> joint_name_to_qvel_adr_;
 
-  res->in_collision = cres.collision;
-  res->min_distance = cres.distance;
-
-  // Log collision status
-  if (cres.collision)
-  {
-    RCLCPP_WARN(get_logger(), "COLLISION DETECTED!");
-    
-    // Print all contact pairs
-    for (const auto& contact_pair : cres.contacts)
-    {
-      const std::string& link1 = contact_pair.first.first;
-      const std::string& link2 = contact_pair.first.second;
-      
-      for (const auto& contact : contact_pair.second)
-      {
-        RCLCPP_WARN(get_logger(), "  Collision: %s <-> %s | depth: %.4f",
-                    link1.c_str(), link2.c_str(), contact.depth);
-      }
-    }
-  }
-  else
-  {
-    RCLCPP_INFO(get_logger(), "No collision | min_dist=%.4f", res->min_distance);
-    
-    // Find closest link pair (even when not colliding)
-    // For distance queries, we need to check collision detector's distance field
-    collision_detection::CollisionRequest dist_req;
-    collision_detection::CollisionResult dist_res;
-    dist_req.distance = true;
-    dist_req.contacts = false;
-    
-    scene->getCollisionEnv()->checkSelfCollision(dist_req, dist_res, robot_state,
-                                                   scene->getAllowedCollisionMatrix());
-    
-    // Get nearest points info if available
-    if (dist_res.distance > 0.0)
-    {
-      // Unfortunately, MoveIt doesn't directly expose which links are closest
-      // when not in collision. We can estimate by checking contacts at very small threshold
-      collision_detection::CollisionRequest near_req;
-      collision_detection::CollisionResult near_res;
-      near_req.distance = true;
-      near_req.contacts = true;
-      near_req.max_contacts = 1;
-      near_req.max_contacts_per_pair = 1;
-      
-      // Temporarily modify ACM to get nearest pair info
-      collision_detection::AllowedCollisionMatrix acm_temp = scene->getAllowedCollisionMatrix();
-      acm_temp.setDefaultEntry("", false);  // Allow all collision checks temporarily
-      
-      scene->getCollisionEnv()->checkSelfCollision(near_req, near_res, robot_state, acm_temp);
-      
-      if (!near_res.contacts.empty())
-      {
-        const auto& closest_pair = *near_res.contacts.begin();
-        const std::string& link1 = closest_pair.first.first;
-        const std::string& link2 = closest_pair.first.second;
-        
-        RCLCPP_INFO(get_logger(), "  Closest pair: %s <-> %s | distance: %.4f",
-                    link1.c_str(), link2.c_str(), dist_res.distance);
-      }
-    }
-  }
-}
-
-  std::string loadFile(const std::string &path)
-  {
-    std::ifstream file(path);
-    if (!file.is_open())
-      throw std::runtime_error("Cannot open: " + path);
-
-    std::stringstream ss;
-    ss << file.rdbuf();
-    return ss.str();
-  }
-
- // Remove SRDF entries referencing joints/links not in URDF
-std::string sanitizeSRDF(const std::string &srdf, const std::string &urdf)
-{
-  std::string cleaned = srdf;
-
-  // Extract robot name from URDF
-  std::smatch m;
-  std::regex_search(urdf, m, std::regex(R"delim(<robot\s+name="([^"]+)")delim"));
-  std::string real_name = m[1];
-
-  // Force SRDF robot name to match
-  cleaned = std::regex_replace(cleaned, std::regex(R"delim(<robot\s+name="[^"]+">)delim"),
-                               "<robot name=\"" + real_name + "\">");
-
-  // Extract all valid joint names from URDF
-  std::set<std::string> valid_joints;
-  std::regex joint_regex(R"delim(<joint\s+name="([^"]+)")delim");
-  auto joints_begin = std::sregex_iterator(urdf.begin(), urdf.end(), joint_regex);
-  auto joints_end = std::sregex_iterator();
-  for (std::sregex_iterator i = joints_begin; i != joints_end; ++i) {
-    valid_joints.insert((*i)[1]);
-  }
-
-  // Extract all valid link names from URDF
-  std::set<std::string> valid_links;
-  std::regex link_regex(R"delim(<link\s+name="([^"]+)")delim");
-  auto links_begin = std::sregex_iterator(urdf.begin(), urdf.end(), link_regex);
-  auto links_end = std::sregex_iterator();
-  for (std::sregex_iterator i = links_begin; i != links_end; ++i) {
-    valid_links.insert((*i)[1]);
-  }
-
-  // Remove invalid joints from groups
-  std::regex group_joint_regex(R"delim(<joint\s+name="([^"]+)"\s*/>)delim");
-  std::string temp;
-  auto begin = std::sregex_iterator(cleaned.begin(), cleaned.end(), group_joint_regex);
-  auto end = std::sregex_iterator();
-  size_t last_pos = 0;
-  for (std::sregex_iterator i = begin; i != end; ++i) {
-    temp += cleaned.substr(last_pos, i->position() - last_pos);
-    std::string joint_name = (*i)[1];
-    if (valid_joints.count(joint_name)) {
-      temp += i->str();  // Keep valid joint
-    }
-    last_pos = i->position() + i->length();
-  }
-  temp += cleaned.substr(last_pos);
-  cleaned = temp;
-
-  // Remove invalid end_effector entries
-  cleaned = std::regex_replace(cleaned,
-                               std::regex(R"delim(<end_effector\s+name="[^"]+"\s+parent_link="[^"]+"\s+group="[^"]+"\s*/>)delim"),
-                               "");
-
-  // Remove invalid disable_collisions with links not in URDF
-  std::regex disable_collision_regex(R"delim(<disable_collisions\s+link1="([^"]+)"\s+link2="([^"]+)"\s+reason="[^"]+"\s*/>)delim");
-  temp.clear();
-  begin = std::sregex_iterator(cleaned.begin(), cleaned.end(), disable_collision_regex);
-  last_pos = 0;
-  for (std::sregex_iterator i = begin; i != end; ++i) {
-    temp += cleaned.substr(last_pos, i->position() - last_pos);
-    std::string link1 = (*i)[1];
-    std::string link2 = (*i)[2];
-    if (valid_links.count(link1) && valid_links.count(link2)) {
-      temp += i->str();  // Keep valid collision pair
-    }
-    last_pos = i->position() + i->length();
-  }
-  temp += cleaned.substr(last_pos);
-  cleaned = temp;
-
-  return cleaned;
-}
-
-  void loadRobotDescription()
-  {
+  void loadMujocoModel(const std::string& xml_name)
+  { 
     using ament_index_cpp::get_package_share_directory;
 
-    std::string desc_pkg = get_package_share_directory("ffw_description");
-    std::string moveit_pkg = get_package_share_directory("ffw_moveit_config");
+    std::string collision_pkg = get_package_share_directory("ffw_collision_checker");
+    std::string mujoco_xml_path = collision_pkg + "/3rd_party/" + xml_name;
 
-    std::string urdf_path = desc_pkg + "/urdf/ffw_sg2_rev1_follower/ffw_sg2_follower.urdf";
-    std::string srdf_path = moveit_pkg + "/config/ffw.srdf";
+    char error[1000] = "Could not load binary model";
+    
+    mj_model_ = mj_loadXML(mujoco_xml_path.c_str(), 0, error, 1000);
 
-    std::string urdf = loadFile(urdf_path);
-    std::string srdf = sanitizeSRDF(loadFile(srdf_path), urdf);
+    if (mj_model_) {
+      // Build joint name to qpos address map
+      for (int i = 0; i < mj_model_->njnt; ++i) {
+        const char* name = mj_id2name(mj_model_, mjOBJ_JOINT, i);
+        if (name) {
+          joint_name_to_qpos_adr_[std::string(name)] = mj_model_->jnt_qposadr[i];
+          joint_name_to_qvel_adr_[std::string(name)] = mj_model_->jnt_dofadr[i];
+        }
+      }
+      
+      mimic_pos_adr_pairs_.clear();
+      mimic_vel_adr_pairs_.clear();
+      
+      // Parse equality constraints for mimic joints
+      for (int i = 0; i < mj_model_->neq; ++i) {
+        if (mj_model_->eq_type[i] == mjEQ_JOINT) {
+          int slave_id = mj_model_->eq_obj1id[i];
+          int master_id = mj_model_->eq_obj2id[i];
+          int slave_pos_adr = mj_model_->jnt_qposadr[slave_id];
+          int master_pos_adr = mj_model_->jnt_qposadr[master_id];
 
-    declare_parameter("robot_description", urdf);
-    declare_parameter("robot_description_semantic", srdf);
+          int slave_vel_adr = mj_model_->jnt_dofadr[slave_id];
+          int master_vel_adr = mj_model_->jnt_dofadr[master_id];
 
-    RCLCPP_INFO(get_logger(), "Loaded URDF: %s", urdf_path.c_str());
-    RCLCPP_INFO(get_logger(), "Loaded SRDF (sanitized): %s", srdf_path.c_str());
+          mimic_pos_adr_pairs_.emplace_back(slave_pos_adr, master_pos_adr);
+          mimic_vel_adr_pairs_.emplace_back(slave_vel_adr, master_vel_adr);
+          
+          const char* slave_name = mj_id2name(mj_model_, mjOBJ_JOINT, slave_id);
+          const char* master_name = mj_id2name(mj_model_, mjOBJ_JOINT, master_id);
+          RCLCPP_INFO(get_logger(), "Mimic joint found: %s follows %s", 
+                      slave_name ? slave_name : "unknown",
+                      master_name ? master_name : "unknown");
+        }
+      }
+      
+      mj_data_ = mj_makeData(mj_model_);
+      mj_data_solver_ = mj_data_; // Initialize solver data
+
+      // Initialize latest_qpos_ with default values
+      latest_qpos_.resize(mj_model_->nq, 0.0);
+      if (mj_model_->qpos0) {
+        for(int i = 0; i < mj_model_->nq; ++i) {
+          latest_qpos_[i] = mj_model_->qpos0[i];
+        }
+      }      
+      // Initialize latest_qvel_
+      latest_qvel_.resize(mj_model_->nv, 0.0);
+
+      RCLCPP_INFO(get_logger(), "MuJoCo model loaded successfully from: %s", mujoco_xml_path.c_str());
+    } else {
+      RCLCPP_ERROR(get_logger(), "Failed to load MuJoCo model: %s", error);
+    }
+  }
+
+  void initializeGui()
+  {
+    if (!mj_model_) return;
+
+    if (!glfwInit()) {
+      RCLCPP_ERROR(get_logger(), "Could not initialize GLFW");
+      use_gui_ = false;
+      return;
+    }
+
+    window_ = glfwCreateWindow(1200, 900, "Collision Checker", NULL, NULL);
+    if (!window_) {
+      glfwTerminate();
+      use_gui_ = false;
+      return;
+    }
+    glfwMakeContextCurrent(window_);
+    glfwSwapInterval(1);
+
+    mjv_defaultCamera(&cam_);
+    
+    // Set initial camera view
+    cam_.distance = 3.0;
+    cam_.azimuth = 180.0;
+    cam_.elevation = -20.0;
+    cam_.type = mjCAMERA_FREE;
+    cam_.lookat[0] = 0.0;
+    cam_.lookat[1] = 0.0;
+    cam_.lookat[2] = 1.25;
+
+    mjv_defaultOption(&opt_);
+    mjv_defaultScene(&scn_);
+    mjr_defaultContext(&con_);
+
+    mjv_makeScene(mj_model_, &scn_, 2000);
+    mjr_makeContext(mj_model_, &con_, mjFONTSCALE_150);
+    
+    RCLCPP_INFO(get_logger(), "GUI initialized successfully");
+  }
+
+  void updateGui( bool collision_solver)
+  {
+    if (!use_gui_ || !window_) return;
+
+    // Get framebuffer viewport
+    mjrRect viewport = {0, 0, 0, 0};
+    glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
+
+    // Update scene and render
+    if (!collision_solver){
+      mjv_updateScene(mj_model_, mj_data_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
+    } else {
+      mjv_updateScene(mj_model_, mj_data_solver_, &opt_, NULL, &cam_, mjCAT_ALL, &scn_);
+    }
+    mjr_render(viewport, &scn_, &con_);
+
+    glfwSwapBuffers(window_);
+  }
+
+  void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+  {
+    if (!mj_model_ || !mj_data_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
+                           "MuJoCo model not loaded");
+      return;
+    }
+
+    // Initialize mapping on first message
+    if (!state_map_initialized_) {
+      msg_idx_to_qpos_.clear();
+      msg_idx_to_qvel_.clear();
+      msg_idx_to_qpos_.resize(msg->name.size(), -1);
+      msg_idx_to_qvel_.resize(msg->name.size(), -1);
+      
+      for (size_t i = 0; i < msg->name.size(); ++i) {
+        auto it_q = joint_name_to_qpos_adr_.find(msg->name[i]);
+        if (it_q != joint_name_to_qpos_adr_.end()) {
+          msg_idx_to_qpos_[i] = it_q->second;
+        }
+        
+        auto it_d = joint_name_to_qvel_adr_.find(msg->name[i]);
+        if (it_d != joint_name_to_qvel_adr_.end()) {
+          msg_idx_to_qvel_[i] = it_d->second;
+        }
+      }
+      state_map_initialized_ = true;
+    }
+
+    // Update positions
+    for (size_t i = 0; i < msg->position.size(); ++i) {
+      if (i < msg_idx_to_qpos_.size()) {
+        int qpos_adr = msg_idx_to_qpos_[i];
+        if (qpos_adr >= 0 && qpos_adr < (int)latest_qpos_.size()) {
+          latest_qpos_[qpos_adr] = msg->position[i];
+        }
+      }
+    }
+
+    // Update velocities
+    for (size_t i = 0; i < msg->velocity.size(); ++i) {
+      if (i < msg_idx_to_qvel_.size()) {
+        int dof_adr = msg_idx_to_qvel_[i];
+        if (dof_adr >= 0 && dof_adr < (int)latest_qvel_.size()) {
+          latest_qvel_[dof_adr] = msg->velocity[i];
+        }
+      }
+    }
+
+    // Update qpos and qvel in mujoco data
+    for (int i = 0; i < mj_model_->nq; ++i) {
+      mj_data_->qpos[i] = latest_qpos_[i];
+    }
+    for (int i = 0; i < mj_model_->nv; ++i) {
+      mj_data_->qvel[i] = latest_qvel_[i];
+    }
+
+    // Handle mimic joints
+    for (size_t i = 0; i < mimic_pos_adr_pairs_.size(); ++i) {
+      int slave_pos_adr = mimic_pos_adr_pairs_[i].first;
+      int master_pos_adr = mimic_pos_adr_pairs_[i].second;
+      mj_data_->qpos[slave_pos_adr] = mj_data_->qpos[master_pos_adr];
+
+      int slave_vel_adr = mimic_vel_adr_pairs_[i].first;
+      int master_vel_adr = mimic_vel_adr_pairs_[i].second;
+      mj_data_->qvel[slave_vel_adr] = mj_data_->qvel[master_vel_adr];
+    }
+
+    // Forward kinematics
+    mj_forward(mj_model_, mj_data_);
+
+    // Check collisions and prepare message
+    auto collision_msg = ffw_collision_checker::msg::CollisionCheck();
+    collision_msg.in_collision = false;
+
+   
+    if (mj_data_->ncon > 0) {
+      for (int i = 0; i < mj_data_->ncon; ++i) {
+        double dist = mj_data_->contact[i].dist;
+
+        // Get geometry IDs
+        int geom1_id = mj_data_->contact[i].geom1;
+        int geom2_id = mj_data_->contact[i].geom2;
+
+        // Get geometry names
+        const char* geom1 = mj_id2name(mj_model_, mjOBJ_GEOM, geom1_id);
+        const char* geom2 = mj_id2name(mj_model_, mjOBJ_GEOM, geom2_id);
+
+        // Get parent body (link) for each geometry
+        int body1_id = mj_model_->geom_bodyid[geom1_id];
+        int body2_id = mj_model_->geom_bodyid[geom2_id];
+      
+        const char* body1 = mj_id2name(mj_model_, mjOBJ_BODY, body1_id);
+        const char* body2 = mj_id2name(mj_model_, mjOBJ_BODY, body2_id);
+      
+        // Create descriptive names: prefer body name, fallback to geom name or ID
+        std::string name1, name2;
+        if (body1) {
+          name1 = std::string(body1);
+          if (geom1) name1 += "/" + std::string(geom1);
+        } else {
+          name1 = geom1 ? std::string(geom1) : "geom_" + std::to_string(geom1_id);
+        }
+      
+        if (body2) {
+          name2 = std::string(body2);
+          if (geom2) name2 += "/" + std::string(geom2);
+        } else {
+          name2 = geom2 ? std::string(geom2) : "geom_" + std::to_string(geom2_id);
+        }
+      
+        // Add to message arrays
+        collision_msg.distances.push_back(dist);
+        collision_msg.geom1_names.push_back(name1);
+        collision_msg.geom2_names.push_back(name2);
+
+        // Check if actual collision (negative distance)
+        if (dist < 0) {
+          collision_msg.in_collision = true;
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                               "Collision: %s <-> %s | dist: %.4f",
+                               name1.c_str(),
+                               name2.c_str(),
+                               dist);
+        }
+      }
+    }
+
+
+    // Publish collision message
+    collision_pub_->publish(collision_msg);
+    collision_solver = collision_msg.in_collision;
+    if (!collision_solver){
+      mj_data_solver_ = mj_data_;
+    }
+    // Update GUI if enabled
+    if (use_gui_) {
+      updateGui(collision_solver);
+    }
   }
 };
 
 int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
-
-  auto node = std::make_shared<CollisionCheckerServer>();
+  auto node = std::make_shared<CollisionCheckerPublisher>();
   node->init();
-  rclcpp::spin(node);
 
+  if (node->useGui()) {
+    // Run ROS spin in main thread
+    // GUI events are handled in joint_state callback
+    rclcpp::spin(node);
+  } else {
+    rclcpp::spin(node);
+  }
+  
   rclcpp::shutdown();
   return 0;
 }

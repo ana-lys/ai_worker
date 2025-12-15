@@ -15,17 +15,28 @@
 # limitations under the License.
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    use_gui_arg = DeclareLaunchArgument(
+        'use_gui',
+        default_value='true',
+        description='Enable MuJoCo GUI visualization'
+    )
+
     return LaunchDescription([
+        use_gui_arg,
+        
         # Collision checker server
         Node(
             package='ffw_collision_checker',
             executable='collision_checker',
             # name='collision_checker_server',  # <-- Remove this line
             output='screen',
+            parameters=[{'use_gui': LaunchConfiguration('use_gui')}]
         ),
         # Slider simulation controller
         Node(
