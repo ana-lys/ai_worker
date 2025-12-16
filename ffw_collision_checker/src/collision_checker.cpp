@@ -257,6 +257,10 @@ private:
         if (it_d != joint_name_to_qvel_adr_.end()) {
           msg_idx_to_qvel_[i] = it_d->second;
         }
+        RCLCPP_INFO(get_logger(), "Mapping joint %s: qpos_adr=%d, qvel_adr=%d",
+                    msg->name[i].c_str(),
+                    msg_idx_to_qpos_[i],
+                    msg_idx_to_qvel_[i]);
       }
       state_map_initialized_ = true;
     }
