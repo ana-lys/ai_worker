@@ -1,0 +1,6 @@
+source;share/ffw/hook/cmake_prefix_path.dsv
+source;share/ffw/hook/cmake_prefix_path.sh
+source;share/ffw/local_setup.bash
+source;share/ffw/local_setup.dsv
+source;share/ffw/local_setup.sh
+source;share/ffw/local_setup.zsh

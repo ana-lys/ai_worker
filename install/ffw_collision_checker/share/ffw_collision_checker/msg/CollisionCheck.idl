@@ -1,0 +1,30 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from ffw_collision_checker/msg/CollisionCheck.msg
+// generated code does not contain a copyright notice
+
+
+module ffw_collision_checker {
+  module msg {
+    @verbatim (language="comment", text=
+      "CollisionCheck.msg" "\n"
+      "Message for publishing collision check results")
+    struct CollisionCheck {
+      @verbatim (language="comment", text=
+        "Whether any collision is detected (distance < 0)")
+      boolean in_collision;
+
+      @verbatim (language="comment", text=
+        "Array of distances for all contact pairs" "\n"
+        "Negative values indicate penetration depth")
+      sequence<double> distances;
+
+      @verbatim (language="comment", text=
+        "Names of first geometry in each contact pair")
+      sequence<string> geom1_names;
+
+      @verbatim (language="comment", text=
+        "Names of second geometry in each contact pair")
+      sequence<string> geom2_names;
+    };
+  };
+};

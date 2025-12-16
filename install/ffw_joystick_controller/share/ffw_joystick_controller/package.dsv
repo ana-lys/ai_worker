@@ -1,0 +1,8 @@
+source;share/ffw_joystick_controller/hook/cmake_prefix_path.dsv
+source;share/ffw_joystick_controller/hook/cmake_prefix_path.sh
+source;share/ffw_joystick_controller/hook/ld_library_path_lib.dsv
+source;share/ffw_joystick_controller/hook/ld_library_path_lib.sh
+source;share/ffw_joystick_controller/local_setup.bash
+source;share/ffw_joystick_controller/local_setup.dsv
+source;share/ffw_joystick_controller/local_setup.sh
+source;share/ffw_joystick_controller/local_setup.zsh
