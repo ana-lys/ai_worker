@@ -56,7 +56,7 @@ public:
     
     while (!glfwWindowShouldClose(window_) && rclcpp::ok()) {
       glfwPollEvents();
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
   }
 
@@ -71,6 +71,32 @@ public:
     
     if (mj_data_) mj_deleteData(mj_data_);
     if (mj_model_) mj_deleteModel(mj_model_);
+  }
+
+  void spin()
+  {
+    if (!use_gui_ || !window_) {
+      // No GUI → normal single-threaded spin
+      rclcpp::spin(shared_from_this());
+      return;
+    }
+
+    // GUI mode: use MultiThreadedExecutor for ROS callbacks
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(shared_from_this());
+
+    RCLCPP_INFO(get_logger(), "Starting GUI loop (GLFW event polling in main thread)");
+
+    // Main thread handles GLFW events and rendering
+    while (rclcpp::ok() && !glfwWindowShouldClose(window_)) {
+      glfwPollEvents();  // Process window close, resize, input, etc.
+
+      executor.spin_some();  // Non-blocking: process any pending ROS callbacks
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));  // Avoid 100% CPU
+    }
+
+    RCLCPP_INFO(get_logger(), "GUI window closed or shutdown requested.");
   }
 
 private:
@@ -384,14 +410,9 @@ int main(int argc, char** argv)
   auto node = std::make_shared<CollisionCheckerPublisher>();
   node->init();
 
-  if (node->useGui()) {
-    // Run ROS spin in main thread
-    // GUI events are handled in joint_state callback
-    rclcpp::spin(node);
-  } else {
-    rclcpp::spin(node);
-  }
-  
+  // This single line handles BOTH cases cleanly
+  node->spin();
+
   rclcpp::shutdown();
   return 0;
 }
