@@ -533,5 +533,5 @@ doc/
 *.ar
 
 # Ignore collision checker 3rd-party binaries
-ffw_collision_checker/3rd_party/
+ffw_collision_checker/3rd_party/mujoco/
 
