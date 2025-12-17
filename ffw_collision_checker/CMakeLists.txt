@@ -45,10 +45,8 @@ find_package(PkgConfig REQUIRED)
 pkg_search_module(GLFW REQUIRED glfw3)
 
 # Generate service interfaces
-# rosidl_generate_interfaces(${PROJECT_NAME}
-#   "srv/CheckCollision.srv"
-# )
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/SolveCollisionNaive.srv"
   "msg/CollisionCheck.msg"
 )
 

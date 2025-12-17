@@ -4,8 +4,10 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from ffw_collision_checker.msg import CollisionCheck
+from ffw_collision_checker.srv import SolveCollisionNaive
 from urdf_parser_py.urdf import URDF
 from ament_index_python.packages import get_package_share_directory
+from collections import deque
 import os
 import time
 
@@ -24,12 +26,16 @@ class SliderSimControl(Node):
 
         # --- State Variables ---
         self.in_collision = False
+        self.setback_needed = False
         self.collision_details = []
         self.last_collision_warn_time = 0.0
         self.first_state_received = False
         self.running = True
+        self.collision_server = False
         self.gui_updating = False
-        
+        self.collision_recovery = False
+        self.collision_recovery_queue = deque()
+        self.collision_recovery_active = None
         # --- GUI Components ---
         self.sliders = {}
         self.value_labels = {}
@@ -48,7 +54,14 @@ class SliderSimControl(Node):
         
         # Collision check subscription
         self.collision_sub = self.create_subscription(
-            CollisionCheck, '/collision_check', self.collision_callback, 10
+            CollisionCheck, '/collision/collision_check', self.collision_callback, 10
+        )
+        
+        # Collision solver service server
+        self.solve_collision_service = self.create_service(
+            SolveCollisionNaive,
+            '/collision/solve_collision_naive',
+            self.handle_solve_collision
         )
 
         # Build GUI
@@ -91,7 +104,8 @@ class SliderSimControl(Node):
             ctrl['current_vel'] = [0.0] * num_joints
             ctrl['target'] = [0.0] * num_joints
             ctrl['commanded'] = [0.0] * num_joints
-            
+            ctrl['setback_checkpoint_pos'] = [0.0] * num_joints
+            ctrl['setback_checkpoint_vel'] = [0.0] * num_joints
             # Set limits
             ctrl['limits'] = [
                 self.joint_limits.get(joint, (-3.14, 3.14))
@@ -131,21 +145,41 @@ class SliderSimControl(Node):
                         ctrl['commanded'][i] = msg.position[idx]
                         ctrl['target'][i] = msg.position[idx]
         
+        if self.setback_needed:
+            
+            for ctrl in self.controllers.values():
+                for i, joint in enumerate(ctrl['joints']):
+                    if joint in msg.name:
+                        ctrl['target'][i] = ctrl['setback_checkpoint_pos'][i] - 0.5 * ctrl['setback_checkpoint_vel'][i]
+                        if joint == "lift_joint":
+                            self.get_logger().info(f'Setback due to collision, adjusting targets {joint} {ctrl["target"][i]} {ctrl["current_pos"][i]} {ctrl["setback_checkpoint_vel"][i]}')
+            self.control_loop()
+            return
+
         if not self.first_state_received:
             self.first_state_received = True
             self.update_gui_from_state()
             self.get_logger().info('First state received, initialized positions')
-        
-        # Run control loop driven by joint state updates
-        if not self.in_collision:
+
+        if self.collision_recovery:
+            self.process_collision_recovery()
+            # Allow control loop even if in_collision while recovering
             self.control_loop()
+            return
+
+        # Run control loop driven by joint state updates
+        if not self.in_collision and self.collision_server and not self.setback_needed:
+            self.control_loop()
+            for ctrl in self.controllers.values():
+                ctrl["setback_checkpoint_pos"] = list(ctrl['current_pos'])  
+                ctrl["setback_checkpoint_vel"] = list(ctrl['current_vel'])
         else:
             self._handle_collision_halt()
 
     def _handle_collision_halt(self):
         """Log warning when halted due to collision (throttled)"""
         current_time = time.time()
-        if current_time - self.last_collision_warn_time > 1.0:
+        if current_time - self.last_collision_warn_time > 5.0:
             self.get_logger().warn('Control halted due to collision!')
             self.last_collision_warn_time = current_time
 
@@ -222,9 +256,11 @@ class SliderSimControl(Node):
 
     def collision_callback(self, msg):
         """Handle collision check messages"""
-        self.in_collision = msg.in_collision
+        self.collision_server = True
         
-        if self.in_collision:
+        if  msg.in_collision:
+            self.setback_needed = True
+            self.in_collision = True
             self.collision_details = []
             for i, dist in enumerate(msg.distances):
                 if dist < 0:  # Only store actual collisions (negative distance)
@@ -237,6 +273,9 @@ class SliderSimControl(Node):
             self.update_collision_display()
             self._log_collision()
         else:
+            if self.setback_needed:
+                self.setback_needed = False
+                self.collision_recovery = True
             self._clear_collision_display()
 
     def _log_collision(self):
@@ -244,7 +283,7 @@ class SliderSimControl(Node):
             f"{c['geom1']} <-> {c['geom2']} (dist: {c['distance']:.4f})"
             for c in self.collision_details
         ])
-        self.get_logger().error(f'COLLISION DETECTED: {collision_info}')
+        # self.get_logger().error(f'COLLISION DETECTED: {collision_info}')
 
     def update_collision_display(self):
         """Update GUI to show collision information"""
@@ -262,6 +301,55 @@ class SliderSimControl(Node):
     def _clear_collision_display(self):
         if hasattr(self, 'collision_label'):
             self.collision_label.config(text='NO COLLISION', bg='green', fg='white')
+
+    def process_collision_recovery(self):
+        """Process queued joints, zeroing them one by one during recovery."""
+        if not self.collision_recovery:
+            return
+
+        tolerance = 0.01
+        timeout_per_joint = 10.0
+        # If no active joint, take next from queue
+        if self.collision_recovery_active is None:
+            if not self.collision_recovery_queue:
+                # Done
+                self.collision_recovery = False
+                self.collision_recovery_active = None
+                self.get_logger().info('Collision recovery completed')
+                return
+            ctrl_key, joint_idx, joint_name, zero = self.collision_recovery_queue.popleft()
+            ctrl = self.controllers[ctrl_key]
+            ctrl['target'][joint_idx] = zero
+            if (ctrl_key, joint_idx) in self.sliders:
+                self.sliders[(ctrl_key, joint_idx)].set(zero)
+            if (ctrl_key, joint_idx) in self.value_labels:
+                self.value_labels[(ctrl_key, joint_idx)].config(text=f'{zero:.2f}')
+            self.collision_recovery_active = {
+                'ctrl_key': ctrl_key,
+                'joint_idx': joint_idx,
+                'joint_name': joint_name,
+                'zero': zero,
+                'start': time.time()
+            }
+            self.get_logger().info(f'Collision recovery: commanding {joint_name} -> {zero:.3f}')
+            return
+
+        # Check active joint progress
+        active = self.collision_recovery_active
+        ctrl = self.controllers[active['ctrl_key']]
+        current_pos = ctrl['current_pos'][active['joint_idx']]
+        if abs(current_pos - active['zero']) <= tolerance:
+            self.get_logger().info(f'Collision recovery: {active["joint_name"]} reached {current_pos:.3f}')
+            self.collision_recovery_active = None
+            return
+
+        # Timeout guard
+        if time.time() - active['start'] > timeout_per_joint:
+            self.get_logger().warn(
+                f'Collision recovery: timeout waiting for {active["joint_name"]} to reach zero (current {current_pos:.3f})'
+            )
+            self.collision_recovery_active = None
+
 
     def update_gui_from_state(self):
         """Update GUI sliders to match current robot state"""
@@ -407,6 +495,52 @@ class SliderSimControl(Node):
         self.collision_details = []
         self.update_collision_display()
         self.get_logger().info('Collision cleared, resuming control')
+
+    def handle_solve_collision(self, request, response):
+        """Handle collision solver service request - queue joints to zero sequentially"""
+        self.get_logger().info(f'Received collision solution with {len(request.joint_names)} joints')
+        
+        if len(request.joint_names) == 0:
+            self.get_logger().warn('Empty collision solution received')
+            response.accept = False
+            response.error = 1
+            return response
+        
+        try:
+            # Build recovery queue (ctrl_key, joint_idx, joint_name, zero_target)
+            recovery_items = []
+            for joint_name in request.joint_names:
+                found = False
+                for ctrl_key, ctrl in self.controllers.items():
+                    if joint_name in ctrl['joints']:
+                        joint_idx = ctrl['joints'].index(joint_name)
+                        min_limit, max_limit = ctrl['limits'][joint_idx]
+                        zero = max(min(0.0, max_limit), min_limit)
+                        recovery_items.append((ctrl_key, joint_idx, joint_name, zero))
+                        found = True
+                        break
+                
+                if not found:
+                    self.get_logger().warn(f'Joint {joint_name} not found in controllers')
+
+            # Load queue and start recovery
+            self.collision_recovery_queue = deque(recovery_items)
+            self.collision_recovery_active = None
+
+            # Allow control loop to run during recovery
+            self.collision_details = []
+            self.update_collision_display()
+            
+            response.accept = True
+            response.error = 0
+            self.get_logger().info(f'✓ Collision recovery queued: {len(recovery_items)} joints')
+        except Exception as e:
+            self.get_logger().error(f'Failed to apply collision solution: {e}')
+            response.accept = False
+            response.error = 2
+            self.gui_updating = False
+        
+        return response
 
     def load_joint_limits_from_urdf(self):
         """Load joint limits from URDF file"""
