@@ -17,7 +17,7 @@ class SliderSimControl(Node):
         super().__init__('slider_sim_control')
         
         # --- Control Parameters ---
-        self.Kpos = 5.0           # Position gain (Proportional)
+        self.Kpos = 15.0           # Position gain (Proportional)
         self.Kvel = 1.0           # Velocity gain (Proportional on velocity error)
         self.v_max = 2.5          # Max velocity limit (rad/s)
         self.position_threshold = 0.005  # Deadband for position error
@@ -36,6 +36,7 @@ class SliderSimControl(Node):
         self.collision_recovery = False
         self.collision_recovery_queue = deque()
         self.collision_recovery_active = None
+        self.collision_recovery_started = False
         # --- GUI Components ---
         self.sliders = {}
         self.value_labels = {}
@@ -304,7 +305,9 @@ class SliderSimControl(Node):
 
     def process_collision_recovery(self):
         """Process queued joints, zeroing them one by one during recovery."""
-        if not self.collision_recovery:
+        if not self.collision_recovery :
+            return
+        if not self.collision_recovery_started:
             return
 
         tolerance = 0.01
@@ -315,7 +318,9 @@ class SliderSimControl(Node):
                 # Done
                 self.collision_recovery = False
                 self.collision_recovery_active = None
+                self.collision_recovery_started = False
                 self.get_logger().info('Collision recovery completed')
+                self.clear_collision()
                 return
             ctrl_key, joint_idx, joint_name, zero = self.collision_recovery_queue.popleft()
             ctrl = self.controllers[ctrl_key]
@@ -526,6 +531,7 @@ class SliderSimControl(Node):
             # Load queue and start recovery
             self.collision_recovery_queue = deque(recovery_items)
             self.collision_recovery_active = None
+            self.collision_recovery_started = True
 
             # Allow control loop to run during recovery
             self.collision_details = []

@@ -149,7 +149,6 @@ private:
     char error[1000] = "Could not load binary model";
     
     mj_model_ = mj_loadXML(mujoco_xml_path.c_str(), 0, error, 1000);
-
     if (mj_model_) {
       // Build joint name to qpos address map
       for (int i = 0; i < mj_model_->njnt; ++i) {
@@ -158,7 +157,6 @@ private:
           joint_name_to_qpos_adr_[std::string(name)] = mj_model_->jnt_qposadr[i];
         }
       }
-
       joint_adr_to_name_.clear();
       joint_adr_to_name_.resize(mj_model_->njnt);
       for (int i = 0; i < mj_model_->njnt; ++i) {
@@ -168,7 +166,6 @@ private:
           joint_adr_to_name_[mj_model_->jnt_qposadr[i]] = name;
         }
       }
-      
       mimic_pos_adr_pairs_.clear();
 
       // Parse equality constraints for mimic joints
@@ -304,13 +301,11 @@ private:
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
   {
     if (!mj_model_ || !mj_data_) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, 
-                           "MuJoCo model not loaded");
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "MuJoCo model or data not initialized yet.");
       return;
     }
 
     std::lock_guard<std::mutex> lock(data_mutex_);
-
     // Initialize mapping on first message
     if (!state_map_initialized_) {
       msg_idx_to_qpos_.clear();
@@ -429,7 +424,7 @@ private:
   double original_value = mj_data_solver_->qpos[joint_qpos_adr];
   double target_value = 0.0;
   
-  const int num_steps = 10;
+  const int num_steps = 20;
   bool all_steps_valid = true;
   
   // Try moving in 10 steps from current to zero
@@ -440,6 +435,12 @@ private:
     // Update solver data
     mj_data_solver_->qpos[joint_qpos_adr] = interpolated_value;
     
+    // Handle mimic joints
+    for (size_t i = 0; i < mimic_pos_adr_pairs_.size(); ++i) {
+      int slave_pos_adr = mimic_pos_adr_pairs_[i].first;
+      int master_pos_adr = mimic_pos_adr_pairs_[i].second;
+      mj_data_solver_->qpos[slave_pos_adr] = mj_data_solver_->qpos[master_pos_adr];
+    }
     // Check collision at this step
     mj_forward(mj_model_, mj_data_solver_);
     
@@ -555,10 +556,10 @@ void solveCollision()
     }
   }
   
-  solver_solved_ = true;
+  
   RCLCPP_INFO(get_logger(), final_collision ? "✗ Collision still present" : "✓ Collision resolved!");
   if(!final_collision)
-  {
+  { 
     sendSolverServiceRequest();
   }
   // Send service request with solution
@@ -596,6 +597,8 @@ void solveCollision()
           auto response = response_future.get();
           if (response->accept) {
             RCLCPP_INFO(get_logger(), "✓ Solver service accepted solution");
+                solver_solved_ = false;
+                solver_needed_ = false;
           } else {
             RCLCPP_WARN(get_logger(), "✗ Solver service rejected solution (error: %d)", response->error);
           }
