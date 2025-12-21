@@ -18,7 +18,7 @@ class SliderSimControl(Node):
         
         # --- Control Parameters ---
         self.Kpos = 15.0           # Position gain (Proportional)
-        self.Kvel = 1.0           # Velocity gain (Proportional on velocity error)
+        self.Kvel = 0.2           # Velocity gain (Proportional on velocity error)
         self.v_max = 2.5          # Max velocity limit (rad/s)
         self.position_threshold = 0.005  # Deadband for position error
         self.control_rate_hz = 100.0     # Assumed control loop rate
