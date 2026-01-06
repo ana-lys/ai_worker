@@ -1,5 +1,6 @@
 """FastAPI application for system_manager unified REST API."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,6 +31,7 @@ from system_manager.models import (
     ServiceLogsResponse,
     ServiceRunScriptResponse,
     ServiceRunScriptUpdateRequest,
+    ServiceStatusListResponse,
     ServiceStatusResponse,
     SystemConfig,
 )
@@ -61,7 +63,7 @@ async def lifespan(app: FastAPI):
     try:
         _config = load_config()
         _client_pool = AgentClientPool(_config)
-        
+
         # Initialize Docker client (optional - may fail if socket not available)
         try:
             _docker_client = DockerClient()
@@ -69,7 +71,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Docker client initialization failed (Docker operations will be unavailable): {e}")
             _docker_client = None
-        
+
         logger.info("System manager initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize system_manager: {e}")
@@ -90,21 +92,21 @@ app = FastAPI(
     title="System Manager API",
     description="""
     Unified REST API for managing ROS2-based robot containers using s6-overlay.
-    
+
     This API provides a centralized control plane to manage services across multiple
     robot containers. Each container runs an agent that exposes s6-overlay service
     management via Unix Domain Sockets.
-    
+
     ## Features
-    
+
     * List all managed containers
     * List services within each container
     * Get real-time service status
     * Control services (start, stop, restart)
     * Docker container management (list, status, control, logs)
-    
+
     ## Documentation
-    
+
     * **Swagger UI**: Available at `/docs` (interactive API testing)
     * **ReDoc**: Available at `/redoc` (alternative documentation)
     * **OpenAPI Schema**: Available at `/openapi.json`
@@ -233,7 +235,7 @@ def get_agent_client(container_name: str) -> AgentClient:
 )
 async def root():
     """Root endpoint with API information and documentation links.
-    
+
     Returns:
         API metadata including version and links to interactive documentation.
     """
@@ -259,14 +261,14 @@ async def root():
 )
 async def list_containers() -> ContainerListResponse:
     """Get list of all known containers from configuration.
-    
+
     Returns a list of all containers that are configured in the system manager's
     configuration file. Each container entry includes its name and the path to
     its agent's Unix Domain Socket.
-    
+
     Returns:
         ContainerListResponse containing a list of ContainerInfo objects.
-        
+
     Example Response:
         ```json
         {
@@ -300,16 +302,16 @@ async def list_services(container: str) -> ServiceListResponse:
 
     Services are discovered dynamically from the agent. The config may contain
     optional labels for better display names, but services come from the agent.
-    
+
     Args:
         container: Name of the container (e.g., "ai_worker")
-        
+
     Returns:
         ServiceListResponse containing the container name and list of services.
-        
+
     Raises:
         HTTPException: 404 if container not found, 503 if agent is unavailable.
-        
+
     Example Response:
         ```json
         {
@@ -375,17 +377,17 @@ async def get_service_status(container: str, service: str) -> ServiceStatusRespo
     Calls the agent's /services/{name}/status endpoint and wraps the response
     with container/service metadata. Returns detailed information about the
     service's current state.
-    
+
     Args:
         container: Name of the container (e.g., "ai_worker")
         service: Service ID (e.g., "ai_worker_bringup")
-        
+
     Returns:
         ServiceStatusResponse with service status information.
-        
+
     Raises:
         HTTPException: 404 if container/service not found, 503 if agent unavailable.
-        
+
     Example Response:
         ```json
         {
@@ -441,6 +443,100 @@ async def get_service_status(container: str, service: str) -> ServiceStatusRespo
         pid=agent_response.get("pid"),
         uptime_seconds=agent_response.get("uptime_seconds"),
     )
+
+
+@app.get(
+    "/containers/{container}/services/status",
+    response_model=ServiceStatusListResponse,
+    tags=["services"],
+    summary="Get status of all services",
+    description="Retrieve the current status of all services in a container in a single request",
+    response_description="List of service statuses including running state, PID, and uptime",
+)
+async def get_all_services_status(container: str) -> ServiceStatusListResponse:
+    """Get status of all services in a container.
+
+    Fetches status for all services in parallel and returns them in a single response.
+    This is more efficient than calling the individual status endpoint for each service.
+
+    Args:
+        container: Name of the container (e.g., "ai_worker")
+
+    Returns:
+        ServiceStatusListResponse with status for all services.
+
+    Raises:
+        HTTPException: 404 if container not found, 503 if agent unavailable.
+
+    Example Response:
+        ```json
+        {
+          "container": "ai_worker",
+          "statuses": [
+            {
+              "container": "ai_worker",
+              "service": "ai_worker_bringup",
+              "service_label": "AI Worker Bringup",
+              "name": "ai_worker_bringup",
+              "raw": "up (pid 1234) 10 seconds",
+              "is_up": true,
+              "pid": 1234,
+              "uptime_seconds": 10
+            }
+          ]
+        }
+        ```
+    """
+    config = get_config()
+    if container not in config.containers:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Container '{container}' not found",
+        )
+
+    container_config = config.containers[container]
+
+    # Get all service statuses from agent in a single request
+    try:
+        client = get_agent_client(container)
+        # Use the agent's bulk status endpoint for efficiency
+        loop = asyncio.get_event_loop()
+        agent_response = await loop.run_in_executor(
+            None, client.get_all_services_status
+        )
+        agent_statuses = agent_response.get("statuses", [])
+    except Exception as e:
+        logger.error(f"Failed to get services status from agent: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to communicate with agent: {str(e)}",
+        )
+
+    # Create a mapping of service ID to label from config
+    service_labels: dict[str, str] = {}
+    for svc_info in container_config.services:
+        service_labels[svc_info.id] = svc_info.label
+
+    # Convert agent statuses to API response format with labels
+    statuses: list[ServiceStatusResponse] = []
+    for agent_status in agent_statuses:
+        service_id = agent_status.get("name", "")
+        service_label = service_labels.get(service_id, service_id)
+
+        statuses.append(
+            ServiceStatusResponse(
+                container=container,
+                service=service_id,
+                service_label=service_label,
+                name=agent_status.get("name", service_id),
+                raw=agent_status.get("raw", ""),
+                is_up=agent_status.get("is_up", False),
+                pid=agent_status.get("pid"),
+                uptime_seconds=agent_status.get("uptime_seconds"),
+            )
+        )
+
+    return ServiceStatusListResponse(container=container, statuses=statuses)
 
 
 @app.get(
@@ -681,25 +777,25 @@ async def control_service(
 
     Forwards the action to the agent's /services/{name} endpoint. This allows
     you to control s6-overlay services running inside the container.
-    
+
     Args:
         container: Name of the container (e.g., "ai_worker")
         service: Service ID (e.g., "ai_worker_bringup")
         request: ServiceActionRequest with action ("up", "down", or "restart")
-        
+
     Returns:
         ServiceControlResponse confirming the action was performed.
-        
+
     Raises:
         HTTPException: 404 if container/service not found, 503 if agent unavailable.
-        
+
     Example Request:
         ```json
         {
           "action": "restart"
         }
         ```
-        
+
     Example Response:
         ```json
         {

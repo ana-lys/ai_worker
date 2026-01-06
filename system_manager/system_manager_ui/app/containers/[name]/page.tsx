@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import ServiceCard from "@/components/ServiceCard";
-import { getServices, getServiceStatus } from "@/lib/api";
+import { getServices, getServiceStatuses } from "@/lib/api";
 import type { ServiceInfo, ServiceStatusResponse } from "@/types/api";
 
 export default function ContainerDetailPage() {
@@ -51,18 +51,13 @@ export default function ContainerDetailPage() {
 
   const loadStatuses = async () => {
     if (services.length === 0) return;
-    
+
     try {
       setRefreshing(true);
-      const statusPromises = services.map((service) =>
-        getServiceStatus(containerName, service.id).catch(() => null)
-      );
-      const statuses = await Promise.all(statusPromises);
+      const response = await getServiceStatuses(containerName);
       const statusMap: Record<string, ServiceStatusResponse> = {};
-      statuses.forEach((status, index) => {
-        if (status) {
-          statusMap[services[index].id] = status;
-        }
+      response.statuses.forEach((status) => {
+        statusMap[status.service] = status;
       });
       setServiceStatuses(statusMap);
     } catch (err) {
@@ -88,7 +83,7 @@ export default function ContainerDetailPage() {
 
   if (error) {
     return (
-      <div 
+      <div
         className="border rounded p-4"
         style={{
           backgroundColor: "rgba(244, 135, 113, 0.1)",
@@ -97,13 +92,13 @@ export default function ContainerDetailPage() {
       >
         <div className="flex items-center justify-between">
           <div>
-            <h3 
+            <h3
               className="font-medium mb-1"
               style={{ color: "var(--vscode-errorForeground)" }}
             >
               Error loading services
             </h3>
-            <p 
+            <p
               className="text-sm"
               style={{ color: "var(--vscode-errorForeground)" }}
             >
@@ -138,13 +133,13 @@ export default function ContainerDetailPage() {
     <div>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 
+          <h1
             className="text-2xl font-semibold mb-2"
             style={{ color: "var(--vscode-foreground)" }}
           >
             {containerName}
           </h1>
-          <p 
+          <p
             className="text-sm"
             style={{ color: "var(--vscode-descriptionForeground)" }}
           >
@@ -153,7 +148,7 @@ export default function ContainerDetailPage() {
         </div>
         <div className="flex items-center gap-2">
           {refreshing && (
-            <span 
+            <span
               className="text-sm"
               style={{ color: "var(--vscode-descriptionForeground)" }}
             >
@@ -183,7 +178,7 @@ export default function ContainerDetailPage() {
       </div>
 
       {services.length === 0 ? (
-        <div 
+        <div
           className="p-8 text-center border rounded"
           style={{
             backgroundColor: "var(--vscode-sidebar-background)",

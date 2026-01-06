@@ -114,6 +114,32 @@ class AgentClient:
             logger.error(f"Agent returned error status for service '{service_name}': {e}")
             raise
 
+    def get_all_services_status(self) -> dict:
+        """Get status of all services from agent in a single request.
+
+        This is more efficient than calling get_service_status() for each service.
+
+        Returns:
+            Response JSON from agent's /services/status endpoint.
+
+        Raises:
+            requests.RequestException: If request fails.
+            requests.HTTPError: If agent returns error status.
+        """
+        session = self._get_session()
+        base_url = self._get_base_url()
+        logger.debug(f"Requesting status for all services from agent at {self.socket_path}")
+        try:
+            response = session.get(f"{base_url}/services/status")
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Failed to communicate with agent at {self.socket_path}: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Agent returned error status for all services: {e}")
+            raise
+
     def control_service(self, service_name: str, action: str) -> dict:
         """Control a service (up/down/restart) via agent.
 

@@ -128,10 +128,16 @@ COPY docker/s6-services/common/ros2_service_finish.sh /usr/local/lib/s6-services
 RUN chmod +x /usr/local/lib/s6-services/ros2_service_run.sh && \
     chmod +x /usr/local/lib/s6-services/ros2_service_finish.sh
 
-# Create log directory and set permissions
-RUN mkdir -p /var/log/ffw_lg2_leader_ai && \
+# Create log directories and set permissions
+RUN mkdir -p /var/log/ffw_bg2_follower_ai && \
+    chown nobody:nogroup /var/log/ffw_bg2_follower_ai && \
+    chmod 02755 /var/log/ffw_bg2_follower_ai && \
+    mkdir -p /var/log/ffw_lg2_leader_ai && \
     chown nobody:nogroup /var/log/ffw_lg2_leader_ai && \
-    chmod 02755 /var/log/ffw_lg2_leader_ai
+    chmod 02755 /var/log/ffw_lg2_leader_ai && \
+    mkdir -p /var/log/ffw_sg2_follower_ai && \
+    chown nobody:nogroup /var/log/ffw_sg2_follower_ai && \
+    chmod 02755 /var/log/ffw_sg2_follower_ai
 
 # Add services to the user bundle so they start at container boot
 # Note: ffw_bg2_follower_ai-pipeline and ffw_lg2_leader_ai-pipeline are NOT in the user bundle - they must be started manually

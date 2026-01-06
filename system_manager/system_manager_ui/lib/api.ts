@@ -3,6 +3,7 @@ import type {
   ContainerListResponse,
   ServiceListResponse,
   ServiceStatusResponse,
+  ServiceStatusListResponse,
   ServiceControlResponse,
   ServiceLogsResponse,
   ServiceActionRequest,
@@ -15,9 +16,25 @@ import type {
   ServiceRunScriptResponse,
 } from "@/types/api";
 
-// Get API base URL from environment variable, default to system_manager service name
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+// Get API base URL from environment variable, default to frontend host:8080
+const getApiBaseUrl = (): string => {
+  // Check for environment variable (Next.js replaces NEXT_PUBLIC_* at build time)
+  const envUrl = process.env.NEXT_PUBLIC_API_URL;
+
+  if (envUrl) {
+    return envUrl;
+  }
+
+  // Use the hostname where the frontend is hosted
+  if (typeof window !== "undefined") {
+    return `http://${window.location.hostname}:8080`;
+  }
+
+  // Fallback for server-side rendering
+  return "http://localhost:8080";
+};
+
+const API_BASE_URL = getApiBaseUrl();
 
 // Create axios instance with default config
 const apiClient = axios.create({
@@ -71,6 +88,19 @@ export async function getServiceStatus(
   try {
     const response = await apiClient.get<ServiceStatusResponse>(
       `/containers/${container}/services/${service}/status`
+    );
+    return response.data;
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+export async function getServiceStatuses(
+  container: string
+): Promise<ServiceStatusListResponse> {
+  try {
+    const response = await apiClient.get<ServiceStatusListResponse>(
+      `/containers/${container}/services/status`
     );
     return response.data;
   } catch (error) {

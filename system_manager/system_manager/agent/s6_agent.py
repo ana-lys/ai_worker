@@ -14,8 +14,14 @@ from system_manager.agent.models import (
     ServiceControlResponse,
     ServiceListResponse,
     ServiceStatus,
+    ServiceStatusListResponse,
 )
-from system_manager.agent.s6_client import control_service, get_service_status, list_services
+from system_manager.agent.s6_client import (
+    control_service,
+    get_all_services_status,
+    get_service_status,
+    list_services,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -27,13 +33,13 @@ logger = logging.getLogger(__name__)
 
 def strip_ansi_codes(text: str) -> str:
     """Remove ANSI escape codes from text.
-    
+
     ANSI escape codes are used for terminal coloring and formatting.
     This function removes them to produce clean log output.
-    
+
     Args:
         text: Text that may contain ANSI escape codes.
-        
+
     Returns:
         Text with ANSI escape codes removed.
     """
@@ -97,6 +103,36 @@ async def get_services() -> ServiceListResponse:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list services: {str(e)}",
+        )
+
+
+@app.get(
+    "/services/status",
+    response_model=ServiceStatusListResponse,
+    tags=["services"],
+    summary="Get status of all services",
+    description="Get detailed status information for all services in a single request",
+)
+async def get_all_services_status_endpoint() -> ServiceStatusListResponse:
+    """Get status of all services.
+
+    This endpoint is more efficient than calling the individual status endpoint
+    for each service, as it processes all services in a single operation.
+
+    Returns:
+        ServiceStatusListResponse containing status for all available services.
+
+    Raises:
+        HTTPException: 500 if service listing fails.
+    """
+    try:
+        statuses = get_all_services_status()
+        return ServiceStatusListResponse(statuses=statuses)
+    except Exception as e:
+        logger.error(f"Failed to get all services status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get services status: {str(e)}",
         )
 
 

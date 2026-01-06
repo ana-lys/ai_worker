@@ -4,7 +4,7 @@ services:
     image: robotis/ai-worker:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.amd64
+      dockerfile: docker/Dockerfile.arm64
     tty: true
     restart: always
     cap_add:

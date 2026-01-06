@@ -30,6 +30,11 @@ export interface ServiceStatusResponse {
   uptime_seconds: number | null;
 }
 
+export interface ServiceStatusListResponse {
+  container: string;
+  statuses: ServiceStatusResponse[];
+}
+
 export interface ServiceActionRequest {
   action: "up" | "down" | "restart";
 }

@@ -116,6 +116,36 @@ def get_service_status(name: str) -> ServiceStatus:
         raise
 
 
+def get_all_services_status() -> list[ServiceStatus]:
+    """Get status of all s6 services.
+
+    This is more efficient than calling get_service_status() for each service
+    individually, as it processes all services in a single pass.
+
+    Returns:
+        List of ServiceStatus objects for all available services.
+
+    Note:
+        Services that fail to get status are skipped (logged but not included).
+    """
+    try:
+        services = list_services()
+        statuses: list[ServiceStatus] = []
+
+        for service_name in services:
+            try:
+                status = get_service_status(service_name)
+                statuses.append(status)
+            except Exception as e:
+                # Log but don't fail - continue with other services
+                logger.warning(f"Failed to get status for service '{service_name}': {e}")
+
+        return statuses
+    except Exception as e:
+        logger.error(f"Failed to get all services status: {e}")
+        raise
+
+
 def control_service(name: str, action: str) -> None:
     """Control an s6 service (start, stop, or restart).
 

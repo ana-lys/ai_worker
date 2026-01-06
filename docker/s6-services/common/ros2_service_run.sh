@@ -1,7 +1,7 @@
 #!/bin/bash
 # Reusable ROS2 service run script template
 # This script launches ROS2 commands for any service
-# Usage: 
+# Usage:
 #   SERVICE_NAME=<name> ROS2_COMMAND="<full command>" /path/to/ros2_service_run.sh
 #   If ROS2_COMMAND is not set, defaults to: ros2 launch ffw_bringup ${SERVICE_NAME}.launch.py
 # Note: This script is called via /command/with-contenv, so environment is already set up

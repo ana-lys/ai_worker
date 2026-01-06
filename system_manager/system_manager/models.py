@@ -87,6 +87,16 @@ class ServiceStatusResponse(BaseModel):
     uptime_seconds: Optional[int] = Field(None, description="Uptime in seconds if running")
 
 
+class ServiceStatusListResponse(BaseModel):
+    """Response for GET /containers/{container}/services/status.
+
+    Returns status for all services in a container in a single request.
+    """
+
+    container: str = Field(..., description="Container name")
+    statuses: list[ServiceStatusResponse] = Field(..., description="List of service statuses")
+
+
 class ServiceControlResponse(BaseModel):
     """Response for POST /containers/{container}/services/{service}."""
 
