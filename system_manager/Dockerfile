@@ -16,8 +16,8 @@ COPY system_manager/ ./system_manager/
 COPY config.yml ./config.yml
 
 # Expose API port
-EXPOSE 8080
+EXPOSE 8081
 
 # Run the system_manager API
-CMD ["uvicorn", "system_manager.api:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "system_manager.api:app", "--host", "0.0.0.0", "--port", "8081"]
 

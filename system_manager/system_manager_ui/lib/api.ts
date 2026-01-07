@@ -16,7 +16,7 @@ import type {
   ServiceRunScriptResponse,
 } from "@/types/api";
 
-// Get API base URL from environment variable, default to frontend host:8080
+// Get API base URL from environment variable, default to frontend host:8081
 const getApiBaseUrl = (): string => {
   // Check for environment variable (Next.js replaces NEXT_PUBLIC_* at build time)
   const envUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -27,11 +27,11 @@ const getApiBaseUrl = (): string => {
 
   // Use the hostname where the frontend is hosted
   if (typeof window !== "undefined") {
-    return `http://${window.location.hostname}:8080`;
+    return `http://${window.location.hostname}:8081`;
   }
 
   // Fallback for server-side rendering
-  return "http://localhost:8080";
+  return "http://localhost:8081";
 };
 
 const API_BASE_URL = getApiBaseUrl();

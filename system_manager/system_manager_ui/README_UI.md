@@ -51,15 +51,15 @@ The UI will be available at `http://localhost:3000`.
 
 ### Environment Variables
 
-- `NEXT_PUBLIC_API_URL`: System manager API base URL (default: `http://localhost:8080`)
+- `NEXT_PUBLIC_API_URL`: System manager API base URL (default: `http://localhost:8081`)
 - `NODE_ENV`: Production/development mode
 
 ## Architecture
 
 The UI communicates with the `system_manager` FastAPI backend via HTTP. When running in Docker:
 
-- If both services use `network_mode: host`, set `NEXT_PUBLIC_API_URL=http://localhost:8080`
-- If using a Docker network, set `NEXT_PUBLIC_API_URL=http://system_manager:8080`
+- If both services use `network_mode: host`, set `NEXT_PUBLIC_API_URL=http://localhost:8081`
+- If using a Docker network, set `NEXT_PUBLIC_API_URL=http://system_manager:8081`
 
 ## Pages
 

@@ -17,7 +17,7 @@ Each managed robot container (for example, `ai_worker`) runs an s6 agent that ex
 ┌─────────────────────────────────────────────────────────┐
 │  system_manager container                               │
 │  ┌───────────────────────────────────────────────────┐  │
-│  │  FastAPI REST API (port 8080)                     │  │
+│  │  FastAPI REST API (port 8081)                     │  │
 │  │  - /containers                                    │  │
 │  │  - /containers/{container}/services               │  │
 │  │  - /containers/{container}/services/{svc}/status  │  │
@@ -70,7 +70,7 @@ From `/home/dev8/Desktop/ai_worker/system_manager`:
    - Mount `config.yml` into the container as `/app/config.yml`
    - Mount the host `system_manager` package directory into `/app/system_manager` for live code updates
    - Mount `/var/run/docker.sock` for Docker API access
-   - Start the FastAPI app on port **8080** (via `uvicorn system_manager.api:app`)
+   - Start the FastAPI app on port **8081** (via `uvicorn system_manager.api:app`)
 
 3. **View logs**
 
@@ -97,7 +97,7 @@ From `/home/dev8/Desktop/ai_worker/system_manager`:
 5. **Run the API server**
 
    ```bash
-   uvicorn system_manager.api:app --host 0.0.0.0 --port 8080
+   uvicorn system_manager.api:app --host 0.0.0.0 --port 8081
    ```
 
 ## Configuration
@@ -175,9 +175,9 @@ These endpoints are optional and only work if `/var/run/docker.sock` is reachabl
 
 The FastAPI app includes auto-generated interactive docs:
 
-- **Swagger UI**: `http://localhost:8080/docs`
-- **ReDoc**: `http://localhost:8080/redoc`
-- **OpenAPI schema**: `http://localhost:8080/openapi.json`
+- **Swagger UI**: `http://localhost:8081/docs`
+- **ReDoc**: `http://localhost:8081/redoc`
+- **OpenAPI schema**: `http://localhost:8081/openapi.json`
 
 You can use these for:
 
