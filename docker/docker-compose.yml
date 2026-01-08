@@ -40,5 +40,5 @@ services:
       - ./s6-services/ffw_lg2_leader_ai-log-prepare:/etc/s6-overlay/s6-rc.d/ffw_lg2_leader_ai-log-prepare
       - ./s6-services/ffw_lg2_leader_ai-log:/etc/s6-overlay/s6-rc.d/ffw_lg2_leader_ai-log
       - ./s6-services/common:/usr/local/lib/s6-services
-      - ../system_manager:/opt/system_manager
+      - ../../system_manager:/opt/system_manager
     privileged: true
