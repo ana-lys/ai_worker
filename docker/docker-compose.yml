@@ -28,7 +28,7 @@ services:
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
       - ./workspace:/workspace
       - ../:/root/ros2_ws/src/ai_worker/
-      - ./agent_sockets/ai_worker:/var/run/agent
+      - /var/run/robotis/agent_sockets/ai_worker:/var/run/agent
       - ./s6-agent:/etc/s6-overlay/s6-rc.d/s6-agent
       - ./s6-services/ffw_bg2_follower_ai:/etc/s6-overlay/s6-rc.d/ffw_bg2_follower_ai
       - ./s6-services/ffw_bg2_follower_ai-log-prepare:/etc/s6-overlay/s6-rc.d/ffw_bg2_follower_ai-log-prepare
