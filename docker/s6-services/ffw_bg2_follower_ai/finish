@@ -15,4 +15,3 @@ else
     echo "Error: Common script not found at ${COMMON_SCRIPT}" >&2
     exit 1
 fi
-

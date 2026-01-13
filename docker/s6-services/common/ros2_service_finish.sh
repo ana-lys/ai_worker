@@ -56,6 +56,14 @@ if [ -f "${PGID_FILE}" ]; then
     fi
 fi
 
+# Stop the logging service when main service stops
+# This ensures the log service doesn't continue running after the main service exits
+if command -v s6-rc >/dev/null 2>&1; then
+    LOG_SERVICE="${SERVICE_NAME}-log"
+    echo "[${SERVICE_NAME} finish] Stopping logging service '${LOG_SERVICE}'..."
+    s6-rc -d change "${LOG_SERVICE}" 2>/dev/null || echo "[${SERVICE_NAME} finish] Warning: Failed to stop logging service '${LOG_SERVICE}' or already stopped"
+fi
+
 echo "[${SERVICE_NAME} finish] Finish script completed"
 
 exit 0
