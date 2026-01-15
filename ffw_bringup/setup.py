@@ -33,9 +33,6 @@ setup(
          glob('config/ffw_lg2_leader/*')),
         (os.path.join('share', package_name, 'config/common'), glob('config/common/*')),
         ('share/' + package_name + '/worlds', glob('worlds/*.sdf')),
-        # Install Gazebo models so model:// URIs (e.g., workcell) resolve after install
-        (os.path.join('share', package_name, 'gazebo_models'),
-         glob('gazebo_models/**/*', recursive=True)),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
