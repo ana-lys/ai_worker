@@ -3,7 +3,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command, NotSubstitution
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -31,6 +31,12 @@ def generate_launch_description():
         description = 'Flag to enable use_sim_time'
     )
 
+    use_slam_arg = DeclareLaunchArgument(
+        'use_slam',
+        default_value='false',
+        description='Use SLAM instead of prebuilt map + AMCL'
+    )
+
     nav2_localization_launch_path = os.path.join(
         get_package_share_directory('nav2_bringup'),
         'launch',
@@ -55,10 +61,22 @@ def generate_launch_description():
         'navigation.yaml'
     )
 
+    slam_params_path = os.path.join(
+        pkg_navigation,
+        'config',
+        'mapper_params_online_sync.yaml'
+    )
+
     map_file_path = os.path.join(
         pkg_navigation,
         'maps',
-        'map.yaml'
+        'my_map.yaml'
+    )
+
+    map_arg = DeclareLaunchArgument(
+        'map',
+        default_value=map_file_path,
+        description='Full path to the map yaml file'
     )
 
     rviz_node = Node(
@@ -76,8 +94,9 @@ def generate_launch_description():
         launch_arguments={
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
                 'params_file': localization_params_path,
-                'map': map_file_path,
-        }.items()
+                'map': LaunchConfiguration('map'),
+        }.items(),
+        condition=IfCondition(NotSubstitution(LaunchConfiguration('use_slam')))
     )
 
     navigation_launch = IncludeLaunchDescription(
@@ -88,11 +107,24 @@ def generate_launch_description():
         }.items()
     )
 
+    slam_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_navigation, 'launch', 'online_sync_launch.py')),
+        launch_arguments={
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'slam_params_file': slam_params_path,
+        }.items(),
+        condition=IfCondition(LaunchConfiguration('use_slam'))
+    )
+
     launchDescriptionObject = LaunchDescription()
     launchDescriptionObject.add_action(rviz_launch_arg)
     launchDescriptionObject.add_action(rviz_config_arg)
+    launchDescriptionObject.add_action(use_slam_arg)
+    launchDescriptionObject.add_action(map_arg)
     launchDescriptionObject.add_action(sim_time_arg)
     launchDescriptionObject.add_action(rviz_node)
+    launchDescriptionObject.add_action(slam_launch)
     launchDescriptionObject.add_action(localization_launch)
     launchDescriptionObject.add_action(navigation_launch)
 
