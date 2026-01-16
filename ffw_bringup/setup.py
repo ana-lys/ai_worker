@@ -26,7 +26,7 @@ setup(
         (os.path.join('share', package_name, 'config/ffw_bg2_rev3_follower'),
          glob('config/ffw_bg2_rev3_follower/*')),
         (os.path.join('share', package_name, 'config/ffw_bg2_rev4_follower'),
-        glob('config/ffw_bg2_rev4_follower/*')),
+         glob('config/ffw_bg2_rev4_follower/*')),
         (os.path.join('share', package_name, 'config/ffw_sg2_rev1_follower'),
          glob('config/ffw_sg2_rev1_follower/*')),
         (os.path.join('share', package_name, 'config/ffw_lg2_leader'),

@@ -134,7 +134,7 @@
       enabled_steering_angular_velocity_limit: true # select the shortest steering direciton or not, true or false
       steering_angular_velocity_limit: 100.0 # steering angular velocity [rad/s]
 
-      steering_alignment_angle_error_threshold: 0.3 # wheel stop when the difference b/w current steering angle and target steering angle is below it # [rad] => x * 57.2958 [deg]
+      steering_alignment_angle_error_threshold: 1.0 # wheel stop when the difference b/w current steering angle and target steering angle is below it # [rad] => x * 57.2958 [deg]
       steering_alignment_start_angle_error_threshold: 0.01
       steering_alignment_start_speed_error_threshold: 0.1
       enabled_open_loop: false # use open-loop control or not, true or false
