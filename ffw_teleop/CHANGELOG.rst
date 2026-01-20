@@ -1,6 +1,10 @@
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Changelog for package ffw_teleop
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1.1.16 (2026-01-20)
+-------------------
+* Added mobile_teleop node for keyboard control
+* Contributors: Sungho Woo
 
 1.1.15 (2025-12-09)
 -------------------

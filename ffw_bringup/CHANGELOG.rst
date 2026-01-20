@@ -1,6 +1,12 @@
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Changelog for package ffw_bringup
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1.1.16 (2026-01-20)
+-------------------
+* Added dual_laser_merger for SG2
+* Configured ros_gz_bridge via YAML
+* Updated Gazebo world and spawn parameters
+* Contributors: Yongjun Kwon
 
 1.1.15 (2025-12-09)
 -------------------
