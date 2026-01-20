@@ -27,7 +27,7 @@ def generate_launch_description():
 
     sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
-        default_value = 'True',
+        default_value = 'false',
         description = 'Flag to enable use_sim_time'
     )
 
@@ -70,7 +70,7 @@ def generate_launch_description():
     map_file_path = os.path.join(
         pkg_navigation,
         'maps',
-        'my_map.yaml'
+        'map.yaml'
     )
 
     map_arg = DeclareLaunchArgument(

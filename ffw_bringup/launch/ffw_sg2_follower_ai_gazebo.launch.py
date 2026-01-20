@@ -48,7 +48,6 @@ def generate_launch_description():
         get_package_share_directory('ffw_bringup'))
     ffw_bringup_src_path = str(Path(__file__).resolve().parent.parent)
 
-    # Set gazebo sim resource path
     gazebo_resource_path = SetEnvironmentVariable(
         name='GZ_SIM_RESOURCE_PATH',
         value=[
