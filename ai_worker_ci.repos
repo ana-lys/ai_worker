@@ -3,3 +3,7 @@ repositories:
     type: git
     url: https://github.com/ROBOTIS-GIT/dynamixel_hardware_interface.git
     version: main
+  utils/dual_laser_merger:
+    type: git
+    url: https://github.com/pradyum/dual_laser_merger
+    version: main
