@@ -17,12 +17,18 @@
 # Authors: Sungho Woo, Woojin Wie, Wonho Yun
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, RegisterEventHandler
-from launch.actions import IncludeLaunchDescription, TimerAction
-from launch.conditions import IfCondition, UnlessCondition
+from launch.actions import DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription
+from launch.actions import RegisterEventHandler
+from launch.actions import TimerAction
+from launch.conditions import IfCondition
+from launch.conditions import UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import Command
+from launch.substitutions import FindExecutable
+from launch.substitutions import LaunchConfiguration
+from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -318,6 +324,32 @@ def generate_launch_description():
         condition=IfCondition(use_head_eef_tracker),
     )
 
+    dual_laser_merger_node = Node(
+        package='dual_laser_merger',
+        executable='dual_laser_merger_node',
+        output='screen',
+        parameters=[{
+            'laser_1_topic': '/scan_left',
+            'laser_2_topic': '/scan_right',
+            'merged_scan_topic': '/scan',
+            'merged_cloud_topic': '/scan_cloud',
+            'target_frame': 'base_link',
+            'angle_min': -3.141592654,
+            'angle_max': 3.141592654,
+            'angle_increment': 0.006544985,
+            'scan_time': 0.1,
+            'range_min': 0.05,
+            'range_max': 20.0,
+            'use_inf': True,
+            'tolerance': 0.05,
+            'queue_size': 10,
+            'enable_shadow_filter': True,
+            'enable_average_filter': True,
+        }, {
+            'use_sim_time': use_sim,
+        }],
+    )
+
     return LaunchDescription(
         declared_arguments + [
             control_node,
@@ -334,5 +366,6 @@ def generate_launch_description():
             lidar_timer_20s,
             lidar_timer_10s,
             head_eef_tracker_node,
+            dual_laser_merger_node,
         ]
     )

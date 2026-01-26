@@ -67,10 +67,10 @@
          </collision>
          <inertial>
             <origin xyz="2.533965600e-02 0.000000000e+00 4.774514600e-02" />
-            <mass value="1.235180200e-01" />
-            <inertia ixx="6.870965700e-03" ixy="8.592260200e-07" ixz="-3.002664500e-04"
-            iyy="1.771510200e-02" iyz="-4.447973700e-07"
-            izz="1.631113500e-02" />
+            <mass value="0.123518" />
+            <inertia ixx="6.870965700e-06" ixy="8.592260200e-10" ixz="-3.002664500e-07"
+                     iyy="1.771510200e-05" iyz="-4.447973700e-10"
+                     izz="1.631113500e-05" />
          </inertial>
       </link>
       <joint name="${prefix}head_joint2" type="revolute">

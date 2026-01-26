@@ -34,7 +34,7 @@ def generate_launch_description():
     declared_arguments = [
         DeclareLaunchArgument('model', default_value='ffw_bg2_rev4_follower',
                               description='Robot model name.'),
-        DeclareLaunchArgument('world', default_value='empty_world',
+        DeclareLaunchArgument('world', default_value='default',
                               description='Gz sim World'),
     ]
 
@@ -47,7 +47,6 @@ def generate_launch_description():
     ffw_bringup_path = os.path.join(
         get_package_share_directory('ffw_bringup'))
 
-    # Set gazebo sim resource path
     gazebo_resource_path = SetEnvironmentVariable(
         name='GZ_SIM_RESOURCE_PATH',
         value=[

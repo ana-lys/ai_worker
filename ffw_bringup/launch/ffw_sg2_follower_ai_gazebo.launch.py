@@ -34,7 +34,7 @@ def generate_launch_description():
     declared_arguments = [
         DeclareLaunchArgument('model', default_value='ffw_sg2_rev1_follower',
                               description='Robot model name.'),
-        DeclareLaunchArgument('world', default_value='empty_world',
+        DeclareLaunchArgument('world', default_value='default',
                               description='Gz sim World'),
     ]
 
@@ -87,7 +87,9 @@ def generate_launch_description():
     robot_state_pub_node = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
-        parameters=[robot_description, {'use_sim_time': True}],
+        parameters=[robot_description, {
+            'use_sim_time': True
+        }],
         output='screen'
     )
 
@@ -98,7 +100,7 @@ def generate_launch_description():
         arguments=['-topic', 'robot_description',
                    '-x', '0.0',
                    '-y', '0.0',
-                   '-z', '0.0',
+                   '-z', '0.2',
                    '-R', '0.0',
                    '-P', '0.0',
                    '-Y', '0.0',
@@ -139,11 +141,45 @@ def generate_launch_description():
         parameters=[robot_description],
     )
 
+    gz_bridge_params_path = os.path.join(
+        ffw_bringup_path,
+        'config',
+        'common',
+        'gz_bridge.yaml'
+    )
+
     bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
-        arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+        arguments=['--ros-args', '-p', f'config_file:={gz_bridge_params_path}'],
+        parameters=[{'use_sim_time': True}],
         output='screen'
+    )
+
+    dual_laser_merger_node = Node(
+        package='dual_laser_merger',
+        executable='dual_laser_merger_node',
+        output='screen',
+        parameters=[{
+            'laser_1_topic': '/scan_left',
+            'laser_2_topic': '/scan_right',
+            'merged_scan_topic': '/scan',
+            'merged_cloud_topic': '/scan_cloud',
+            'target_frame': 'base_link',
+            'angle_min': -3.141592654,
+            'angle_max': 3.141592654,
+            'angle_increment': 0.006544985,
+            'scan_time': 0.1,
+            'range_min': 0.05,
+            'range_max': 20.0,
+            'use_inf': True,
+            'tolerance': 0.05,
+            'queue_size': 10,
+            'enable_shadow_filter': True,
+            'enable_average_filter': True,
+        }, {
+            'use_sim_time': True,
+        }],
     )
 
     rviz_config_file = os.path.join(ffw_description_path, 'rviz', 'ffw_sg2.rviz')
@@ -154,6 +190,7 @@ def generate_launch_description():
         name='rviz2',
         output='log',
         arguments=['-d', rviz_config_file],
+        parameters=[{'use_sim_time': True}],
     )
 
     return LaunchDescription([
@@ -171,6 +208,7 @@ def generate_launch_description():
             )
         ),
         bridge,
+        dual_laser_merger_node,
         gazebo_resource_path,
         gazebo,
         robot_state_pub_node,
