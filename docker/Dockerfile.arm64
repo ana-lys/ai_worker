@@ -39,7 +39,7 @@ WORKDIR /usr/src
 
 RUN git clone https://github.com/IntelRealSense/librealsense.git && \
     cd librealsense && \
-    git checkout 1e34346894be975e8e594fab22f8b31a89710bb
+    git checkout 1e34346894be975e8e594fab22f8b31a89a710bb
 
 # Build and install
 RUN cd /usr/src/librealsense \
