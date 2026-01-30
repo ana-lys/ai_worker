@@ -75,10 +75,8 @@ ENV PYTHONPATH=/opt/robotis_system_manager:${PYTHONPATH}
 
 RUN pip config set global.break-system-packages true
 
-# Install requirements.txt excluding tqdm (already installed as debian package by ros-jazzy-rmw-zenoh-cpp)
-# Filter out tqdm lines and use --ignore-installed to skip already installed packages
-RUN sed -E '/^tqdm[>=<]?/d' /opt/robotis_system_manager/requirements.txt > /tmp/requirements_filtered.txt && \
-    pip install --no-cache-dir --ignore-installed -r /tmp/requirements_filtered.txt
+# Install requirements.txt. tqdm (transitive dep e.g. from zenoh-ros2-sdk) is already installed by ros-jazzy-rmw-zenoh-cpp; pip reuses it.
+RUN pip install --no-cache-dir -r /opt/robotis_system_manager/requirements.txt
 
 # New-style s6-rc services (recommended in s6-overlay v3 docs)
 # Define services under /etc/s6-overlay/s6-rc.d and add them to the user bundle.
