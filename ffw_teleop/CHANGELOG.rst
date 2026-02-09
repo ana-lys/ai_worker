@@ -6,6 +6,10 @@ Changelog for package ffw_teleop
 -------------------
 * None
 
+1.1.17 (2026-01-27)
+-------------------
+* None
+
 1.1.16 (2026-01-20)
 -------------------
 * Added mobile_teleop node for keyboard control
