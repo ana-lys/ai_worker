@@ -31,11 +31,8 @@ if [ -f "${PGID_FILE}" ]; then
         SLEEP_INTERVAL=1  # seconds between checks
         ELAPSED=0
 
-        # Helper: returns 0 if PGID still has processes, 1 otherwise
         pgid_alive() {
-            # 'ps -o pgid=' prints the PGID for each matching process;
-            # if there is at least one line, the group is still alive.
-            ps -o pgid= -g "${PGID}" 2>/dev/null | grep -q .
+            kill -0 -"${PGID}" 2>/dev/null
         }
 
         if pgid_alive; then
