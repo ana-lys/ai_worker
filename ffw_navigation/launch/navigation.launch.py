@@ -65,17 +65,18 @@ def generate_launch_description():
         'navigation_launch.py'
     )
 
-    localization_params_path = os.path.join(
-        pkg_navigation,
-        'config',
-        'amcl_localization.yaml'
+    params_file_arg = DeclareLaunchArgument(
+        'params_file',
+        default_value=os.path.join(
+            pkg_navigation,
+            'config',
+            'navigation.yaml'
+        ),
+        description='Full path to the Nav2 params file (navigation + localization)'
     )
 
-    navigation_params_path = os.path.join(
-        pkg_navigation,
-        'config',
-        'navigation.yaml'
-    )
+    localization_params_path = LaunchConfiguration('params_file')
+    navigation_params_path = LaunchConfiguration('params_file')
 
     slam_params_path = os.path.join(
         pkg_navigation,
@@ -139,6 +140,7 @@ def generate_launch_description():
     launchDescriptionObject.add_action(rviz_launch_arg)
     launchDescriptionObject.add_action(rviz_config_arg)
     launchDescriptionObject.add_action(use_slam_arg)
+    launchDescriptionObject.add_action(params_file_arg)
     launchDescriptionObject.add_action(map_arg)
     launchDescriptionObject.add_action(sim_time_arg)
     launchDescriptionObject.add_action(rviz_node)
