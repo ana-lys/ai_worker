@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Author: Yongjun Kwon
 
 #ifndef FFW_NAVIGATION__IS_PATH_LENGTH_UNDER_HPP_
 #define FFW_NAVIGATION__IS_PATH_LENGTH_UNDER_HPP_
