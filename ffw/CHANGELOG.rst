@@ -2,6 +2,12 @@
 Changelog for package ffw
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.20 (2026-03-12)
+-------------------
+* Fixed version of docker image in docker-compose.yml
+* Added a notice in container.sh when update is available
+* Contributors: Hyungyu Kim
+
 1.1.19 (2026-02-19)
 -------------------
 * Added MPPI navigation mode
