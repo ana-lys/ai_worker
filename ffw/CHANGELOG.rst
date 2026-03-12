@@ -2,6 +2,14 @@
 Changelog for package ffw
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.19 (2026-02-19)
+-------------------
+* Added MPPI navigation mode
+* Merged AMCL params into navigation.yaml and added navigation_mppi.yaml
+* Added BT tree with IsPathLengthUnder
+* Added a console entry point for the mobile teleop node
+* Contributors: Yongjun Kwon
+
 1.1.18 (2026-02-09)
 -------------------
 * Use sigint signal to shutdown s6-overlay services

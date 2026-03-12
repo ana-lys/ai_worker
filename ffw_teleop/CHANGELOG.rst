@@ -2,6 +2,11 @@
 Changelog for package ffw_teleop
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.1.19 (2026-02-19)
+-------------------
+* Added a console entry point for the mobile teleop node
+* Contributors: Yongjun Kwon
+
 1.1.18 (2026-02-09)
 -------------------
 * None
