@@ -54,6 +54,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # Build node
 # ---------------------------------------------------------------------------
 add_executable(collision_checker src/collision_checker.cpp)
+add_executable(replay src/replay.cpp)
 
 target_include_directories(collision_checker PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -77,6 +78,24 @@ target_link_libraries(collision_checker
   OpenGL::GL
 )
 
+target_include_directories(replay PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${MUJOCO_INCLUDE_DIR}
+  ${GLFW_INCLUDE_DIRS}
+)
+ament_target_dependencies(replay
+  rclcpp
+  sensor_msgs
+  ament_index_cpp
+)
+
+target_link_libraries(replay
+  mujoco
+  ${GLFW_LIBRARIES}
+  OpenGL::GL
+)
+
 # Install MuJoCo libraries
 install(FILES
   ${MUJOCO_DIR}/lib/libmujoco.so
@@ -89,11 +108,11 @@ install(DIRECTORY 3rd_party
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(TARGETS collision_checker
+install(TARGETS collision_checker replay
   DESTINATION lib/${PROJECT_NAME})
 
 # Set RPATH to find the library in the install/lib folder
-set_target_properties(collision_checker PROPERTIES
+set_target_properties(collision_checker replay PROPERTIES
   INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/.."
 )
 

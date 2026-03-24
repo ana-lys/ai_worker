@@ -10,11 +10,16 @@
     3) "slider" specifically for the linear slide joint
   -->
   <default>
-    <!-- Robot default -->
+    <!-- Robot Base Class (Common properties) -->
     <default class="robot">
-      <!-- Increase armature or damping if you want more stability -->
-      <joint range="-3.14 3.14" armature="0.5" damping="100.0" />
-      <position kp="3000" forcerange="-1000 1000" ctrlrange="-3.14 3.14"/>
+      <joint range="-3.14 3.14" armature="0.5" damping="150.0" frictionloss="2.0"/>
+      <position kp="1500" forcerange="-300 300" ctrlrange="-3.14 3.14"/>
+    </default>
+
+    <!-- Spring-Assisted Joint Class (Inherits/Overrides robot defaults) -->
+    <default class="robot_spring">
+      <joint range="-3.14 3.14" armature="0.5" damping="150.0" frictionloss="2.0" stiffness="50.0" springref="0.0"/>
+      <position kp="1500" forcerange="-300 300" ctrlrange="-3.14 3.14"/>
     </default>
 
     <!-- Hand (gripper) default -->
@@ -146,7 +151,7 @@
 
                 <body name="arm_l_link6" pos="0 0 -0.1041">
                   <inertial pos="0.00038449 0.0194298 -0.0639456" quat="0.658925 -0.254422 0.24959 0.662414" mass="0.636234" diaginertia="0.00155561 0.00138897 0.00049676"/>
-                  <joint name="arm_l_joint6" class="robot" pos="0 0 0" axis="0 1 0" range="-1.57 1.57"/>
+                  <joint name="arm_l_joint6" class="robot_spring" pos="0 0 0" axis="0 1 0" range="-1.57 1.57"/>
                   <geom type="mesh" rgba="0.2 0.2 0.2 1" mesh="arm_l_link6" contype="0" conaffinity="0"/>
                   <!-- <geom type="box" size="0.045 0.055 0.015" pos="0.0 0.025 -0.05" quat="1 0 0 0" rgba="0.3 0.3 0.8 0.3" contype="1" conaffinity="1"/> -->
                   <geom type="capsule" size="0.025 0.02" pos="-0.0 0.065 -0.055" quat="0.707107 0 0.707107 0"

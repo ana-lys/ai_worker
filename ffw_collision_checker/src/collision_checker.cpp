@@ -12,10 +12,10 @@
 #include <ffw_collision_checker/msg/collision_check.hpp>
 #include <ffw_collision_checker/srv/solve_collision_naive.hpp>
 
-class CollisionCheckerPublisher : public rclcpp::Node
+class DynamicReplay : public rclcpp::Node
 {
 public:
-  CollisionCheckerPublisher() : Node("collision_checker_publisher")
+  DynamicReplay() : Node("collision_checker_publisher")
   {
     declare_parameter("use_gui", false);
     declare_parameter("gui_update_rate", 20.0);
@@ -35,7 +35,7 @@ public:
     // Subscribe to joint states
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
       "/joint_states", 10,
-      std::bind(&CollisionCheckerPublisher::jointStateCallback, this, std::placeholders::_1));
+      std::bind(&DynamicReplay::jointStateCallback, this, std::placeholders::_1));
 
     // Create publisher for collision check results
     collision_pub_ = this->create_publisher<ffw_collision_checker::msg::CollisionCheck>(
@@ -50,7 +50,7 @@ public:
       auto period = std::chrono::duration<double>(1.0 / gui_update_rate_);
       gui_timer_ = this->create_wall_timer(
         std::chrono::duration_cast<std::chrono::milliseconds>(period),
-        std::bind(&CollisionCheckerPublisher::guiUpdateCallback, this));
+        std::bind(&DynamicReplay::guiUpdateCallback, this));
     }
 
     RCLCPP_INFO(get_logger(), "Collision checker publisher ready!");
@@ -61,7 +61,7 @@ public:
 
   bool useGui() const { return use_gui_; }
 
-  ~CollisionCheckerPublisher()
+  ~DynamicReplay()
   {
     if (use_gui_ && window_) {
       mjv_freeScene(&scn_);
@@ -612,7 +612,7 @@ void solveCollision()
 int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<CollisionCheckerPublisher>();
+  auto node = std::make_shared<DynamicReplay>();
   node->init();
 
   node->spin();

@@ -1,0 +1,2 @@
+# RadioLink R16F Receiver - Persistent Symlink
+SUBSYSTEM=="input", ENV{ID_SERIAL}=="RadioLink_R16F_05B5E44105B2", SYMLINK+="input/radiolink_r16f", MODE="0666"
