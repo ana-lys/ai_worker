@@ -2,22 +2,31 @@ cmake_minimum_required(VERSION 3.16)
 project(ffw_collision_checker)
 
 # ---------------------------------------------------------------------------
-# Run MuJoCo installer (only if libs missing)
+# Run MuJoCo installer / Update Checker
 # ---------------------------------------------------------------------------
 set(MUJOCO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/mujoco)
-set(MUJOCO_LIB ${MUJOCO_DIR}/lib/libmujoco.so)
-if(NOT EXISTS ${MUJOCO_LIB})
-  message(INFO "MuJoCo not found, running install script...")
-  execute_process(
+set(STAMP_FILE ${MUJOCO_DIR}/.installed)
+
+message(STATUS "[MuJoCo] Checking for updates...")
+
+# We execute the script every time. The script itself handles the logic 
+# of whether to download (if new version exists) or skip (if up to date).
+execute_process(
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/install_mujoco.sh
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party
     RESULT_VARIABLE MUJOCO_INSTALL_STATUS
-  )
-  if(NOT MUJOCO_INSTALL_STATUS EQUAL 0)
-    message(FATAL_ERROR "MuJoCo installation failed.")
-  endif()
+)
+
+if(NOT MUJOCO_INSTALL_STATUS EQUAL 0)
+    message(FATAL_ERROR "[MuJoCo] Installation or update failed.")
+endif()
+
+# Read the version string produced by the script for the install(FILES) step
+if(EXISTS ${STAMP_FILE})
+    file(READ ${STAMP_FILE} MUJOCO_VERSION_STR)
+    string(STRIP "${MUJOCO_VERSION_STR}" MUJOCO_VERSION_STR)
 else()
-  message(INFO "MuJoCo already installed.")
+    set(MUJOCO_VERSION_STR "3.0.0") # Generic fallback
 endif()
 
 # ---------------------------------------------------------------------------
@@ -26,8 +35,8 @@ endif()
 set(MUJOCO_INCLUDE_DIR ${MUJOCO_DIR}/include)
 set(MUJOCO_LIBRARY ${MUJOCO_DIR}/lib/libmujoco.so)
 
-message(INFO "MuJoCo include: ${MUJOCO_INCLUDE_DIR}")
-message(INFO "MuJoCo library: ${MUJOCO_LIBRARY}")
+message(STATUS "[MuJoCo] Include: ${MUJOCO_INCLUDE_DIR}")
+message(STATUS "[MuJoCo] Library: ${MUJOCO_LIBRARY} (Version: ${MUJOCO_VERSION_STR})")
 
 include_directories(${MUJOCO_INCLUDE_DIR})
 link_directories(${MUJOCO_DIR}/lib)
@@ -46,74 +55,68 @@ pkg_search_module(GLFW REQUIRED glfw3)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/SolveCollisionNaive.srv"
-  "msg/CollisionCheck.msg"
+    "srv/SolveCollisionNaive.srv"
+    "msg/CollisionCheck.msg"
 )
 
 # ---------------------------------------------------------------------------
-# Build node
+# Build nodes
 # ---------------------------------------------------------------------------
-add_executable(collision_checker src/collision_checker.cpp)
-add_executable(replay src/replay.cpp)
+# Common function to avoid code duplication for multiple executables
+function(setup_checker_target TARGET_NAME)
+    add_executable(${TARGET_NAME} src/${TARGET_NAME}.cpp)
+    
+    target_include_directories(${TARGET_NAME} PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+        ${MUJOCO_INCLUDE_DIR}
+        ${GLFW_INCLUDE_DIRS}
+    )
 
-target_include_directories(collision_checker PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  ${MUJOCO_INCLUDE_DIR}
-  ${GLFW_INCLUDE_DIRS}
-)
-ament_target_dependencies(collision_checker
-  rclcpp
-  sensor_msgs
-  ament_index_cpp
-)
+    ament_target_dependencies(${TARGET_NAME}
+        rclcpp
+        sensor_msgs
+        ament_index_cpp
+    )
 
-# Link service typesupport
-rosidl_get_typesupport_target(cpp_typesupport_target
-  ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(collision_checker
-  ${cpp_typesupport_target}
-  mujoco            # equivalent to libmujoco.so
-  ${GLFW_LIBRARIES}
-  OpenGL::GL
-)
+    # Link service typesupport
+    rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+    
+    target_link_libraries(${TARGET_NAME}
+        ${cpp_typesupport_target}
+        mujoco
+        ${GLFW_LIBRARIES}
+        OpenGL::GL
+    )
+endfunction()
 
-target_include_directories(replay PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  ${MUJOCO_INCLUDE_DIR}
-  ${GLFW_INCLUDE_DIRS}
-)
-ament_target_dependencies(replay
-  rclcpp
-  sensor_msgs
-  ament_index_cpp
-)
+setup_checker_target(collision_checker)
+setup_checker_target(replay)
 
-target_link_libraries(replay
-  mujoco
-  ${GLFW_LIBRARIES}
-  OpenGL::GL
-)
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
 
-# Install MuJoCo libraries
+# Install MuJoCo libraries with dynamic versioning
 install(FILES
-  ${MUJOCO_DIR}/lib/libmujoco.so
-  ${MUJOCO_DIR}/lib/libmujoco.so.3.4.0
-  DESTINATION lib
+    ${MUJOCO_DIR}/lib/libmujoco.so
+    ${MUJOCO_DIR}/lib/libmujoco.so.${MUJOCO_VERSION_STR}
+    DESTINATION lib
 )
 
-# Install 3rd party resources (XMLs)
+# Install 3rd party resources (XMLs, models)
 install(DIRECTORY 3rd_party
-  DESTINATION share/${PROJECT_NAME}
+    DESTINATION share/${PROJECT_NAME}
 )
 
+# Install built binaries
 install(TARGETS collision_checker replay
-  DESTINATION lib/${PROJECT_NAME})
+    DESTINATION lib/${PROJECT_NAME}
+)
 
-# Set RPATH to find the library in the install/lib folder
+# Set RPATH so binaries can find libmujoco.so in the workspace 'lib' folder
 set_target_properties(collision_checker replay PROPERTIES
-  INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/.."
+    INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/.."
 )
 
 ament_package()
