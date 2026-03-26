@@ -18,6 +18,7 @@ install(PROGRAMS
   scripts/keyboard_control
   scripts/keyboard_control_simulation
   scripts/trajectory_test
+  scripts/mobile_teleop
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -13,14 +13,21 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
 
 # Build the Dashboard C++ node
 add_executable(radio_dashboard src/radio_dashboard.cpp)
 ament_target_dependencies(radio_dashboard rclcpp sensor_msgs)
 
+# Build the control mapper C++ node
+add_executable(radio_control_mapper src/radio_control_mapper.cpp)
+ament_target_dependencies(radio_control_mapper rclcpp sensor_msgs geometry_msgs trajectory_msgs)
+
 # Install C++ executable
 install(TARGETS
   radio_dashboard
+  radio_control_mapper
   DESTINATION lib/${PROJECT_NAME}
 )
 

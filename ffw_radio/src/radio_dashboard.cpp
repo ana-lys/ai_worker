@@ -15,9 +15,11 @@ enum class Mode         { RETURN = -1, MANUAL = 0, OFFBOARD = 1 }; // T0
 enum class Objective    { END_EFFECTOR = -1, POSE = 0, NAVIGATE = 1 }; // T1
 enum class SpareT       { LOW = -1, MID = 0, HIGH = 1 }; // T2
 
-enum class Trigger      { ON = -1, OFF = 1 };        // B0
-enum class Selector     { SECONDARY = -1, PRIMARY = 1 }; // B1
-enum class KillSwitch   { KILL = -1, RUN = 1 };       // B2
+enum class Trigger      { ON = -1, OFF = 1 };               // B0
+enum class Selector     { SECONDARY = -1, PRIMARY = 1 };    // B3
+enum class KillSwitch   { KILL = -1, RUN = 1 };             // B1
+enum class LeftSwitch   { LOW = -1, HIGH = 1 };             // B4
+enum class RightSwitch  { LOW = -1, HIGH = 1 };             // B2
 
 std::vector<int> decode_universal_switches(float clean_val, float unit_length, int n, int count) {
     float unit_scaled = (clean_val * 100.0f) / unit_length;
@@ -111,15 +113,19 @@ private:
             // Logic for Enum Strings
             std::string mode_str = (T[1] == -1) ? "RETURN"  : (T[1] == 0) ? "MANUAL" : "OFFBOARD";
             std::string obj_str  = (T[0] == -1) ? "END_EFFECTOR"  : (T[0] == 0) ? "POSE"   : "NAVIGATE";
-            std::string kill_str = (B[2] == -1) ? "KILL"      : "RUN";
+            std::string kill_str = (B[1] == -1) ? "KILL"      : "RUN";
             std::string trig_str = (B[0] == -1) ? "ON"       : "OFF";
-            std::string sel_str  = (B[1] == -1) ? "SECONDARY" : "PRIMARY";
+            std::string sel_str  = (B[3] == -1) ? "SECONDARY" : "PRIMARY";
+            std::string left_str = (B[4] == -1) ? "LOW"       : "HIGH";
+            std::string right_str= (B[2] == -1) ? "LOW"       : "HIGH";
 
             char status[256];
             sprintf(status, " [STATE] MODE(T1): %-10s | OBJ(T0): %-12s\n", mode_str.c_str(), obj_str.c_str());
             ss << status;
-            sprintf(status, " [HARD ] KILL(B2): %-10s | TRIG(B0): %-8s | SEL(B1): %-10s\n", 
+            sprintf(status, " [HARD ] KILL(B1): %-10s | TRIG(B0): %-8s | SEL(B3): %-10s\n", 
                     kill_str.c_str(), trig_str.c_str(), sel_str.c_str());
+            ss << status;
+            sprintf(status, " [SOFT ] LEFT(B4): %-10s | RIGHT(B2): %-10s\n", left_str.c_str(), right_str.c_str());
             ss << status;
             ss << "----------------------------------------------------------------------------\n";
         }
