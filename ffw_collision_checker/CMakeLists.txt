@@ -30,16 +30,42 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Run proxsuite installer / Update Checker
+# ---------------------------------------------------------------------------
+set(PROXSUITE_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/proxsuite)
+set(PROXSUITE_INSTALL_DIR ${PROXSUITE_SRC_DIR}/install)
+set(PROXSUITE_STAMP_FILE ${PROXSUITE_SRC_DIR}/.installed)
+
+add_custom_target(proxsuite_sync ALL
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/install_proxsuite.sh
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party
+    COMMENT "[proxsuite] Syncing dependency (clone/update/build/install if needed)"
+)
+
+if(EXISTS ${PROXSUITE_STAMP_FILE})
+    file(READ ${PROXSUITE_STAMP_FILE} PROXSUITE_HASH_STR)
+    string(STRIP "${PROXSUITE_HASH_STR}" PROXSUITE_HASH_STR)
+else()
+    set(PROXSUITE_HASH_STR "unknown")
+endif()
+
+# ---------------------------------------------------------------------------
 # Add MuJoCo paths
 # ---------------------------------------------------------------------------
 set(MUJOCO_INCLUDE_DIR ${MUJOCO_DIR}/include)
 set(MUJOCO_LIBRARY ${MUJOCO_DIR}/lib/libmujoco.so)
+set(PROXSUITE_INCLUDE_DIR ${PROXSUITE_INSTALL_DIR}/include)
+set(PROXSUITE_LIBRARY_DIR ${PROXSUITE_INSTALL_DIR}/lib)
 
 message(STATUS "[MuJoCo] Include: ${MUJOCO_INCLUDE_DIR}")
 message(STATUS "[MuJoCo] Library: ${MUJOCO_LIBRARY} (Version: ${MUJOCO_VERSION_STR})")
+message(STATUS "[proxsuite] Include: ${PROXSUITE_INCLUDE_DIR}")
+message(STATUS "[proxsuite] Library dir: ${PROXSUITE_LIBRARY_DIR} (Commit: ${PROXSUITE_HASH_STR})")
 
 include_directories(${MUJOCO_INCLUDE_DIR})
+include_directories(${PROXSUITE_INCLUDE_DIR})
 link_directories(${MUJOCO_DIR}/lib)
+link_directories(${PROXSUITE_LIBRARY_DIR})
 
 # ---------------------------------------------------------------------------
 # ROS 2 dependencies
@@ -52,6 +78,14 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_search_module(GLFW REQUIRED glfw3)
+find_package(Boost REQUIRED)
+find_package(coal REQUIRED)
+find_package(pinocchio REQUIRED)
+
+find_package(proxsuite CONFIG REQUIRED
+    PATHS ${PROXSUITE_INSTALL_DIR}/lib/cmake/proxsuite
+    NO_DEFAULT_PATH
+)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -93,6 +127,19 @@ endfunction()
 setup_checker_target(collision_checker)
 setup_checker_target(replay)
 
+add_dependencies(collision_checker proxsuite_sync)
+add_dependencies(replay proxsuite_sync)
+
+add_executable(dependency_versions_example src/proxsuite_example.cpp)
+target_compile_definitions(dependency_versions_example PRIVATE MUJOCO_STAMP_VERSION="${MUJOCO_VERSION_STR}")
+target_include_directories(dependency_versions_example PRIVATE
+    ${MUJOCO_INCLUDE_DIR}
+    ${coal_INCLUDE_DIRS}
+    ${pinocchio_INCLUDE_DIRS}
+)
+target_link_libraries(dependency_versions_example PUBLIC proxsuite::proxsuite mujoco)
+add_dependencies(dependency_versions_example proxsuite_sync)
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
@@ -104,13 +151,26 @@ install(FILES
     DESTINATION lib
 )
 
+# Install proxsuite shared libraries if present
+file(GLOB PROXSUITE_SHARED_LIBS
+    ${PROXSUITE_LIBRARY_DIR}/*.so
+    ${PROXSUITE_LIBRARY_DIR}/*.so.*
+)
+
+if(PROXSUITE_SHARED_LIBS)
+    install(FILES
+        ${PROXSUITE_SHARED_LIBS}
+        DESTINATION lib
+    )
+endif()
+
 # Install 3rd party resources (XMLs, models)
 install(DIRECTORY 3rd_party
     DESTINATION share/${PROJECT_NAME}
 )
 
 # Install built binaries
-install(TARGETS collision_checker replay
+install(TARGETS collision_checker replay dependency_versions_example
     DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -27,9 +27,9 @@ LATEST_VER=$(echo "$TAG_NAME" | sed 's/^v//')
 
 # Safety fallback if API fails
 if [ -z "$LATEST_VER" ]; then
-    echo "[MuJoCo] Warning: API failed. Falling back to 3.2.7"
-    LATEST_VER="3.2.7"
-    TAG_NAME="v3.2.7"
+    echo "[MuJoCo] Warning: API failed. Falling back to 3.6.0"
+    LATEST_VER="3.6.0"
+    TAG_NAME="v3.6.0"
 fi
 
 echo "[MuJoCo] Target version: ${LATEST_VER} (Tag: ${TAG_NAME})"
