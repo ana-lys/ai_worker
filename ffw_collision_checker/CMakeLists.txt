@@ -36,11 +36,18 @@ set(PROXSUITE_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/proxsuite)
 set(PROXSUITE_INSTALL_DIR ${PROXSUITE_SRC_DIR}/install)
 set(PROXSUITE_STAMP_FILE ${PROXSUITE_SRC_DIR}/.installed)
 
-add_custom_target(proxsuite_sync ALL
+message(STATUS "[proxsuite] Checking for updates...")
+
+# Must run at configure time because find_package(proxsuite) is also configure-time.
+execute_process(
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party/install_proxsuite.sh
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/3rd_party
-    COMMENT "[proxsuite] Syncing dependency (clone/update/build/install if needed)"
+    RESULT_VARIABLE PROXSUITE_INSTALL_STATUS
 )
+
+if(NOT PROXSUITE_INSTALL_STATUS EQUAL 0)
+    message(FATAL_ERROR "[proxsuite] Installation or update failed.")
+endif()
 
 if(EXISTS ${PROXSUITE_STAMP_FILE})
     file(READ ${PROXSUITE_STAMP_FILE} PROXSUITE_HASH_STR)
@@ -87,6 +94,14 @@ find_package(proxsuite CONFIG REQUIRED
     NO_DEFAULT_PATH
 )
 
+set(PROXSUITE_LINK_TARGET proxsuite::proxsuite)
+if(TARGET proxsuite::proxsuite-vectorized)
+    set(PROXSUITE_LINK_TARGET proxsuite::proxsuite-vectorized)
+    message(STATUS "[proxsuite] Using vectorized target: ${PROXSUITE_LINK_TARGET}")
+else()
+    message(STATUS "[proxsuite] Using base target: ${PROXSUITE_LINK_TARGET}")
+endif()
+
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
     "srv/SolveCollisionNaive.srv"
@@ -127,18 +142,22 @@ endfunction()
 setup_checker_target(collision_checker)
 setup_checker_target(replay)
 
-add_dependencies(collision_checker proxsuite_sync)
-add_dependencies(replay proxsuite_sync)
-
 add_executable(dependency_versions_example src/proxsuite_example.cpp)
 target_compile_definitions(dependency_versions_example PRIVATE MUJOCO_STAMP_VERSION="${MUJOCO_VERSION_STR}")
+ament_target_dependencies(dependency_versions_example
+    ament_index_cpp
+)
 target_include_directories(dependency_versions_example PRIVATE
     ${MUJOCO_INCLUDE_DIR}
     ${coal_INCLUDE_DIRS}
     ${pinocchio_INCLUDE_DIRS}
 )
-target_link_libraries(dependency_versions_example PUBLIC proxsuite::proxsuite mujoco)
-add_dependencies(dependency_versions_example proxsuite_sync)
+target_link_libraries(dependency_versions_example
+    ${PROXSUITE_LINK_TARGET}
+    coal::coal
+    pinocchio::pinocchio
+    mujoco
+)
 
 # ---------------------------------------------------------------------------
 # Install
