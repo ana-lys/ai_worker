@@ -14,24 +14,9 @@ case "${ARCH}" in
     *) echo "Error: Unsupported architecture ${ARCH}"; exit 1 ;;
 esac
 
-# 3. Get the Latest Tag and Version from GitHub
-echo "[MuJoCo] Checking GitHub for the latest release..."
-
-# Get the exact tag (e.g., "3.6.0" or "v3.2.7")
-TAG_NAME=$(curl -s --connect-timeout 5 https://api.github.com/repos/google-deepmind/mujoco/releases/latest | \
-           grep '"tag_name":' | \
-           sed -E 's/.*"([^"]+)".*/\1/')
-
-# Extract just the numbers for the filename/stamp (3.6.0)
-LATEST_VER=$(echo "$TAG_NAME" | sed 's/^v//')
-
-# Safety fallback if API fails
-if [ -z "$LATEST_VER" ]; then
-    echo "[MuJoCo] Warning: API failed. Falling back to 3.6.0"
-    LATEST_VER="3.6.0"
-    TAG_NAME="v3.6.0"
-fi
-
+# 3. Target fixed version
+TAG_NAME="3.4.0"
+LATEST_VER="3.4.0"
 echo "[MuJoCo] Target version: ${LATEST_VER} (Tag: ${TAG_NAME})"
 
 # 4. Version Check / Skip Logic
@@ -52,13 +37,20 @@ URL="https://github.com/google-deepmind/mujoco/releases/download/${TAG_NAME}/${A
 
 echo "[MuJoCo] Downloading from: ${URL}"
 
-# Clean old installation
 rm -rf "${MUJOCO_DIR}"
 mkdir -p "${MUJOCO_DIR}"
 
-# Download and extract using a pipe to avoid leaving large files in /tmp
-if ! wget -qO- "${URL}" | tar -xz -C "${MUJOCO_DIR}" --strip-components=1; then
-    echo "[MuJoCo] ERROR: Download or extraction failed for ${URL}"
+TMP_ARCHIVE="$(mktemp /tmp/mujoco.XXXXXX.tar.gz)"
+cleanup() { rm -f "${TMP_ARCHIVE}"; }
+trap cleanup EXIT
+
+if ! curl -L --fail --retry 3 --retry-delay 2 -o "${TMP_ARCHIVE}" "${URL}"; then
+    echo "[MuJoCo] ERROR: download failed for ${URL}"
+    exit 1
+fi
+
+if ! tar -xz -C "${MUJOCO_DIR}" --strip-components=1 -f "${TMP_ARCHIVE}"; then
+    echo "[MuJoCo] ERROR: extraction failed for ${TMP_ARCHIVE}"
     exit 1
 fi
 

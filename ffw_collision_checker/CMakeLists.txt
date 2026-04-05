@@ -86,8 +86,6 @@ find_package(OpenGL REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_search_module(GLFW REQUIRED glfw3)
 find_package(Boost REQUIRED)
-find_package(coal REQUIRED)
-find_package(pinocchio REQUIRED)
 
 find_package(proxsuite CONFIG REQUIRED
     PATHS ${PROXSUITE_INSTALL_DIR}/lib/cmake/proxsuite
@@ -149,14 +147,13 @@ ament_target_dependencies(dependency_versions_example
 )
 target_include_directories(dependency_versions_example PRIVATE
     ${MUJOCO_INCLUDE_DIR}
-    ${coal_INCLUDE_DIRS}
-    ${pinocchio_INCLUDE_DIRS}
+    ${GLFW_INCLUDE_DIRS}
 )
 target_link_libraries(dependency_versions_example
     ${PROXSUITE_LINK_TARGET}
-    coal::coal
-    pinocchio::pinocchio
     mujoco
+    ${GLFW_LIBRARIES}
+    OpenGL::GL
 )
 
 # ---------------------------------------------------------------------------

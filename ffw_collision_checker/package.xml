@@ -14,8 +14,6 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>ament_index_cpp</depend>
-  <depend>coal</depend>
-  <depend>pinocchio</depend>
   <depend>simde</depend>
   <depend>libglfw3-dev</depend>
   <depend>opengl</depend>
