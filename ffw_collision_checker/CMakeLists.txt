@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(ffw_collision_checker)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # ---------------------------------------------------------------------------
 # Run MuJoCo installer / Update Checker
 # ---------------------------------------------------------------------------
@@ -69,11 +73,6 @@ message(STATUS "[MuJoCo] Library: ${MUJOCO_LIBRARY} (Version: ${MUJOCO_VERSION_S
 message(STATUS "[proxsuite] Include: ${PROXSUITE_INCLUDE_DIR}")
 message(STATUS "[proxsuite] Library dir: ${PROXSUITE_LIBRARY_DIR} (Commit: ${PROXSUITE_HASH_STR})")
 
-include_directories(${MUJOCO_INCLUDE_DIR})
-include_directories(${PROXSUITE_INCLUDE_DIR})
-link_directories(${MUJOCO_DIR}/lib)
-link_directories(${PROXSUITE_LIBRARY_DIR})
-
 # ---------------------------------------------------------------------------
 # ROS 2 dependencies
 # ---------------------------------------------------------------------------
@@ -83,8 +82,9 @@ find_package(sensor_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenGL REQUIRED)
+find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(PkgConfig REQUIRED)
-pkg_search_module(GLFW REQUIRED glfw3)
+pkg_check_modules(GLFW REQUIRED IMPORTED_TARGET glfw3)
 find_package(Boost REQUIRED)
 
 find_package(proxsuite CONFIG REQUIRED
@@ -100,6 +100,12 @@ else()
     message(STATUS "[proxsuite] Using base target: ${PROXSUITE_LINK_TARGET}")
 endif()
 
+add_library(mujoco SHARED IMPORTED GLOBAL)
+set_target_properties(mujoco PROPERTIES
+    IMPORTED_LOCATION ${MUJOCO_LIBRARY}
+    INTERFACE_INCLUDE_DIRECTORIES ${MUJOCO_INCLUDE_DIR}
+)
+
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
     "srv/SolveCollisionNaive.srv"
@@ -109,6 +115,20 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # ---------------------------------------------------------------------------
 # Build nodes
 # ---------------------------------------------------------------------------
+# Shared IK solver library
+add_library(ffw_ik_solver_lib src/ffw_ik_solver.cpp)
+target_include_directories(ffw_ik_solver_lib
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ffw_ik_solver_lib
+    PUBLIC
+        Eigen3::Eigen
+        ${PROXSUITE_LINK_TARGET}
+        mujoco
+)
+
 # Common function to avoid code duplication for multiple executables
 function(setup_checker_target TARGET_NAME)
     add_executable(${TARGET_NAME} src/${TARGET_NAME}.cpp)
@@ -116,8 +136,6 @@ function(setup_checker_target TARGET_NAME)
     target_include_directories(${TARGET_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
-        ${MUJOCO_INCLUDE_DIR}
-        ${GLFW_INCLUDE_DIRS}
     )
 
     ament_target_dependencies(${TARGET_NAME}
@@ -132,7 +150,7 @@ function(setup_checker_target TARGET_NAME)
     target_link_libraries(${TARGET_NAME}
         ${cpp_typesupport_target}
         mujoco
-        ${GLFW_LIBRARIES}
+        PkgConfig::GLFW
         OpenGL::GL
     )
 endfunction()
@@ -140,20 +158,35 @@ endfunction()
 setup_checker_target(collision_checker)
 setup_checker_target(replay)
 
+add_executable(ffw_ik_solver_test src/ffw_ik_solver_test.cpp)
+target_include_directories(ffw_ik_solver_test PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(ffw_ik_solver_test
+    ament_index_cpp
+)
+target_link_libraries(ffw_ik_solver_test
+    ffw_ik_solver_lib
+    mujoco
+    PkgConfig::GLFW
+    OpenGL::GL
+)
+
 add_executable(dependency_versions_example src/proxsuite_example.cpp)
 target_compile_definitions(dependency_versions_example PRIVATE MUJOCO_STAMP_VERSION="${MUJOCO_VERSION_STR}")
 ament_target_dependencies(dependency_versions_example
     ament_index_cpp
 )
 target_include_directories(dependency_versions_example PRIVATE
-    ${MUJOCO_INCLUDE_DIR}
-    ${GLFW_INCLUDE_DIRS}
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_link_libraries(dependency_versions_example
     ${PROXSUITE_LINK_TARGET}
     mujoco
-    ${GLFW_LIBRARIES}
+    PkgConfig::GLFW
     OpenGL::GL
+    Eigen3::Eigen
 )
 
 # ---------------------------------------------------------------------------
@@ -185,8 +218,20 @@ install(DIRECTORY 3rd_party
     DESTINATION share/${PROJECT_NAME}
 )
 
+# Install public headers and the solver library
+install(DIRECTORY include/
+    DESTINATION include
+)
+
+install(TARGETS ffw_ik_solver_lib
+    EXPORT export_ffw_ik_solver_lib
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install built binaries
-install(TARGETS collision_checker replay dependency_versions_example
+install(TARGETS collision_checker replay ffw_ik_solver_test dependency_versions_example
     DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -194,5 +239,12 @@ install(TARGETS collision_checker replay dependency_versions_example
 set_target_properties(collision_checker replay PROPERTIES
     INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/.."
 )
+
+set_target_properties(ffw_ik_solver_test dependency_versions_example PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/.."
+)
+
+ament_export_include_directories(include)
+ament_export_targets(export_ffw_ik_solver_lib HAS_LIBRARY_TARGET)
 
 ament_package()
