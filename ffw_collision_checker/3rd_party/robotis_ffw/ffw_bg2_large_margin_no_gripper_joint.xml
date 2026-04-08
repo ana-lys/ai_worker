@@ -133,7 +133,8 @@
             <geom type="capsule" size="0.05 0.035" pos="0.04 0.0125 -0.135" quat="0.707107 0.707107 0 0"
             rgba="0.3 0.3 0.8 0.3" contype="2" conaffinity="368"/>
             
-            <site name="left_3_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="0.0 0.0 1.0 0.6"/> 
+            <!-- <site name="left_3_site" type="sphere" size="0.05" pos="0.0 0 0.0" quat="1 0 0 0" rgba="0.0 0.0 1.0 0.6"/>  -->
+            <site name="left_UA_site" type="sphere" size="0.03" pos="0.0 0 -0.275" quat="1 0 0 0" rgba="1.0 0.0 1.0 0.6"/> 
 
             <body name="arm_l_link4" pos="0.041004 0 -0.135">
               <inertial pos="-4.39703e-05 0.00978704 -0.137888" quat="0.984403 -0.175803 -0.00125587 -0.00649472" mass="1.51314" diaginertia="0.00636289 0.00628017 0.00133396"/>
@@ -142,7 +143,7 @@
               <geom type="capsule" size="0.05 0.045" pos="-0.04 0.0 -0.135" quat="1 0 0 0"
               rgba="0.3 0.3 0.8 0.3" contype="8" conaffinity="337"/>
 
-              <site name="left_4_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="0.0 1.0 0.0 0.6"/> 
+              <!-- <site name="left_4_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="0.0 1.0 0.0 0.6"/>  -->
 
               <geom type="capsule" size="0.04 0.01" pos="-0.04 0.065 -0.045 " quat="0.707107 0 0.707107 0"
               rgba="0.3 0.8 0.3 0.3" contype="8" conaffinity="337"/>
@@ -154,7 +155,7 @@
                 <geom type="capsule" size="0.05 0.035" pos="0.0 0.0125 -0.105" quat="0.707107 0.707107 0 0"
                 rgba="0.3 0.3 0.8 0.3" contype="32" conaffinity="343"/>
 
-                <site name="left_5_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.4"/> 
+                <!-- <site name="left_5_site" type="sphere" size="0.05" pos="0.0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.4"/>  -->
 
 
                 <body name="arm_l_link6" pos="0 0 -0.1041">
@@ -165,7 +166,7 @@
                   <geom type="capsule" size="0.025 0.02" pos="-0.0 0.065 -0.055" quat="0.707107 0 0.707107 0"
                     rgba="0.3 0.8 0.3 0.3" contype="32" conaffinity="343"/>
                   
-                  <site name="left_6_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="0.0 0.0 1.0 0.6"/> 
+                  <!-- <site name="left_6_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="0.0 0.0 1.0 0.6"/>  -->
 
 
                   <body name="arm_l_link7" pos="0 0 -0.0885">
@@ -178,7 +179,8 @@
                     <!-- Left hand base -->
                     <!-- <geom pos="0 0 -0.078" quat="0 0 1 0" type="mesh" rgba="0.2 0.2 0.2 1" mesh="base" contype="0" conaffinity="0"/> -->
                     
-                    <site name="left_7_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.6"/> 
+                    <!-- <site name="left_7_site" type="sphere" size="0.05" pos="0.0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.6"/>  -->
+                    <site name="left_UB_site" type="sphere" size="0.03" pos="0.0 0 0.2" quat="1 0 0 0" rgba="1.0 0.0 1.0 0.6"/>
 
                     <!-- LEFT GRIPPER TCP with full XYZ frame -->              
                     <site name="left_gripper_site" type="sphere" size="0.02" pos="0 0 -0.190" quat="0.7071068 0 0.7071068 0" rgba="0.0 1.0 0.0 0.4"/> 
@@ -246,7 +248,8 @@
             <geom type="capsule" size="0.05 0.035" pos="0.04 -0.0125 -0.135" quat="0.707107 0.707107 0 0"
                   rgba="0.3 0.3 0.8 0.3" contype="4" conaffinity="360"/>
 
-            <site name="right_3_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="0.0 0.0 1.0 0.6"/>
+            <!-- <site name="right_3_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="0.0 0.0 1.0 0.6"/> -->
+            <site name="right_UA_site" type="sphere" size="0.03" pos="0.0 0 -0.275" quat="1 0 0 0" rgba="1.0 0.0 1.0 0.6"/> 
 
             <body name="arm_r_link4" pos="0.041004 0 -0.135">
               <inertial pos="4.39703e-05 -0.00978736 -0.137888" quat="0.984402 0.175809 0.00125565 -0.00649329" mass="1.51314" diaginertia="0.00636295 0.00628021 0.00133398"/>
@@ -265,7 +268,7 @@
                 <geom type="capsule" size="0.05 0.035" pos="0.0 -0.0125 -0.105" quat="0.707107 0.707107 0 0"
                       rgba="0.3 0.3 0.8 0.3" contype="64" conaffinity="303"/>
 
-                <site name="right_5_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.4"/>
+                <!-- <site name="right_5_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.4"/> -->
 
                 <body name="arm_r_link6" pos="0 0 -0.1041">
                   <inertial pos="0.000339839 -0.0194304 -0.0639459" quat="0.662489 0.249825 -0.2542 0.658846" mass="0.636234" diaginertia="0.00155564 0.00138901 0.000496769"/>
@@ -284,8 +287,8 @@
                     <geom type="capsule" size="0.07 0.035" pos="0.047 0.0 -0.035" quat="0.707107 0 0.707107 0"
                           rgba="0.3 0.3 0.8 0.3" contype="64" conaffinity="303"/>
 
-                    <site name="right_7_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.6"/>
-
+                    <!-- <site name="right_7_site" type="sphere" size="0.05" pos="0 0 0.0" quat="1 0 0 0" rgba="1.0 0.0 0.0 0.6"/> -->
+                    <site name="right_UB_site" type="sphere" size="0.03" pos="0.0 0 0.2" quat="1 0 0 0" rgba="1.0 0.0 1.0 0.6"/>
                     <!-- RIGHT GRIPPER TCP -->
 
                     <site name="right_gripper_site" type="sphere" size="0.02" pos="0 0 -0.190" quat="0.7071068 0 0.7071068 0" rgba="0.0 1.0 0.0 0.4"/>

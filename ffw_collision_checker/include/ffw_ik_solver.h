@@ -50,6 +50,7 @@ struct CollisionCostConfig {
     double collision_margin = 0.155;
     double weight_scale     = 0.01;
     double epsilon          = 1e-1;
+    double arm_dist_weight  = 0.05;
 };
 
 // ============================================================
@@ -136,7 +137,11 @@ private:
     int             nv_;
     int             id_l_;   // site id: left_gripper_site
     int             id_r_;   // site id: right_gripper_site
-
+    int             id_lUA_;  // site id: left_UA_site
+    int             id_lUB_;  // site id: left_UB_site
+    int             id_rUA_;  // site id: right_UA_site
+    int             id_rUB_;  // site id: right_UB_site
+        
     // Reusable Eigen workspace
     Eigen::MatrixXd J_;         // (6, nv)
     Eigen::MatrixXd H_;         // (nv, nv)
@@ -152,7 +157,7 @@ private:
 
     // MuJoCo Jacobian scratch buffers (row-major, mjtNum)
     std::vector<mjtNum> jacp_l_, jacp_r_, jacp_c1_, jacp_c2_;
-
+    std::vector<mjtNum> jacp_lUA_, jacp_lUB_, jacp_rUA_, jacp_rUB_;
     // Contact index scratch (avoids per-step allocation in computeContacts)
     std::vector<int> scratch_;
 

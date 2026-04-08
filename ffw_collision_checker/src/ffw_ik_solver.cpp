@@ -29,6 +29,10 @@ IKSolver::IKSolver(mjModel* model)
     jacp_r_.resize(3 * nv_);
     jacp_c1_.resize(3 * nv_);
     jacp_c2_.resize(3 * nv_);
+    jacp_lUA_.resize(3 * nv_);
+    jacp_lUB_.resize(3 * nv_);
+    jacp_rUA_.resize(3 * nv_);
+    jacp_rUB_.resize(3 * nv_);
 
     const int max_contacts = (model->nconmax > 0) ? model->nconmax : 512;
     Jdist_all_.resize(max_contacts, nv_);
@@ -38,9 +42,10 @@ IKSolver::IKSolver(mjModel* model)
 
     id_l_ = mj_name2id(m_, mjOBJ_SITE, "left_gripper_site");
     id_r_ = mj_name2id(m_, mjOBJ_SITE, "right_gripper_site");
-
-    if (id_l_ == -1 || id_r_ == -1)
-        throw std::runtime_error("[IKSolver] 'left_gripper_site' or 'right_gripper_site' not found in model.");
+    id_lUA_ = mj_name2id(m_, mjOBJ_SITE, "left_UA_site");
+    id_lUB_ = mj_name2id(m_, mjOBJ_SITE, "left_UB_site");
+    id_rUA_ = mj_name2id(m_, mjOBJ_SITE, "right_UA_site");
+    id_rUB_ = mj_name2id(m_, mjOBJ_SITE, "right_UB_site");
 }
 
 // ============================================================
@@ -193,7 +198,6 @@ StepResult IKSolver::solveStep(
         if ((int)dist_history.size() > cfg.dist_window)
             dist_history.pop_front();
     }
-
     if ((int)error_history.size() == cfg.ee_window) {
         double old_err  = error_history.front();
         double rate     = (old_err - result.error) / std::max(old_err, 1e-9);
@@ -258,6 +262,41 @@ StepResult IKSolver::solveStep(
               dist_all_.head(n_within);
     }
 
+    // ── Arm-fold attractive gradient: minimise lUA↔lUB and rUA↔rUB ──────────
+    {
+        using RowMat = Eigen::Matrix<mjtNum, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    
+        // Left pair
+        Eigen::Vector3d pa = Eigen::Vector3d::Map(d->site_xpos + 3 * id_lUA_);
+        Eigen::Vector3d pb = Eigen::Vector3d::Map(d->site_xpos + 3 * id_lUB_);
+        Eigen::Vector3d diff = pb - pa;
+        double dist = diff.norm();
+        if (dist >= 1e-9) {
+            Eigen::Vector3d n = diff / dist;
+            mj_jacSite(m_, d, jacp_lUA_.data(), nullptr, id_lUA_);
+            mj_jacSite(m_, d, jacp_lUB_.data(), nullptr, id_lUB_);
+            Eigen::Map<const RowMat> Ja(jacp_lUA_.data(), 3, nv_);
+            Eigen::Map<const RowMat> Jb(jacp_lUB_.data(), 3, nv_);
+            g_ += col.arm_dist_weight * dist *
+                  (n.transpose().cast<double>() * (Jb - Ja).cast<double>()).transpose();
+        }
+    
+        // Right pair
+        pa   = Eigen::Vector3d::Map(d->site_xpos + 3 * id_rUA_);
+        pb   = Eigen::Vector3d::Map(d->site_xpos + 3 * id_rUB_);
+        diff = pb - pa;
+        dist = diff.norm();
+        if (dist >= 1e-9) {
+            Eigen::Vector3d n = diff / dist;
+            mj_jacSite(m_, d, jacp_rUA_.data(), nullptr, id_rUA_);
+            mj_jacSite(m_, d, jacp_rUB_.data(), nullptr, id_rUB_);
+            Eigen::Map<const RowMat> Ja(jacp_rUA_.data(), 3, nv_);
+            Eigen::Map<const RowMat> Jb(jacp_rUB_.data(), 3, nv_);
+            g_ += col.arm_dist_weight * dist *
+                  (n.transpose().cast<double>() * (Jb - Ja).cast<double>()).transpose();
+        }
+    }
+
     // Joint velocity bounds from joint limits
     for (int i = 0; i < nv_; ++i) {
         int jid   = m_->dof_jntid[i];
@@ -271,7 +310,7 @@ StepResult IKSolver::solveStep(
             ub_[i] = std::min(ub_[i], (q_max - q_curr) / cfg.step_size);
         }
     }
-
+    
     // QP solve (warm-started after first call)
     qp_.settings.verbose = cfg.qp_verbose;
     if (!qp_initialized_) {

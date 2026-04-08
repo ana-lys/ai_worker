@@ -396,16 +396,6 @@ public:
 
         // ----------------------------------------------------------------
         // Build EE Jacobian
-        //
-        // FIX (Bug 1 + Bug 4): mj_jacSite fills a (3 × nv) ROW-MAJOR block.
-        // The old code mapped it as column-major (nv, 3) then transposed —
-        // completely wrong strides. We now map with RowMajor and mjtNum, then
-        // cast to double. This matches what computeContacts already does for
-        // the contact Jacobians.
-        //
-        // FIX (inefficiency): Jacobian assembly was copy-pasted in both branches
-        // of the contacts_within_margin if-else. It is now hoisted above the
-        // branch; only the gradient term differs between branches.
         // ----------------------------------------------------------------
         using RowMat3xN = Eigen::Matrix<mjtNum, 3, Eigen::Dynamic, Eigen::RowMajor>;
 
@@ -462,10 +452,6 @@ public:
 
         // ----------------------------------------------------------------
         // Solve QP
-        //
-        // FIX (inefficiency): ProxQP object is now a cached member (qp_).
-        // First call uses init(); subsequent calls use update() which reuses
-        // internal allocations and warm-starts from the previous solution.
         // ----------------------------------------------------------------
         qp_.settings.verbose = cfg.qp_verbose;
         if (!qp_initialized_) {

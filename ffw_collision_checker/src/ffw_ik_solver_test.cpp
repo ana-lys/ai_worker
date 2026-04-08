@@ -48,7 +48,7 @@ public:
 
         mjv_defaultCamera(&cam_);
         cam_.distance   = 3.0;
-        cam_.azimuth    = 0.0;
+        cam_.azimuth    = 180.0;
         cam_.elevation  = -20.0;
         cam_.type       = mjCAMERA_FREE;
         cam_.lookat[0]  = 0.0;
