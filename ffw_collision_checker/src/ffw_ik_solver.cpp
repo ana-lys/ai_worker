@@ -24,6 +24,7 @@ IKSolver::IKSolver(mjModel* model)
     C_ = Eigen::MatrixXd::Identity(nv_, nv_);
     lb_.resize(nv_);
     ub_.resize(nv_);
+    M_.resize(nv_, nv_);   // dense inertia buffer — populated per step via mj_fullM
 
     jacp_l_.resize(3 * nv_);
     jacp_r_.resize(3 * nv_);
@@ -238,8 +239,17 @@ StepResult IKSolver::solveStep(
     J_.block(3, 0, 3, nv_) =
         Eigen::Map<const RowMat3xN>(jacp_r_.data(), 3, nv_).cast<double>();
 
+    // Build mass-weighted Hessian: H = J^T J + λ M
+    // mj_fullM densifies MuJoCo's sparse upper-triangular d->qM (already
+    // populated by mj_forward above) into a flat row-major array.  M_ is
+    // symmetric so the column/row-major mismatch between MuJoCo and Eigen
+    // is harmless.
+    mj_fullM(m_, M_.data(), d->qM);
     H_ = J_.transpose() * J_;
+    if (cfg.inertia_weight > 0.0)
+        H_ += cfg.inertia_weight * M_;
     H_.diagonal().array() += cfg.damping;
+
     g_ = J_.transpose() * err_;
 
     // Collision repulsion gradient

@@ -33,6 +33,12 @@ struct SolverConfig {
     int    topk_contacts        = 5;
     bool   qp_verbose           = false;
 
+    // Mass-weighted H: λ * M added to J^T J before damping.
+    // Heavier DOFs (torso) become proportionally more expensive to move,
+    // so the solver naturally reaches targets via lighter distal joints first.
+    // Tune in the range [1e-4, 1e-2]; set to 0.0 to disable.
+    double inertia_weight       = 5e-3;
+
     // Sliding-window early-stop: end-effector improvement
     int    ee_window            = 5;
     double ee_improvement_rate  = 0.02;
@@ -146,6 +152,7 @@ private:
     Eigen::MatrixXd J_;         // (6, nv)
     Eigen::MatrixXd H_;         // (nv, nv)
     Eigen::MatrixXd C_;         // identity (nv, nv) — QP inequality lhs
+    Eigen::MatrixXd M_;         // (nv, nv) — dense inertia matrix
     Eigen::VectorXd g_;         // (nv)
     Eigen::VectorXd err_;       // (6)
     Eigen::VectorXd lb_, ub_;   // (nv)

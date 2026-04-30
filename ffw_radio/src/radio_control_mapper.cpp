@@ -1,14 +1,25 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include <Eigen/Dense>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <mujoco/mujoco.h>
+
+#include "ffw_ik_solver.h"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
@@ -89,6 +100,26 @@ std::vector<int> decode_universal_switches(float clean_val, float unit_length, i
 class RadioControlMapper : public rclcpp::Node
 {
 public:
+  struct MjModelDeleter
+  {
+    void operator()(mjModel * model) const
+    {
+      if (model != nullptr) {
+        mj_deleteModel(model);
+      }
+    }
+  };
+
+  struct MjDataDeleter
+  {
+    void operator()(mjData * data) const
+    {
+      if (data != nullptr) {
+        mj_deleteData(data);
+      }
+    }
+  };
+
   RadioControlMapper()
   : Node("radio_control_mapper")
   {
@@ -99,6 +130,17 @@ public:
     this->declare_parameter("max_joint_speed", 0.8);
     this->declare_parameter("pose_twitch_gain", 0.25);
     this->declare_parameter("pose_twitch_ticks", 6);
+    this->declare_parameter("ee_position_step", 0.01);
+    this->declare_parameter("ee_deadband", 0.05);
+    this->declare_parameter("command_dt_fallback", 0.02);
+    this->declare_parameter("command_dt_min", 0.005);
+    this->declare_parameter("command_dt_max", 0.05);
+    this->declare_parameter("joint_state_timeout_sec", 1.0);
+    this->declare_parameter("resume_neutral_threshold", 0.08);
+    this->declare_parameter("publish_rate_hz", 100.0);
+    this->declare_parameter("joint_state_topic", "/joint_states");
+    this->declare_parameter("blocked_diff_threshold", 0.15);
+    this->declare_parameter("blocked_consecutive_cycles", 10);
     this->declare_parameter(
       "left_arm_topic",
       "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory");
@@ -129,6 +171,11 @@ public:
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
       "joy", 10, std::bind(&RadioControlMapper::joy_callback, this, _1));
 
+    joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+      this->get_parameter("joint_state_topic").as_string(),
+      20,
+      std::bind(&RadioControlMapper::joint_state_callback, this, _1));
+
     base_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
     linear_vel_pub_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>(
       "radio/linear_velocity", 10);
@@ -158,6 +205,11 @@ public:
     head_cmd_pos_.assign(head_joint_names_.size(), 0.0);
     lift_cmd_pos_.assign(lift_joint_names_.size(), 0.0);
 
+    left_arm_kin_pos_.assign(left_arm_joint_names_.size(), 0.0);
+    right_arm_kin_pos_.assign(right_arm_joint_names_.size(), 0.0);
+    head_kin_pos_.assign(head_joint_names_.size(), 0.0);
+    lift_kin_pos_.assign(lift_joint_names_.size(), 0.0);
+
     left_arm_lower_limits_ = this->get_parameter("left_arm_lower_limits").as_double_array();
     left_arm_upper_limits_ = this->get_parameter("left_arm_upper_limits").as_double_array();
     right_arm_lower_limits_ = this->get_parameter("right_arm_lower_limits").as_double_array();
@@ -172,7 +224,16 @@ public:
     normalize_limit_sizes(head_lower_limits_, head_upper_limits_, head_joint_names_.size(), "head");
     normalize_limit_sizes(lift_lower_limits_, lift_upper_limits_, lift_joint_names_.size(), "lift");
 
-    command_dt_ = 1.0 / 50.0;  // Match joy autorepeat_rate default in launch file
+    initialize_ik_runtime();
+
+    command_dt_ = this->get_parameter("command_dt_fallback").as_double();
+
+    const double publish_rate_hz = this->get_parameter("publish_rate_hz").as_double();
+    const double clamped_rate_hz = std::max(1.0, publish_rate_hz);
+    const auto timer_period = std::chrono::duration<double>(1.0 / clamped_rate_hz);
+    control_timer_ = this->create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(timer_period),
+      std::bind(&RadioControlMapper::control_timer_callback, this));
 
     RCLCPP_INFO(this->get_logger(), "Pose joint level count set to 8 (7 arm + gripper)");
     log_startup_parameters();
@@ -234,7 +295,38 @@ private:
 
     RCLCPP_INFO(
       this->get_logger(),
-      "Topics | left_arm=%s | right_arm=%s | head=%s | lift=%s",
+      "Params | ee_position_step=%.4f ee_deadband=%.3f",
+      this->get_parameter("ee_position_step").as_double(),
+      this->get_parameter("ee_deadband").as_double());
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Params | command_dt_fallback=%.4f command_dt_min=%.4f command_dt_max=%.4f",
+      this->get_parameter("command_dt_fallback").as_double(),
+      this->get_parameter("command_dt_min").as_double(),
+      this->get_parameter("command_dt_max").as_double());
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Params | joint_state_timeout_sec=%.3f resume_neutral_threshold=%.3f",
+      this->get_parameter("joint_state_timeout_sec").as_double(),
+      this->get_parameter("resume_neutral_threshold").as_double());
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Params | publish_rate_hz=%.2f",
+      this->get_parameter("publish_rate_hz").as_double());
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Params | blocked_diff_threshold=%.3f blocked_consecutive_cycles=%ld",
+      this->get_parameter("blocked_diff_threshold").as_double(),
+      this->get_parameter("blocked_consecutive_cycles").as_int());
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Topics | joint_state=%s | left_arm=%s | right_arm=%s | head=%s | lift=%s",
+      this->get_parameter("joint_state_topic").as_string().c_str(),
       this->get_parameter("left_arm_topic").as_string().c_str(),
       this->get_parameter("right_arm_topic").as_string().c_str(),
       this->get_parameter("head_topic").as_string().c_str(),
@@ -260,6 +352,217 @@ private:
       "Limits lift lower=%s upper=%s",
       vector_to_string(this->get_parameter("lift_lower_limits").as_double_array()).c_str(),
       vector_to_string(this->get_parameter("lift_upper_limits").as_double_array()).c_str());
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "IK runtime | enabled=%s",
+      ik_runtime_ready_ ? "true" : "false");
+  }
+
+  struct JointBinding
+  {
+    size_t cmd_index {0};
+    int qpos_adr {-1};
+  };
+
+  void create_joint_bindings(
+    const std::vector<std::string> & joint_names,
+    std::vector<JointBinding> & bindings,
+    const std::string & group_label)
+  {
+    bindings.clear();
+    if (!ik_model_) {
+      return;
+    }
+
+    for (size_t i = 0; i < joint_names.size(); ++i) {
+      const auto & name = joint_names[i];
+      const int joint_id = mj_name2id(ik_model_.get(), mjOBJ_JOINT, name.c_str());
+      if (joint_id < 0) {
+        const bool is_gripper_joint = (name.find("gripper_") == 0);
+        if (!is_gripper_joint) {
+          RCLCPP_WARN(
+            this->get_logger(),
+            "IK model missing joint '%s' for %s",
+            name.c_str(),
+            group_label.c_str());
+        }
+        continue;
+      }
+
+      const int qpos_adr = ik_model_->jnt_qposadr[joint_id];
+      if (qpos_adr < 0 || qpos_adr >= ik_model_->nq) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Invalid qpos adr for joint '%s' (%d)",
+          name.c_str(),
+          qpos_adr);
+        continue;
+      }
+
+      bindings.push_back(JointBinding {i, qpos_adr});
+    }
+  }
+
+  void apply_group_to_mujoco(
+    const std::vector<JointBinding> & bindings,
+    const std::vector<double> & source_positions)
+  {
+    if (!ik_data_) {
+      return;
+    }
+
+    for (const auto & b : bindings) {
+      if (b.cmd_index < source_positions.size() && b.qpos_adr >= 0 && b.qpos_adr < ik_model_->nq) {
+        ik_data_->qpos[b.qpos_adr] = source_positions[b.cmd_index];
+      }
+    }
+  }
+
+  void extract_group_from_mujoco(
+    const std::vector<JointBinding> & bindings,
+    std::vector<double> & target_positions)
+  {
+    if (!ik_data_) {
+      return;
+    }
+
+    for (const auto & b : bindings) {
+      if (b.cmd_index < target_positions.size() && b.qpos_adr >= 0 && b.qpos_adr < ik_model_->nq) {
+        target_positions[b.cmd_index] = ik_data_->qpos[b.qpos_adr];
+      }
+    }
+  }
+
+  bool apply_kinematic_state_to_mujoco()
+  {
+    if (!ik_runtime_ready_ || !ik_model_ || !ik_data_) {
+      return false;
+    }
+
+    mju_zero(ik_data_->qvel, ik_model_->nv);
+
+    apply_group_to_mujoco(left_arm_joint_bindings_, left_arm_kin_pos_);
+    apply_group_to_mujoco(right_arm_joint_bindings_, right_arm_kin_pos_);
+    apply_group_to_mujoco(head_joint_bindings_, head_kin_pos_);
+    apply_group_to_mujoco(lift_joint_bindings_, lift_kin_pos_);
+
+    mj_forward(ik_model_.get(), ik_data_.get());
+    return true;
+  }
+
+  void sync_command_state_from_mujoco()
+  {
+    if (!ik_runtime_ready_ || !ik_data_) {
+      return;
+    }
+
+    extract_group_from_mujoco(left_arm_joint_bindings_, left_arm_cmd_pos_);
+    extract_group_from_mujoco(right_arm_joint_bindings_, right_arm_cmd_pos_);
+    extract_group_from_mujoco(head_joint_bindings_, head_cmd_pos_);
+    extract_group_from_mujoco(lift_joint_bindings_, lift_cmd_pos_);
+  }
+
+  bool initialize_ee_goals_from_kinematic_state()
+  {
+    if (!apply_kinematic_state_to_mujoco()) {
+      return false;
+    }
+
+    if (ik_left_site_id_ < 0 || ik_right_site_id_ < 0) {
+      return false;
+    }
+
+    left_ee_goal_ = Eigen::Vector3d::Map(ik_data_->site_xpos + 3 * ik_left_site_id_);
+    right_ee_goal_ = Eigen::Vector3d::Map(ik_data_->site_xpos + 3 * ik_right_site_id_);
+    ee_goal_initialized_ = true;
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Initialized EE goals from MuJoCo sites | L:[%.3f %.3f %.3f] R:[%.3f %.3f %.3f]",
+      left_ee_goal_[0],
+      left_ee_goal_[1],
+      left_ee_goal_[2],
+      right_ee_goal_[0],
+      right_ee_goal_[1],
+      right_ee_goal_[2]);
+
+    return true;
+  }
+
+  void initialize_ik_runtime()
+  {
+    using ament_index_cpp::get_package_share_directory;
+
+    std::string xml_path;
+    try {
+      xml_path =
+        get_package_share_directory("ffw_collision_checker") +
+        "/3rd_party/robotis_ffw/scene_inverse_kinematic.xml";
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(this->get_logger(), "IK init failed (package lookup): %s", e.what());
+      return;
+    }
+
+    char error[1000] = {0};
+    mjModel * raw_model = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
+    if (raw_model == nullptr) {
+      RCLCPP_ERROR(this->get_logger(), "IK init failed (mj_loadXML): %s", error);
+      return;
+    }
+
+    ik_model_.reset(raw_model);
+    ik_data_.reset(mj_makeData(ik_model_.get()));
+    if (!ik_data_) {
+      RCLCPP_ERROR(this->get_logger(), "IK init failed (mj_makeData)");
+      ik_model_.reset();
+      return;
+    }
+
+    mju_zero(ik_data_->qpos, ik_model_->nq);
+    mju_zero(ik_data_->qvel, ik_model_->nv);
+    if (ik_model_->nq >= 7 && ik_model_->jnt_type[0] == mjJNT_FREE) {
+      ik_data_->qpos[3] = 1.0;
+    }
+    mj_forward(ik_model_.get(), ik_data_.get());
+
+    ik_solver_ = std::make_unique<ffw_ik::IKSolver>(ik_model_.get());
+
+    ik_solver_cfg_.damping = 1e-3;
+    ik_solver_cfg_.step_size = 0.15;
+    ik_solver_cfg_.tolerance = 5e-3;
+    ik_solver_cfg_.joint_vel_limit = 3.1;
+    ik_solver_cfg_.max_steps = 100;
+    ik_solver_cfg_.topk_contacts = 5;
+    ik_solver_cfg_.ee_window = 5;
+    ik_solver_cfg_.ee_improvement_rate = 0.02;
+    ik_solver_cfg_.dist_window = 5;
+    ik_solver_cfg_.dist_stability_thresh = 0.002;
+    ik_solver_cfg_.dist_safe_ratio = 0.98;
+    ik_solver_cfg_.early_convergence_obj = 0.87;
+
+    ik_collision_cfg_.collision_margin = 0.10;
+    ik_collision_cfg_.weight_scale = 0.005;
+    ik_collision_cfg_.epsilon = 1e-1;
+
+    create_joint_bindings(left_arm_joint_names_, left_arm_joint_bindings_, "left_arm");
+    create_joint_bindings(right_arm_joint_names_, right_arm_joint_bindings_, "right_arm");
+    create_joint_bindings(head_joint_names_, head_joint_bindings_, "head");
+    create_joint_bindings(lift_joint_names_, lift_joint_bindings_, "lift");
+
+    ik_left_site_id_ = mj_name2id(ik_model_.get(), mjOBJ_SITE, "left_gripper_site");
+    ik_right_site_id_ = mj_name2id(ik_model_.get(), mjOBJ_SITE, "right_gripper_site");
+
+    if (ik_left_site_id_ < 0 || ik_right_site_id_ < 0) {
+      RCLCPP_ERROR(this->get_logger(), "IK init failed: gripper sites not found");
+      ik_solver_.reset();
+      ik_data_.reset();
+      ik_model_.reset();
+      return;
+    }
+
+    ik_runtime_ready_ = true;
+    RCLCPP_INFO(this->get_logger(), "IK runtime initialized from: %s", xml_path.c_str());
   }
 
   static const char * objective_to_string(int objective_raw)
@@ -344,6 +647,17 @@ private:
         "Mode switched: %s -> %s",
         objective_to_string(prev_objective_raw_),
         objective_to_string(objective_raw));
+
+      // Any mode transition invalidates previous EE goal context.
+      ee_goal_initialized_ = false;
+
+      if (objective_raw == static_cast<int>(Objective::END_EFFECTOR)) {
+        // Re-seed EE goals from the current measured pose whenever entering EE mode.
+        if (ik_runtime_ready_ && joint_state_initialized_) {
+          (void)initialize_ee_goals_from_kinematic_state();
+        }
+      }
+
       prev_objective_raw_ = objective_raw;
     }
 
@@ -387,16 +701,239 @@ private:
     std::array<int, 3> t {{0, 0, 0}};
   };
 
-  void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
+  static bool update_group_kinematics_from_joint_state(
+    const sensor_msgs::msg::JointState & msg,
+    const std::unordered_map<std::string, size_t> & joint_index_map,
+    const std::vector<std::string> & joint_names,
+    std::vector<double> & kinematic_positions)
   {
-    if (msg->axes.size() < 8) {
-      RCLCPP_WARN_THROTTLE(
-        this->get_logger(), *this->get_clock(), 2000,
-        "Expected at least 8 joystick axes, got %zu", msg->axes.size());
+    if (kinematic_positions.size() != joint_names.size()) {
+      kinematic_positions.assign(joint_names.size(), 0.0);
+    }
+
+    bool any_updated = false;
+    const size_t position_count = msg.position.size();
+
+    for (size_t i = 0; i < joint_names.size(); ++i) {
+      const auto & target_joint = joint_names[i];
+      const auto it = joint_index_map.find(target_joint);
+      if (it != joint_index_map.end() && it->second < position_count) {
+        kinematic_positions[i] = msg.position[it->second];
+        any_updated = true;
+      }
+    }
+
+    return any_updated;
+  }
+
+  static double max_abs_diff(
+    const std::vector<double> & a,
+    const std::vector<double> & b)
+  {
+    const size_t n = std::min(a.size(), b.size());
+    double max_d = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+      max_d = std::max(max_d, std::fabs(a[i] - b[i]));
+    }
+    return max_d;
+  }
+
+  void resync_command_state_from_kinematic_state()
+  {
+    left_arm_cmd_pos_ = left_arm_kin_pos_;
+    right_arm_cmd_pos_ = right_arm_kin_pos_;
+    head_cmd_pos_ = head_kin_pos_;
+    lift_cmd_pos_ = lift_kin_pos_;
+
+    if (ik_runtime_ready_) {
+      (void)apply_kinematic_state_to_mujoco();
+      ee_goal_initialized_ = false;
+      (void)initialize_ee_goals_from_kinematic_state();
+    }
+  }
+
+  bool is_input_neutral(const DecodedInput & in) const
+  {
+    const double threshold = this->get_parameter("resume_neutral_threshold").as_double();
+    return
+      std::fabs(in.lx) <= threshold &&
+      std::fabs(in.ly) <= threshold &&
+      std::fabs(in.rx) <= threshold &&
+      std::fabs(in.ry) <= threshold &&
+      std::fabs(in.lz) <= threshold &&
+      std::fabs(in.rz) <= threshold;
+  }
+
+  bool update_joint_state_health_and_gate()
+  {
+    if (!joint_state_initialized_ || !joint_state_stamp_initialized_) {
+      command_publish_enabled_ = false;
+      return false;
+    }
+
+    const double timeout_sec = std::max(0.1, this->get_parameter("joint_state_timeout_sec").as_double());
+    const auto now = std::chrono::steady_clock::now();
+    const std::chrono::duration<double> age = now - last_joint_state_stamp_;
+    const bool stale_now = age.count() > timeout_sec;
+
+    if (stale_now) {
+      if (!joint_state_stale_) {
+        joint_state_stale_ = true;
+        command_publish_enabled_ = false;
+        resync_command_state_from_kinematic_state();
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Joint state timeout (%.3fs > %.3fs). Command publishing paused.",
+          age.count(),
+          timeout_sec);
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  void joint_state_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
+  {
+    if (!msg || msg->name.empty() || msg->position.empty()) {
       return;
     }
 
-    const auto input = decode_input(*msg);
+    std::unordered_map<std::string, size_t> joint_index_map;
+    joint_index_map.reserve(msg->name.size());
+    for (size_t i = 0; i < msg->name.size(); ++i) {
+      joint_index_map.emplace(msg->name[i], i);
+    }
+
+    bool any_group_updated = false;
+    any_group_updated |=
+      update_group_kinematics_from_joint_state(*msg, joint_index_map, left_arm_joint_names_, left_arm_kin_pos_);
+    any_group_updated |=
+      update_group_kinematics_from_joint_state(*msg, joint_index_map, right_arm_joint_names_, right_arm_kin_pos_);
+    any_group_updated |=
+      update_group_kinematics_from_joint_state(*msg, joint_index_map, head_joint_names_, head_kin_pos_);
+    any_group_updated |=
+      update_group_kinematics_from_joint_state(*msg, joint_index_map, lift_joint_names_, lift_kin_pos_);
+
+    if (!any_group_updated) {
+      return;
+    }
+
+    last_joint_state_stamp_ = std::chrono::steady_clock::now();
+    joint_state_stamp_initialized_ = true;
+
+    if (joint_state_stale_) {
+      joint_state_stale_ = false;
+      command_publish_enabled_ = false;
+      resync_command_state_from_kinematic_state();
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Joint state stream restored. Resynced internal command state; waiting for KILL->RUN with neutral sticks.");
+    }
+
+    if (!joint_state_initialized_) {
+      resync_command_state_from_kinematic_state();
+      joint_state_initialized_ = true;
+
+      RCLCPP_INFO(this->get_logger(), "Initialized command pose from kinematic joint feedback.");
+
+      if (ik_runtime_ready_ && !ee_goal_initialized_) {
+        (void)initialize_ee_goals_from_kinematic_state();
+      }
+      return;
+    }
+
+    if (ik_runtime_ready_) {
+      (void)apply_kinematic_state_to_mujoco();
+    }
+
+    left_arm_max_diff_ = max_abs_diff(left_arm_cmd_pos_, left_arm_kin_pos_);
+    right_arm_max_diff_ = max_abs_diff(right_arm_cmd_pos_, right_arm_kin_pos_);
+    head_max_diff_ = max_abs_diff(head_cmd_pos_, head_kin_pos_);
+    lift_max_diff_ = max_abs_diff(lift_cmd_pos_, lift_kin_pos_);
+
+    const double overall_max_diff = std::max(
+      std::max(left_arm_max_diff_, right_arm_max_diff_),
+      std::max(head_max_diff_, lift_max_diff_));
+
+    const double diff_threshold = this->get_parameter("blocked_diff_threshold").as_double();
+    const int required_cycles = std::max(
+      1,
+      static_cast<int>(this->get_parameter("blocked_consecutive_cycles").as_int()));
+
+    if (overall_max_diff > diff_threshold) {
+      ++blocked_cycle_count_;
+    } else {
+      blocked_cycle_count_ = 0;
+    }
+
+    if (blocked_cycle_count_ >= required_cycles) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(),
+        *this->get_clock(),
+        1000,
+        "Possible blocked motion (max |cmd-kin|=%.4f rad/m) | L=%.4f R=%.4f H=%.4f Lift=%.4f",
+        overall_max_diff,
+        left_arm_max_diff_,
+        right_arm_max_diff_,
+        head_max_diff_,
+        lift_max_diff_);
+    }
+  }
+
+  void update_command_dt_from_callback_period()
+  {
+    const auto now = std::chrono::steady_clock::now();
+    if (!command_dt_last_stamp_initialized_) {
+      command_dt_last_stamp_ = now;
+      command_dt_last_stamp_initialized_ = true;
+      return;
+    }
+
+    const std::chrono::duration<double> dt = now - command_dt_last_stamp_;
+    command_dt_last_stamp_ = now;
+
+    if (dt.count() <= 1e-6) {
+      return;
+    }
+
+    const double dt_min = this->get_parameter("command_dt_min").as_double();
+    const double dt_max = this->get_parameter("command_dt_max").as_double();
+    command_dt_ = std::clamp(dt.count(), dt_min, dt_max);
+  }
+
+  void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
+  {
+    if (!msg) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(latest_joy_mutex_);
+    latest_joy_msg_ = *msg;
+    latest_joy_received_ = true;
+  }
+
+  void control_timer_callback()
+  {
+    sensor_msgs::msg::Joy joy_msg;
+    {
+      std::lock_guard<std::mutex> lock(latest_joy_mutex_);
+      if (!latest_joy_received_) {
+        return;
+      }
+      joy_msg = latest_joy_msg_;
+    }
+
+    update_command_dt_from_callback_period();
+
+    if (joy_msg.axes.size() < 8) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 2000,
+        "Expected at least 8 joystick axes, got %zu", joy_msg.axes.size());
+      return;
+    }
+
+    const auto input = decode_input(joy_msg);
 
     geometry_msgs::msg::Twist base_cmd;
     geometry_msgs::msg::Vector3Stamped linear_msg;
@@ -414,10 +951,39 @@ private:
     const auto objective = static_cast<Objective>(objective_raw);
     const bool kill_active = (kill_raw == static_cast<int>(KillSwitch::KILL));
 
+    bool kill_to_run_edge = false;
+    if (kill_gate_initialized_) {
+      kill_to_run_edge =
+        (last_kill_gate_raw_ == static_cast<int>(KillSwitch::KILL)) &&
+        (kill_raw == static_cast<int>(KillSwitch::RUN));
+    }
+    last_kill_gate_raw_ = kill_raw;
+    kill_gate_initialized_ = true;
+
     notify_state_changes(objective_raw, kill_raw, input.b[0], input.b[3]);
 
     if (kill_active) {
-      publish_outputs(base_cmd, linear_msg, left_arm_vel, right_arm_vel, head_vel, lift_vel);
+      command_publish_enabled_ = false;
+      return;
+    }
+
+    if (!update_joint_state_health_and_gate()) {
+      return;
+    }
+
+    if (!command_publish_enabled_) {
+      if (kill_to_run_edge && is_input_neutral(input)) {
+        command_publish_enabled_ = true;
+        resync_command_state_from_kinematic_state();
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Command publishing resumed after KILL->RUN edge with neutral joystick.");
+      } else {
+        return;
+      }
+    }
+
+    if (!joint_state_initialized_) {
       return;
     }
 
@@ -434,7 +1000,7 @@ private:
       case Objective::END_EFFECTOR:
       default:
         process_end_effector_mode(input);
-        return;
+        break;
     }
 
     linear_msg.vector.x = base_cmd.linear.x;
@@ -528,24 +1094,85 @@ private:
 
   void process_end_effector_mode(const DecodedInput & in)
   {
-    constexpr double step = 0.01;
+    if (!ik_runtime_ready_ || !ik_solver_ || !ik_data_) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(),
+        *this->get_clock(),
+        2000,
+        "EE mode requested but IK runtime is not ready");
+      return;
+    }
 
-    // Dummy EE pose integrator (arbitrary for testing)
-    left_ee_pose_[0] += step * in.lx;
-    left_ee_pose_[1] += step * in.ly;
-    left_ee_pose_[2] += step * in.lz;
+    if (!joint_state_initialized_) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(),
+        *this->get_clock(),
+        2000,
+        "EE mode waiting for joint state initialization");
+      return;
+    }
 
-    right_ee_pose_[0] += step * in.rx;
-    right_ee_pose_[1] += step * in.ry;
-    right_ee_pose_[2] += step * in.rz;
+    if (!ee_goal_initialized_ && !initialize_ee_goals_from_kinematic_state()) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(),
+        *this->get_clock(),
+        2000,
+        "EE mode failed to initialize goal from kinematic state");
+      return;
+    }
+
+    const double step = this->get_parameter("ee_position_step").as_double();
+    const double ee_deadband = this->get_parameter("ee_deadband").as_double();
+
+    const double lx = apply_deadband(in.lx, static_cast<float>(ee_deadband));
+    const double ly = apply_deadband(in.ly, static_cast<float>(ee_deadband));
+    const double lz = apply_deadband(in.lz, static_cast<float>(ee_deadband));
+    const double rx = apply_deadband(in.rx, static_cast<float>(ee_deadband));
+    const double ry = apply_deadband(in.ry, static_cast<float>(ee_deadband));
+    const double rz = apply_deadband(in.rz, static_cast<float>(ee_deadband));
+
+    left_ee_goal_[0] += step * lx;
+    left_ee_goal_[1] += step * ly;
+    left_ee_goal_[2] += step * lz;
+
+    right_ee_goal_[0] += step * rx;
+    right_ee_goal_[1] += step * ry;
+    right_ee_goal_[2] += step * rz;
+
+    if (!apply_kinematic_state_to_mujoco()) {
+      return;
+    }
+
+    const auto trajectory = ik_solver_->solve(
+      ik_data_.get(),
+      left_ee_goal_,
+      right_ee_goal_,
+      ik_solver_cfg_,
+      ik_collision_cfg_);
+
+    if (trajectory.empty()) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(),
+        *this->get_clock(),
+        1000,
+        "IK returned empty trajectory in EE mode");
+      return;
+    }
+
+    sync_command_state_from_mujoco();
 
     RCLCPP_INFO_THROTTLE(
       this->get_logger(),
       *this->get_clock(),
       500,
-      "EE dummy pose | L:[%.3f %.3f %.3f] R:[%.3f %.3f %.3f]",
-      left_ee_pose_[0], left_ee_pose_[1], left_ee_pose_[2],
-      right_ee_pose_[0], right_ee_pose_[1], right_ee_pose_[2]);
+      "EE goal | L:[%.3f %.3f %.3f] R:[%.3f %.3f %.3f] | IK steps=%zu",
+      left_ee_goal_[0],
+      left_ee_goal_[1],
+      left_ee_goal_[2],
+      right_ee_goal_[0],
+      right_ee_goal_[1],
+      right_ee_goal_[2],
+      trajectory.size());
   }
 
   void update_gripper_toggles(int b4_raw, int b2_raw)
@@ -643,8 +1270,11 @@ private:
     trajectory_msgs::msg::JointTrajectoryPoint point;
     point.positions = command_positions;
     point.velocities = velocities;
-    point.time_from_start.sec = 0;
-    point.time_from_start.nanosec = 20000000;  // 20 ms
+    const double tf = std::max(1e-4, command_dt_);
+    const int32_t sec = static_cast<int32_t>(tf);
+    const uint32_t nsec = static_cast<uint32_t>((tf - static_cast<double>(sec)) * 1e9);
+    point.time_from_start.sec = sec;
+    point.time_from_start.nanosec = nsec;
 
     traj.points.push_back(point);
     publisher->publish(traj);
@@ -660,6 +1290,10 @@ private:
   {
     base_vel_pub_->publish(base_cmd);
     linear_vel_pub_->publish(linear_msg);
+
+    if (!joint_state_initialized_) {
+      return;
+    }
 
     publish_joint_command(
       left_arm_pub_,
@@ -692,6 +1326,8 @@ private:
   }
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr base_vel_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr linear_vel_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr left_arm_pub_;
@@ -709,6 +1345,11 @@ private:
   std::vector<double> head_cmd_pos_;
   std::vector<double> lift_cmd_pos_;
 
+  std::vector<double> left_arm_kin_pos_;
+  std::vector<double> right_arm_kin_pos_;
+  std::vector<double> head_kin_pos_;
+  std::vector<double> lift_kin_pos_;
+
   std::vector<double> left_arm_lower_limits_;
   std::vector<double> left_arm_upper_limits_;
   std::vector<double> right_arm_lower_limits_;
@@ -718,7 +1359,35 @@ private:
   std::vector<double> lift_lower_limits_;
   std::vector<double> lift_upper_limits_;
 
+  std::unique_ptr<mjModel, MjModelDeleter> ik_model_;
+  std::unique_ptr<mjData, MjDataDeleter> ik_data_;
+  std::unique_ptr<ffw_ik::IKSolver> ik_solver_;
+  ffw_ik::SolverConfig ik_solver_cfg_;
+  ffw_ik::CollisionCostConfig ik_collision_cfg_;
+  std::vector<JointBinding> left_arm_joint_bindings_;
+  std::vector<JointBinding> right_arm_joint_bindings_;
+  std::vector<JointBinding> head_joint_bindings_;
+  std::vector<JointBinding> lift_joint_bindings_;
+  int ik_left_site_id_ {-1};
+  int ik_right_site_id_ {-1};
+  bool ik_runtime_ready_ {false};
+  bool ee_goal_initialized_ {false};
+  Eigen::Vector3d left_ee_goal_ {0.0, 0.0, 0.0};
+  Eigen::Vector3d right_ee_goal_ {0.0, 0.0, 0.0};
+
   double command_dt_ {0.02};
+  bool command_dt_last_stamp_initialized_ {false};
+  std::chrono::steady_clock::time_point command_dt_last_stamp_ {};
+  std::mutex latest_joy_mutex_;
+  sensor_msgs::msg::Joy latest_joy_msg_;
+  bool latest_joy_received_ {false};
+
+  bool joint_state_initialized_ {false};
+  int blocked_cycle_count_ {0};
+  double left_arm_max_diff_ {0.0};
+  double right_arm_max_diff_ {0.0};
+  double head_max_diff_ {0.0};
+  double lift_max_diff_ {0.0};
 
   bool state_initialized_ {false};
   int prev_objective_raw_ {0};
@@ -730,13 +1399,17 @@ private:
   int prev_b2_raw_ {1};
   bool left_gripper_closed_ {false};
   bool right_gripper_closed_ {false};
-  std::array<double, 3> left_ee_pose_ {{0.0, 0.0, 0.0}};
-  std::array<double, 3> right_ee_pose_ {{0.0, 0.0, 0.0}};
   int twitch_level_index_ {-1};
   int twitch_half_ticks_ {3};
   int twitch_ticks_remaining_ {0};
   bool prev_trigger_on_ {false};
   int active_joint_level_ {0};
+  bool joint_state_stamp_initialized_ {false};
+  std::chrono::steady_clock::time_point last_joint_state_stamp_ {};
+  bool joint_state_stale_ {false};
+  bool command_publish_enabled_ {false};
+  bool kill_gate_initialized_ {false};
+  int last_kill_gate_raw_ {static_cast<int>(KillSwitch::KILL)};
 };
 
 int main(int argc, char * argv[])
