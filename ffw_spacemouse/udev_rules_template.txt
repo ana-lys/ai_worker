@@ -1,0 +1,23 @@
+# Template UDEV Rules for Binding SpaceMice to Static Names
+# Save this file (after editing) to: /etc/udev/rules.d/99-spacemouse.rules
+# Then run: sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# --------------------------------------------------------------------------------
+# HOW TO FIND YOUR DEVICE IDENTIFIER:
+# 1. Plug in your device (e.g. wired SpaceMouse)
+# 2. Run: udevadm info -a -n /dev/input/js0 | grep -E 'ATTRS\{(name|serial|idProduct|idVendor|phys)\}'
+# 3. Look for the 'idProduct' or 'serial' or 'phys' that is unique to that device.
+# --------------------------------------------------------------------------------
+
+# Example 1: Differentiating by USB Product ID (Dongle vs Wired)
+# The wireless USB dongle usually has a different idProduct than the wired cable.
+KERNEL=="js*", SUBSYSTEM=="input", ATTRS{idVendor}=="256f", ATTRS{idProduct}=="<WIRED_PRODUCT_ID>", SYMLINK+="input/spacemouse_left"
+KERNEL=="js*", SUBSYSTEM=="input", ATTRS{idVendor}=="256f", ATTRS{idProduct}=="<DONGLE_PRODUCT_ID>", SYMLINK+="input/spacemouse_right"
+
+# Example 2: Differentiating by Physical USB Port (phys)
+# If both SpaceMice are identical, you can bind them to specific physical USB ports on your PC.
+# KERNEL=="js*", SUBSYSTEM=="input", ATTRS{phys}=="usb-0000:00:14.0-1.4.1/input0", SYMLINK+="input/spacemouse_left"
+# KERNEL=="js*", SUBSYSTEM=="input", ATTRS{phys}=="usb-0000:00:14.0-1.4.2/input0", SYMLINK+="input/spacemouse_right"
+
+# Example 3: Differentiating by Serial Number (If exposed)
+# KERNEL=="js*", SUBSYSTEM=="input", ATTRS{serial}=="12345678", SYMLINK+="input/spacemouse_left"

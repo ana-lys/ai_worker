@@ -173,6 +173,24 @@ target_link_libraries(ffw_ik_solver_test
     OpenGL::GL
 )
 
+add_executable(ffw_ik_solver_teleop src/ffw_ik_solver_teleop.cpp)
+target_include_directories(ffw_ik_solver_teleop PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(ffw_ik_solver_teleop
+    rclcpp
+    sensor_msgs
+    geometry_msgs
+    ament_index_cpp
+)
+target_link_libraries(ffw_ik_solver_teleop
+    ffw_ik_solver_lib
+    mujoco
+    PkgConfig::GLFW
+    OpenGL::GL
+)
+
 add_executable(dependency_versions_example src/proxsuite_example.cpp)
 target_compile_definitions(dependency_versions_example PRIVATE MUJOCO_STAMP_VERSION="${MUJOCO_VERSION_STR}")
 ament_target_dependencies(dependency_versions_example
@@ -218,6 +236,10 @@ install(DIRECTORY 3rd_party
     DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY launch
+    DESTINATION share/${PROJECT_NAME}
+)
+
 # Install public headers and the solver library
 install(DIRECTORY include/
     DESTINATION include
@@ -231,7 +253,7 @@ install(TARGETS ffw_ik_solver_lib
 )
 
 # Install built binaries
-install(TARGETS collision_checker replay ffw_ik_solver_test dependency_versions_example
+install(TARGETS collision_checker replay ffw_ik_solver_test ffw_ik_solver_teleop dependency_versions_example
     DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -240,7 +262,7 @@ set_target_properties(collision_checker replay PROPERTIES
     INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/.."
 )
 
-set_target_properties(ffw_ik_solver_test dependency_versions_example PROPERTIES
+set_target_properties(ffw_ik_solver_test ffw_ik_solver_teleop dependency_versions_example PROPERTIES
     INSTALL_RPATH "$ORIGIN/../../lib:$ORIGIN/.."
 )
 

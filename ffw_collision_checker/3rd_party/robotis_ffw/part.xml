@@ -1,0 +1,18 @@
+
+--- Generated MuJoCo XML ---
+<?xml version="1.0" ?>
+<mujoco model="traced_step_part">
+    <worldbody>
+        <body name="my_link" pos="0 0 0">
+            <geom name="cube_0" type="box" size="0.005000 0.007500 0.005000" pos="0.031500 -0.007000 0.012375"/>
+            <geom name="cube_1" type="box" size="0.005000 0.007500 0.005000" pos="-0.031500 -0.007000 0.012375"/>
+            <geom name="cube_2" type="box" size="0.003125 0.006000 0.003125" pos="0.023625 -0.008750 -0.007250"/>
+            <geom name="cube_3" type="box" size="0.003125 0.006000 0.003125" pos="-0.026375 -0.008500 -0.007250"/>
+            <geom name="cube_4" type="box" size="0.003000 0.005000 0.004500" pos="0.015750 -0.008000 -0.015625"/>
+            <geom name="cube_5" type="box" size="0.003000 0.005000 0.004500" pos="-0.018750 -0.008000 -0.015625"/>
+            <geom name="cube_6" type="box" size="0.035000 0.002500 0.020000" pos="-0.001500 0.014250 0.000125"/>
+            <geom name="cube_7" type="box" size="0.035000 0.006000 0.001000" pos="-0.001000 -0.004000 0.018625"/>
+            <geom name="cube_8" type="box" size="0.025000 0.005000 0.002000" pos="-0.001500 -0.011750 -0.009125"/>
+        </body>
+    </worldbody>
+</mujoco>

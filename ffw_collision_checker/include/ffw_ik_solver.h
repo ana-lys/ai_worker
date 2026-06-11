@@ -32,6 +32,20 @@ struct SolverConfig {
     int    max_steps            = 100;
     int    topk_contacts        = 5;
     bool   qp_verbose           = false;
+    bool   track_orientation    = true; // If true, tracks 6D pose. If false, tracks only 3D position.
+    
+    // Task-space weights
+    double pos_weight           = 1.0;  // Weight for translational error (meters)
+    double ori_weight           = 0.01;  // Weight for rotational error (radians). Lower is often better for stability.
+
+    // Dynamic Orientation Weights ("Reach then Align")
+    double dynamic_ori_far_thresh   = 0.3; // Distance (m) beyond which ori_weight is heavily discounted
+    double dynamic_ori_close_thresh = 0.1; // Distance (m) under which ori_weight is applied 100%
+    double dynamic_ori_far_discount = 0.01; // Scale factor applied to ori_weight when far away
+
+    // Adaptive Damping
+    double adaptive_damping_drop_thresh = 0.10; // Error under which damping scales down proportionally
+    double adaptive_damping_min_scale   = 0.01; // Minimum damping scale to avoid numerical instability
 
     // Mass-weighted H: λ * M added to J^T J before damping.
     // Heavier DOFs (torso) become proportionally more expensive to move,
@@ -53,10 +67,15 @@ struct SolverConfig {
 };
 
 struct CollisionCostConfig {
-    double collision_margin = 0.155;
+    double collision_margin = 0.155; // Used as d_safe
+    double cbf_alpha        = 0.5;   // How aggressively to enforce the safe margin
+    double slack_penalty    = 1e6;   // Massive penalty for getting too close (infeasibility fallback)
+    
+    // Legacy soft repulsion params (kept for backwards compatibility if needed)
     double weight_scale     = 0.01;
     double epsilon          = 1e-1;
-    double arm_dist_weight  = 0.05;
+    
+    double arm_dist_weight  = 0.025;
 };
 
 // ============================================================
@@ -108,6 +127,19 @@ public:
     //
     // d->qpos is mutated in-place; callers should save/restore if needed.
     // ----------------------------------------------------------
+    // ----------------------------------------------------------
+    // High-level API (Pose Target)
+    // ----------------------------------------------------------
+    std::vector<Eigen::VectorXd> solve(
+        mjData*                 d,
+        const Eigen::Isometry3d& target_l,
+        const Eigen::Isometry3d& target_r,
+        const SolverConfig&     cfg     = SolverConfig{},
+        const CollisionCostConfig& col  = CollisionCostConfig{});
+
+    // ----------------------------------------------------------
+    // High-level API (Position Target)
+    // ----------------------------------------------------------
     std::vector<Eigen::VectorXd> solve(
         mjData*                 d,
         const Eigen::Vector3d&  target_l,
@@ -117,12 +149,11 @@ public:
 
     // ----------------------------------------------------------
     // Low-level API — single optimisation step.
-    // Advances d->qpos by one QP solve and returns diagnostics.
     // ----------------------------------------------------------
     StepResult solveStep(
         mjData*                 d,
-        const Eigen::Vector3d&  target_l,
-        const Eigen::Vector3d&  target_r,
+        const Eigen::Isometry3d& target_l,
+        const Eigen::Isometry3d& target_r,
         const SolverConfig&     cfg,
         const CollisionCostConfig& col,
         std::deque<double>&     error_history,
@@ -141,13 +172,13 @@ public:
 private:
     mjModel*        m_;
     int             nv_;
-    int             id_l_;   // site id: left_gripper_site
-    int             id_r_;   // site id: right_gripper_site
+    int             id_l_;    // site id: left_gripper_site
+    int             id_r_;    // site id: right_gripper_site
     int             id_lUA_;  // site id: left_UA_site
     int             id_lUB_;  // site id: left_UB_site
     int             id_rUA_;  // site id: right_UA_site
     int             id_rUB_;  // site id: right_UB_site
-        
+
     // Reusable Eigen workspace
     Eigen::MatrixXd J_;         // (6, nv)
     Eigen::MatrixXd H_;         // (nv, nv)
@@ -164,13 +195,22 @@ private:
 
     // MuJoCo Jacobian scratch buffers (row-major, mjtNum)
     std::vector<mjtNum> jacp_l_, jacp_r_, jacp_c1_, jacp_c2_;
+    std::vector<mjtNum> jacr_l_, jacr_r_;
     std::vector<mjtNum> jacp_lUA_, jacp_lUB_, jacp_rUA_, jacp_rUB_;
     // Contact index scratch (avoids per-step allocation in computeContacts)
     std::vector<int> scratch_;
 
+    // Expanded Eigen workspace for Slack variables (nv + topk_contacts)
+    Eigen::MatrixXd H_ext_;     
+    Eigen::VectorXd g_ext_;     
+    Eigen::MatrixXd C_ext_;     
+    Eigen::VectorXd lb_ext_;    
+    Eigen::VectorXd ub_ext_;    
+
     // Cached QP — warm-started across steps
-    proxsuite::proxqp::dense::QP<double> qp_;
-    bool qp_initialized_ = false;
+    // Using pointer to allow lazy initialization based on cfg.topk_contacts
+    std::unique_ptr<proxsuite::proxqp::dense::QP<double>> qp_;
+    int qp_topk_ = -1; // track the allocated size
 
     void buildJacobian(mjData* d);
     void buildCollisionGradient(const ContactResult& contacts,

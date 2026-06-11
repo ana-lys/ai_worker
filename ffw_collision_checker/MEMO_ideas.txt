@@ -1,0 +1,68 @@
+# MEMO: Future Upgrades for IK Solver
+
+*This document stores architectural summaries and proposed upgrades for the `ffw_ik_solver`, so it safely persists in the repository.*
+
+---
+
+## 1. Dynamic Orientation Weights ("Reach then Align")
+**Idea:** Make the `ori_weight` dynamic during the solving process.
+
+**Why?**
+Currently, orientation weight is statically set (e.g., `0.01`). 
+- If it's too high, the robot jerks violently to fix orientation at the expense of moving towards the XYZ target.
+- If it's too low, the robot takes a long time to align its wrist or never aligns it perfectly.
+
+**Implementation Concept:**
+Start with a low `ori_weight` (e.g., `0.001`) when the XYZ positional error is large. This allows the arm to swiftly move the hand to the general target area without fighting wrist rotations.
+As the XYZ positional error drops below a certain threshold (e.g., < 0.20 meters), dynamically scale the `ori_weight` up (e.g., `1.0`). This creates a "Reach then Align" behavior which is mathematically very stable and mimics human reaching!
+
+---
+
+## 2. Architecture Comparison: Cyclo vs. Iterative IK
+**Iterative QP IK (`ffw_ik_solver`)**
+*   **How it works:** Solves a simulated trajectory in a `for` loop before the robot moves.
+*   **Pros:** Safe. Gives you a guaranteed mathematical trajectory.
+*   **Cons:** If it gets stuck behind an obstacle on step 5, it aborts the whole plan and fails. It suffers from slow final-millimeter convergence due to static damping.
+
+**Velocity-Resolved QP (`cyclo_control`)**
+*   **How it works:** Solves a single step every 2ms and executes it instantly on the real robot.
+*   **Pros:** Never "gives up." It leverages real-world noise (sensor noise, shifting targets, gravity compensation tasks) to constantly wriggle in the null-space, which often accidentally breaks mathematical symmetry and escapes local minima.
+*   **Cons:** No guarantee of finding a path. Can freeze the real robot mid-air if the local minimum trap is perfectly symmetrical.
+
+---
+
+## 3. Proposal: Efficient Local Minima Breakout (Perturbation)
+To mimic the "wriggle" of the real-world without expensive global path planners, we need an efficient heuristic.
+
+*   **The Idea (Null-Space Kicking):** When your solver's `ee_stalled` detector triggers, instead of instantly returning `FAILED` and aborting, we give the robot a "Kick".
+*   **How it works:** We inject a large, random joint-velocity vector into the gradient `g_` for the next 2-3 iterations. 
+*   **Why it's efficient:** Adding random numbers to `g_` is computationally **free** (takes 0.0001 ms). Because we have Hard CBF Constraints (the "Brick Wall"), the QP solver will automatically filter this random kick so it slides safely along the obstacle surface without crashing!
+
+---
+
+## 4. Proposal: Fixing Slow Final Convergence
+To fix the issue where the robot moves quickly at first, but crawls during the final few millimeters (a famous issue with Damped Least Squares).
+
+*   **The Cause:** As the error gets tiny, the mathematical "pull" ($g = J^T e$) gets tiny. However, the static `damping` parameter suppresses the movement equally hard, causing Zeno's Paradox (it halves its distance forever).
+*   **The Solution (Adaptive Damping):** Make the damping scale dynamically with the error!
+    *   *High Error (Far away):* Damping is High. The arm moves smoothly and stably towards the general area.
+    *   *Low Error (Final millimeters):* Damping drops to almost zero. The math switches from safe gradient-descent to pure, aggressive Newton-Raphson, snapping to the target quadratically fast!
+*   **Why it's efficient:** It just requires multiplying `cfg.damping` by the current `error` norm before adding it to the Hessian. Zero extra matrix math.
+
+---
+
+## 5. Conceptual Note: The "Wall Friction" (Non-Convexity) Trap
+**The Scenario:** Reaching through a car window. You have perfect distance sensors (CBFs) to stop the robot from hitting the car door.
+*   **The Heuristic Solution:** This is why the **Null-Space Kicking (Perturbation)** mentioned in Section 3 is so important! It acts like artificial "oil" or "shaking". By injecting random velocities, we temporarily force the robot to take a sub-optimal step (moving away from the target), allowing it to slide along the wall and eventually discover the hole/window.
+
+---
+
+## 6. Singularity Avoidance via Inequality Constraints (from Cyclo)
+**Idea:** Actively penalize the robot from approaching kinematic singularities (e.g., a fully straightened arm) using slack-variable inequality constraints, rather than relying strictly on Damped Least Squares.
+
+**Why?**
+When the arm approaches a singularity (straightens out), the Jacobian loses rank. 
+- *Current Iterative IK:* Relies on the `damping` term to keep the math from exploding, which causes the arm to become sluggish and slow down significantly near full extension.
+- *Cyclo Controller:* Monitors the manipulability index (or joint limits) and applies an inequality constraint (a mathematical "wall") preventing the arm from straightening fully. If the target *forces* the arm to straighten, the solver violates the constraint using a dedicated `slack_sing` variable, paying a massive mathematical penalty. 
+
+**Result:** This aggressively forces the null-space gradients to actively bend the elbow to maintain a healthy manipulability index throughout the entire motion, keeping the robot agile and preventing lockout sluggishness!

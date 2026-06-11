@@ -78,17 +78,35 @@ public:
         glfwGetFramebufferSize(window_, &vp.width, &vp.height);
         mjv_updateScene(m_, d, &opt_, nullptr, &cam_, mjCAT_ALL, &scn_);
 
-        if (spheres_enabled_ && scn_.ngeom + 2 <= scn_.maxgeom) {
-            const mjtNum size[3] = {sphere_r_, sphere_r_, sphere_r_};
-            const mjtNum mat[9]  = {1,0,0, 0,1,0, 0,0,1};
+        if (spheres_enabled_ && scn_.ngeom + 12 <= scn_.maxgeom) {
+            if (!track_orientation_) {
+                const mjtNum size[3] = {sphere_r_, sphere_r_, sphere_r_};
+                const mjtNum mat[9]  = {1,0,0, 0,1,0, 0,0,1};
 
-            mjvGeom* gl = &scn_.geoms[scn_.ngeom++];
-            mjv_initGeom(gl, mjGEOM_SPHERE, size, pos_l_, mat, rgba_);
-            gl->category = mjCAT_DECOR;
+                mjvGeom* gl = &scn_.geoms[scn_.ngeom++];
+                mjv_initGeom(gl, mjGEOM_SPHERE, size, pos_l_, mat, rgba_);
+                gl->category = mjCAT_DECOR;
 
-            mjvGeom* gr = &scn_.geoms[scn_.ngeom++];
-            mjv_initGeom(gr, mjGEOM_SPHERE, size, pos_r_, mat, rgba_);
-            gr->category = mjCAT_DECOR;
+                mjvGeom* gr = &scn_.geoms[scn_.ngeom++];
+                mjv_initGeom(gr, mjGEOM_SPHERE, size, pos_r_, mat, rgba_);
+                gr->category = mjCAT_DECOR;
+            } else {
+                drawAxes(pose_l_, 0.5f);
+                drawAxes(pose_r_, 0.5f);
+                
+                int id_l = mj_name2id(m_, mjOBJ_SITE, "left_gripper_site");
+                int id_r = mj_name2id(m_, mjOBJ_SITE, "right_gripper_site");
+                if (id_l >= 0 && id_r >= 0) {
+                    Eigen::Isometry3d curr_l = Eigen::Isometry3d::Identity();
+                    Eigen::Isometry3d curr_r = Eigen::Isometry3d::Identity();
+                    curr_l.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * id_l);
+                    curr_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * id_r);
+                    curr_l.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * id_l).cast<double>();
+                    curr_r.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * id_r).cast<double>();
+                    drawAxes(curr_l, 1.0f);
+                    drawAxes(curr_r, 1.0f);
+                }
+            }
         }
 
         mjr_render(vp, &scn_, &con_);
@@ -96,14 +114,53 @@ public:
         return true;
     }
 
+    void drawAxes(const Eigen::Isometry3d& pose, float alpha) {
+        if (scn_.ngeom + 3 > scn_.maxgeom) return;
+
+        double length = 0.08;
+        double radius = 0.003;
+        mjtNum mat[9];
+        Eigen::Map<Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>> mat_map(mat);
+        mat_map = pose.linear().cast<mjtNum>();
+
+        for (int i = 0; i < 3; ++i) {
+            Eigen::Vector3d offset = Eigen::Vector3d::Zero();
+            offset[i] = length / 2.0;
+            Eigen::Vector3d center = pose.translation() + pose.linear() * offset;
+            
+            mjtNum cpos[3] = {center.x(), center.y(), center.z()};
+            mjtNum size[3] = {radius, radius, radius};
+            size[i] = length / 2.0;
+
+            float rgba[4] = {0.f, 0.f, 0.f, alpha};
+            rgba[i] = 1.0f; // RGB for XYZ
+
+            mjvGeom* g = &scn_.geoms[scn_.ngeom++];
+            mjv_initGeom(g, mjGEOM_BOX, size, cpos, mat, rgba);
+            g->category = mjCAT_DECOR;
+        }
+    }
+
     void setGoalSpheres(const Eigen::Vector3d& l, const Eigen::Vector3d& r,
                         double diameter = 0.09,
                         float fr = 1.0f, float fg = 0.65f,
                         float fb = 0.0f, float fa = 0.85f) {
         spheres_enabled_ = true;
+        track_orientation_ = false;
         sphere_r_        = std::max(0.0, 0.5 * diameter);
         for (int i = 0; i < 3; ++i) { pos_l_[i] = l[i]; pos_r_[i] = r[i]; }
         rgba_[0] = fr; rgba_[1] = fg; rgba_[2] = fb; rgba_[3] = fa;
+    }
+
+    void setGoalPose(const Eigen::Isometry3d& l, const Eigen::Isometry3d& r, bool track_ori) {
+        track_orientation_ = track_ori;
+        if (!track_ori) {
+            setGoalSpheres(l.translation(), r.translation());
+        } else {
+            pose_l_ = l;
+            pose_r_ = r;
+            spheres_enabled_ = true;
+        }
     }
 
     bool enabled() const { return enabled_; }
@@ -115,12 +172,15 @@ private:
     mjvOption   opt_;
     mjvScene    scn_;
     mjrContext  con_;
-    bool        enabled_         = false;
-    bool        spheres_enabled_ = false;
-    mjtNum      pos_l_[3]        = {};
-    mjtNum      pos_r_[3]        = {};
-    mjtNum      sphere_r_        = 0.045;
-    float       rgba_[4]         = {1.f, 0.65f, 0.f, 0.85f};
+    bool        enabled_           = false;
+    bool        spheres_enabled_   = false;
+    bool        track_orientation_ = false;
+    mjtNum      pos_l_[3]          = {};
+    mjtNum      pos_r_[3]          = {};
+    Eigen::Isometry3d pose_l_      = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d pose_r_      = Eigen::Isometry3d::Identity();
+    mjtNum      sphere_r_          = 0.045;
+    float       rgba_[4]           = {1.f, 0.65f, 0.f, 0.85f};
 };
 
 // ============================================================
@@ -205,19 +265,23 @@ static bool findLegalRandomPose(mjModel* m, mjData* d,
 static bool gripperSitesAtPose(mjModel* m, mjData* d,
                                const Eigen::VectorXd& q,
                                int left_id, int right_id,
-                               Eigen::Vector3d& out_l,
-                               Eigen::Vector3d& out_r) {
+                               Eigen::Isometry3d& out_l,
+                               Eigen::Isometry3d& out_r) {
     if (left_id < 0 || right_id < 0) return false;
 
     std::vector<mjtNum> qbak(m->nq), vbak(m->nv);
     mju_copy(qbak.data(), d->qpos, m->nq);
     mju_copy(vbak.data(), d->qvel, m->nv);
 
+    out_l.setIdentity();
+    out_r.setIdentity();
     mju_copy(d->qpos, q.data(), m->nq);
     mju_zero(d->qvel, m->nv);
     mj_forward(m, d);
-    out_l = Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
-    out_r = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+    out_l.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
+    out_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+    out_l.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * left_id).cast<double>();
+    out_r.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * right_id).cast<double>();
 
     mju_copy(d->qpos, qbak.data(), m->nq);
     mju_copy(d->qvel, vbak.data(), m->nv);
@@ -316,13 +380,14 @@ int main(int, char**) {
                   << " | goal_dist="  << goal_dist << "\n";
 
         // Forward-compute EE targets at the goal pose
-        Eigen::Vector3d goal_l, goal_r;
+        Eigen::Isometry3d goal_l = Eigen::Isometry3d::Identity();
+        Eigen::Isometry3d goal_r = Eigen::Isometry3d::Identity();
         const bool have_markers = gripperSitesAtPose(m, d, goal_q,
                                                      left_id, right_id,
                                                      goal_l, goal_r);
 
         if (have_markers && viewer.enabled()) {
-            viewer.setGoalSpheres(goal_l, goal_r, 0.09, 1.0f, 0.65f, 0.0f, 0.85f);
+            viewer.setGoalPose(goal_l, goal_r, solver_cfg.track_orientation);
             if (!viewer.render(d)) { running = false; continue; }
         }
 
@@ -362,14 +427,34 @@ int main(int, char**) {
             success = false;
         }
 
+        // Verify it actually reached the target (it didn't just stall)
+        if (success) {
+            Eigen::Isometry3d final_l, final_r;
+            gripperSitesAtPose(m, d, Eigen::Map<Eigen::VectorXd>(d->qpos, m->nq), left_id, right_id, final_l, final_r);
+            double pos_err = (final_l.translation() - goal_l.translation()).norm() + 
+                             (final_r.translation() - goal_r.translation()).norm();
+            
+            Eigen::AngleAxisd aa_l(goal_l.rotation() * final_l.rotation().transpose());
+            Eigen::AngleAxisd aa_r(goal_r.rotation() * final_r.rotation().transpose());
+            double ori_err = std::abs(aa_l.angle()) + std::abs(aa_r.angle());
+
+            if (pos_err > 0.05 || (solver_cfg.track_orientation && ori_err > 0.35)) { // 5 cm pos, ~20 deg rot
+                std::cerr << "Failed to reach target! Stalled with pos error: " << pos_err 
+                          << " m, ori error: " << ori_err << " rad\n";
+                success = false;
+            }
+        }
+
         std::cout << "Result: " << (success ? "SUCCESS" : "FAILED")
                   << " | steps=" << trajectory.size() << "\n";
 
         // Flash success/failure colour in viewer
         if (have_markers && viewer.enabled()) {
-            const float fr = success ? 0.2f : 0.95f;
-            const float fg = success ? 0.95f : 0.2f;
-            viewer.setGoalSpheres(goal_l, goal_r, 0.10, fr, fg, 0.2f, 0.90f);
+            if (!solver_cfg.track_orientation) {
+                const float fr = success ? 0.2f : 0.95f;
+                const float fg = success ? 0.95f : 0.2f;
+                viewer.setGoalSpheres(goal_l.translation(), goal_r.translation(), 0.10, fr, fg, 0.2f, 0.90f);
+            }
             for (int i = 0; i < kFlashFrames && running; ++i) {
                 if (!viewer.render(d)) running = false;
                 std::this_thread::sleep_for(std::chrono::milliseconds(kFlashSleepMs));
