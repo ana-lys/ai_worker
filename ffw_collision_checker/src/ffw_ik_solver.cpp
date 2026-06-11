@@ -237,13 +237,13 @@ StepResult IKSolver::solveStep(
     // Apply task-space weights to balance position (meters) vs orientation (radians)
     Eigen::VectorXd task_weight = Eigen::VectorXd::Ones(task_dim);
     if (cfg.track_orientation) {
-        task_weight.segment<3>(0).setConstant(cfg.pos_weight);
-        task_weight.segment<3>(3).setConstant(current_ori_weight);
-        task_weight.segment<3>(6).setConstant(cfg.pos_weight);
-        task_weight.segment<3>(9).setConstant(current_ori_weight);
+        task_weight.segment<3>(0).setConstant(cfg.pos_weight * cfg.left_weight_scale);
+        task_weight.segment<3>(3).setConstant(current_ori_weight * cfg.left_weight_scale);
+        task_weight.segment<3>(6).setConstant(cfg.pos_weight * cfg.right_weight_scale);
+        task_weight.segment<3>(9).setConstant(current_ori_weight * cfg.right_weight_scale);
     } else {
-        task_weight.segment<3>(0).setConstant(cfg.pos_weight);
-        task_weight.segment<3>(3).setConstant(cfg.pos_weight);
+        task_weight.segment<3>(0).setConstant(cfg.pos_weight * cfg.left_weight_scale);
+        task_weight.segment<3>(3).setConstant(cfg.pos_weight * cfg.right_weight_scale);
     }
 
     // Compute weighted error norm for early stopping detection

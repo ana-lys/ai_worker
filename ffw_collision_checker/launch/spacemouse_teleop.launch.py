@@ -9,31 +9,55 @@ from ament_index_python.packages import get_package_share_directory
 import subprocess
 import glob
 
-def get_3dconnexion_joysticks():
-    joysticks = []
+def get_left_right_sdl_ids():
+    import glob
+    import os
+    import subprocess
+
+    # 1. Find all 3Dconnexion joysticks and determine their SDL IDs
+    # SDL enumerates joysticks in the order of their /dev/input/js* indices
+    js_nodes = []
     for js in sorted(glob.glob('/dev/input/js*')):
         try:
             output = subprocess.check_output(f'udevadm info -a -n {js}', shell=True, text=True, stderr=subprocess.DEVNULL)
             if '3Dconnexion' in output:
-                joysticks.append(js)
+                js_nodes.append(js)
         except Exception:
             pass
-    return joysticks
+
+    sdl_map = {js_nodes[i]: str(i) for i in range(len(js_nodes))}
+
+    # 2. Get their physical USB paths
+    path_map = {}
+    for symlink in glob.glob('/dev/input/by-path/*-joystick'):
+        if '-event-' in symlink:
+            continue
+        try:
+            real_js = os.path.realpath(symlink)
+            if real_js in js_nodes:
+                path_map[symlink] = real_js
+        except Exception:
+            pass
+
+    # Sort by physical USB path to consistently assign Left and Right
+    sorted_paths = sorted(path_map.keys())
+
+    if len(sorted_paths) < 2:
+        print(f"WARNING: Expected 2 SpaceMice, but found {len(sorted_paths)}. Defaulting to SDL IDs 0 and 1.")
+        return '0', '1'
+
+    left_js = path_map[sorted_paths[0]]
+    right_js = path_map[sorted_paths[1]]
+
+    print(f"Auto-assigned LEFT arm to {sorted_paths[0]} ({left_js}, SDL ID: {sdl_map[left_js]})")
+    print(f"Auto-assigned RIGHT arm to {sorted_paths[1]} ({right_js}, SDL ID: {sdl_map[right_js]})")
+
+    return sdl_map[left_js], sdl_map[right_js]
 
 def generate_launch_description():
     ffw_spacemouse_dir = get_package_share_directory('ffw_spacemouse')
     
-    # Auto-detect joysticks
-    devices = get_3dconnexion_joysticks()
-    if len(devices) < 2:
-        print(f"WARNING: Expected 2 SpaceMice, but found {len(devices)}. Defaulting to js0 and js1.")
-        dev_left = '/dev/input/js0'
-        dev_right = '/dev/input/js1'
-    else:
-        dev_left = devices[0]
-        dev_right = devices[1]
-        print(f"Auto-assigned LEFT arm to {dev_left}")
-        print(f"Auto-assigned RIGHT arm to {dev_right}")
+    sdl_left, sdl_right = get_left_right_sdl_ids()
 
     return LaunchDescription([
         # LEFT ARM MAPPER
@@ -43,7 +67,7 @@ def generate_launch_description():
             ),
             launch_arguments={
                 'target_arm': 'left', 
-                'device_id': dev_left.replace('/dev/input/js', '')
+                'device_id': sdl_left
             }.items()
         ),
         
@@ -54,7 +78,7 @@ def generate_launch_description():
             ),
             launch_arguments={
                 'target_arm': 'right', 
-                'device_id': dev_right.replace('/dev/input/js', '')
+                'device_id': sdl_right
             }.items()
         ),
         

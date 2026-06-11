@@ -37,6 +37,8 @@ struct SolverConfig {
     // Task-space weights
     double pos_weight           = 1.0;  // Weight for translational error (meters)
     double ori_weight           = 0.01;  // Weight for rotational error (radians). Lower is often better for stability.
+    double left_weight_scale    = 1.0;
+    double right_weight_scale   = 1.0;
 
     // Dynamic Orientation Weights ("Reach then Align")
     double dynamic_ori_far_thresh   = 0.3; // Distance (m) beyond which ori_weight is heavily discounted

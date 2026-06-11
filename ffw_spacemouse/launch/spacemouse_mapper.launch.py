@@ -6,6 +6,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+import launch_ros.parameter_descriptions
 from ament_index_python.packages import get_package_share_directory
 
 def get_joystick_id():
@@ -46,7 +47,7 @@ def generate_launch_description():
             name='joy_node',
             namespace=LaunchConfiguration('target_arm'),
             parameters=[{
-                'device_id': LaunchConfiguration('device_id'),
+                'device_id': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('device_id'), value_type=int),
                 'deadzone': 0.0,
                 'autorepeat_rate': 100.0,
             }]
