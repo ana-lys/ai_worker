@@ -62,15 +62,7 @@ directions = [
 ]
 
 for (ix, iy, iz), reached_qs in voxels.items():
-    is_boundary = False
-    for dx, dy, dz in directions:
-        neighbor = (ix + dx, iy + dy, iz + dz)
-        if neighbor not in voxels:
-            is_boundary = True
-            break
-    
-    if is_boundary:
-        boundary_voxels[(ix, iy, iz)] = reached_qs
+    boundary_voxels[(ix, iy, iz)] = reached_qs
 
 print(f"Total boundary voxels: {len(boundary_voxels)}")
 

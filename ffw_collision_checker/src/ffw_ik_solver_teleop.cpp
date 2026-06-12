@@ -33,6 +33,30 @@
 #include <mujoco/mujoco.h>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/joy.hpp>
+#include <unordered_set>
+#include <fstream>
+#include <sstream>
+
+// ============================================================
+// Voxel Map Definitions
+// ============================================================
+const double VOXEL_SIZE = 0.05;
+
+struct VoxelKey {
+    int x, y, z;
+    bool operator==(const VoxelKey& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+};
+
+struct VoxelHash {
+    std::size_t operator()(const VoxelKey& k) const {
+        std::size_t h1 = std::hash<int>{}(k.x);
+        std::size_t h2 = std::hash<int>{}(k.y);
+        std::size_t h3 = std::hash<int>{}(k.z);
+        return h1 ^ (h2 << 1) ^ (h3 << 2);
+    }
+};
 
 // ============================================================
 // Minimal GLFW / MuJoCo viewer
@@ -307,6 +331,56 @@ public:
         std::chrono::milliseconds(100),
         std::bind(&TeleopNode::swap_check_callback, this));
 
+    std::vector<double> ori_vals = {-M_PI/2, -M_PI/4, 0, M_PI/4, M_PI/2};
+    for (double r : ori_vals) {
+        for (double p : ori_vals) {
+            for (double yw : ori_vals) {
+                Eigen::Quaterniond q_r = Eigen::AngleAxisd(r, Eigen::Vector3d::UnitX())
+                                       * Eigen::AngleAxisd(p, Eigen::Vector3d::UnitY())
+                                       * Eigen::AngleAxisd(yw, Eigen::Vector3d::UnitZ());
+                target_quats_r_.push_back(q_r);
+                
+                Eigen::Quaterniond q_l = Eigen::AngleAxisd(-r, Eigen::Vector3d::UnitX())
+                                       * Eigen::AngleAxisd(p, Eigen::Vector3d::UnitY())
+                                       * Eigen::AngleAxisd(-yw, Eigen::Vector3d::UnitZ());
+                target_quats_l_.push_back(q_l);
+            }
+        }
+    }
+
+    // Load Voxel Map
+    std::string bin_path = ament_index_cpp::get_package_share_directory("ffw_collision_checker") + "/../../../../src/ai_worker/ffw_collision_checker/explore/pareto_boundary_voxels.bin";
+    std::ifstream in(bin_path, std::ios::binary);
+    if (!in.is_open()) {
+        RCLCPP_WARN(this->get_logger(), "Could not open pareto_boundary_voxels.bin at %s. Try running ffw_workspace_explorer first.", bin_path.c_str());
+    } else {
+        std::vector<float> row(129);
+        while (in.read(reinterpret_cast<char*>(row.data()), row.size() * sizeof(float))) {
+            float x = row[0];
+            float y = row[1];
+            float z = row[2];
+            float versatility = row[3];
+            
+            if (versatility > 0.0f) {
+                int ix = static_cast<int>(std::floor(x / VOXEL_SIZE));
+                int iy = static_cast<int>(std::floor(y / VOXEL_SIZE));
+                int iz = static_cast<int>(std::floor(z / VOXEL_SIZE));
+                
+                min_ix_ = std::min(min_ix_, ix);
+                max_ix_ = std::max(max_ix_, ix);
+                min_iy_ = std::min(min_iy_, iy);
+                max_iy_ = std::max(max_iy_, iy);
+                min_iz_ = std::min(min_iz_, iz);
+                max_iz_ = std::max(max_iz_, iz);
+                
+                std::vector<float> scores(row.begin() + 4, row.end());
+                voxel_scores_r_[{ix, iy, iz}] = scores;
+                voxel_scores_l_[{ix, -iy, iz}] = scores;
+            }
+        }
+        RCLCPP_INFO(this->get_logger(), "Loaded Voxel Map (Binary): %zu valid right voxels. Bounds: X[%d, %d] Y[%d, %d] Z[%d, %d]", voxel_scores_r_.size(), min_ix_, max_ix_, min_iy_, max_iy_, min_iz_, max_iz_);
+    }
+
     RCLCPP_INFO(this->get_logger(),
                 "SpaceMouse IK Teleop started! Listening to both arms.");
   }
@@ -363,15 +437,91 @@ private:
     last_mapper_l_rot_ = rot_mat;
 
     if (!swapped_) {
-      accum_l_trans_ += delta_trans;
-      accum_l_rot_ = delta_rot * accum_l_rot_;
-      target_l_.translation() = initial_l_.translation() + accum_l_trans_;
-      target_l_.linear() = accum_l_rot_ * initial_l_.linear();
+      Eigen::Vector3d prospective_trans = initial_l_.translation() + accum_l_trans_ + delta_trans;
+      int ix = static_cast<int>(std::floor(prospective_trans.x() / VOXEL_SIZE));
+      int iy = static_cast<int>(std::floor(prospective_trans.y() / VOXEL_SIZE));
+      int iz = static_cast<int>(std::floor(prospective_trans.z() / VOXEL_SIZE));
+      VoxelKey key = {ix, iy, iz};
+      
+      Eigen::Matrix3d prospective_rot_mat = delta_rot * accum_l_rot_ * initial_l_.linear();
+      Eigen::Quaterniond prospective_quat(prospective_rot_mat);
+      
+      bool rejected = false;
+      auto it = voxel_scores_l_.find(key);
+      Eigen::Matrix3d relative_rot = delta_rot * accum_l_rot_;
+      Eigen::AngleAxisd angle_axis(relative_rot);
+
+      bool trans_rejected = false;
+      bool rot_rejected = false;
+
+      if (!l_in_safe_region_) {
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Left Arm searching safe region. RelPos: %.3f %.3f %.3f", prospective_trans.x(), prospective_trans.y(), prospective_trans.z());
+          if (it != voxel_scores_l_.end()) {
+              l_in_safe_region_ = true;
+              RCLCPP_INFO(this->get_logger(), "Left arm entered safe region. XYZ Limiter ENABLED.");
+          }
+      } else {
+          // Hard boundary check for XYZ
+          if (ix < min_ix_ || ix > max_ix_ || iy > -min_iy_ || iy < -max_iy_ || iz < min_iz_ || iz > max_iz_) {
+              trans_rejected = true;
+          }
+          // Always apply angle limit
+          if (std::abs(angle_axis.angle()) > M_PI / 2.0) {
+              rot_rejected = true;
+          }
+      }
+      
+      if (!trans_rejected) {
+          accum_l_trans_ += delta_trans;
+          target_l_.translation() = prospective_trans;
+      }
+      if (!rot_rejected) {
+          accum_l_rot_ = delta_rot * accum_l_rot_;
+          target_l_.linear() = prospective_rot_mat;
+      }
     } else {
-      accum_r_trans_ += delta_trans;
-      accum_r_rot_ = delta_rot * accum_r_rot_;
-      target_r_.translation() = initial_r_.translation() + accum_r_trans_;
-      target_r_.linear() = accum_r_rot_ * initial_r_.linear();
+      Eigen::Vector3d prospective_trans = initial_r_.translation() + accum_r_trans_ + delta_trans;
+      int ix = static_cast<int>(std::floor(prospective_trans.x() / VOXEL_SIZE));
+      int iy = static_cast<int>(std::floor(prospective_trans.y() / VOXEL_SIZE));
+      int iz = static_cast<int>(std::floor(prospective_trans.z() / VOXEL_SIZE));
+      VoxelKey key = {ix, iy, iz};
+      
+      Eigen::Matrix3d prospective_rot_mat = delta_rot * accum_r_rot_ * initial_r_.linear();
+      Eigen::Quaterniond prospective_quat(prospective_rot_mat);
+      
+      bool rejected = false;
+      auto it = voxel_scores_r_.find(key);
+      Eigen::Matrix3d relative_rot = delta_rot * accum_r_rot_;
+      Eigen::AngleAxisd angle_axis(relative_rot);
+
+      bool trans_rejected = false;
+      bool rot_rejected = false;
+
+      if (!r_in_safe_region_) {
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Right Arm searching safe region. RelPos: %.3f %.3f %.3f", prospective_trans.x(), prospective_trans.y(), prospective_trans.z());
+          if (it != voxel_scores_r_.end()) {
+              r_in_safe_region_ = true;
+              RCLCPP_INFO(this->get_logger(), "Right arm entered safe region. XYZ Limiter ENABLED.");
+          }
+      } else {
+          // Hard boundary check for XYZ
+          if (ix < min_ix_ || ix > max_ix_ || iy < min_iy_ || iy > max_iy_ || iz < min_iz_ || iz > max_iz_) {
+              trans_rejected = true;
+          }
+          // Always apply angle limit
+          if (std::abs(angle_axis.angle()) > M_PI / 2.0) {
+              rot_rejected = true;
+          }
+      }
+      
+      if (!trans_rejected) {
+          accum_r_trans_ += delta_trans;
+          target_r_.translation() = prospective_trans;
+      }
+      if (!rot_rejected) {
+          accum_r_rot_ = delta_rot * accum_r_rot_;
+          target_r_.linear() = prospective_rot_mat;
+      }
     }
   }
 
@@ -396,15 +546,91 @@ private:
     last_mapper_r_rot_ = rot_mat;
 
     if (!swapped_) {
-      accum_r_trans_ += delta_trans;
-      accum_r_rot_ = delta_rot * accum_r_rot_;
-      target_r_.translation() = initial_r_.translation() + accum_r_trans_;
-      target_r_.linear() = accum_r_rot_ * initial_r_.linear();
+      Eigen::Vector3d prospective_trans = initial_r_.translation() + accum_r_trans_ + delta_trans;
+      int ix = static_cast<int>(std::floor(prospective_trans.x() / VOXEL_SIZE));
+      int iy = static_cast<int>(std::floor(prospective_trans.y() / VOXEL_SIZE));
+      int iz = static_cast<int>(std::floor(prospective_trans.z() / VOXEL_SIZE));
+      VoxelKey key = {ix, iy, iz};
+      
+      Eigen::Matrix3d prospective_rot_mat = delta_rot * accum_r_rot_ * initial_r_.linear();
+      Eigen::Quaterniond prospective_quat(prospective_rot_mat);
+      
+      bool rejected = false;
+      auto it = voxel_scores_r_.find(key);
+      Eigen::Matrix3d relative_rot = delta_rot * accum_r_rot_;
+      Eigen::AngleAxisd angle_axis(relative_rot);
+
+      bool trans_rejected = false;
+      bool rot_rejected = false;
+
+      if (!r_in_safe_region_) {
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Right Arm searching safe region. RelPos: %.3f %.3f %.3f", prospective_trans.x(), prospective_trans.y(), prospective_trans.z());
+          if (it != voxel_scores_r_.end()) {
+              r_in_safe_region_ = true;
+              RCLCPP_INFO(this->get_logger(), "Right arm entered safe region. XYZ Limiter ENABLED.");
+          }
+      } else {
+          // Hard boundary check for XYZ
+          if (ix < min_ix_ || ix > max_ix_ || iy < min_iy_ || iy > max_iy_ || iz < min_iz_ || iz > max_iz_) {
+              trans_rejected = true;
+          }
+          // Always apply angle limit
+          if (std::abs(angle_axis.angle()) > M_PI / 2.0) {
+              rot_rejected = true;
+          }
+      }
+      
+      if (!trans_rejected) {
+          accum_r_trans_ += delta_trans;
+          target_r_.translation() = prospective_trans;
+      }
+      if (!rot_rejected) {
+          accum_r_rot_ = delta_rot * accum_r_rot_;
+          target_r_.linear() = prospective_rot_mat;
+      }
     } else {
-      accum_l_trans_ += delta_trans;
-      accum_l_rot_ = delta_rot * accum_l_rot_;
-      target_l_.translation() = initial_l_.translation() + accum_l_trans_;
-      target_l_.linear() = accum_l_rot_ * initial_l_.linear();
+      Eigen::Vector3d prospective_trans = initial_l_.translation() + accum_l_trans_ + delta_trans;
+      int ix = static_cast<int>(std::floor(prospective_trans.x() / VOXEL_SIZE));
+      int iy = static_cast<int>(std::floor(prospective_trans.y() / VOXEL_SIZE));
+      int iz = static_cast<int>(std::floor(prospective_trans.z() / VOXEL_SIZE));
+      VoxelKey key = {ix, iy, iz};
+      
+      Eigen::Matrix3d prospective_rot_mat = delta_rot * accum_l_rot_ * initial_l_.linear();
+      Eigen::Quaterniond prospective_quat(prospective_rot_mat);
+      
+      bool rejected = false;
+      auto it = voxel_scores_l_.find(key);
+      Eigen::Matrix3d relative_rot = delta_rot * accum_l_rot_;
+      Eigen::AngleAxisd angle_axis(relative_rot);
+
+      bool trans_rejected = false;
+      bool rot_rejected = false;
+
+      if (!l_in_safe_region_) {
+          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, "Left Arm searching safe region. RelPos: %.3f %.3f %.3f", prospective_trans.x(), prospective_trans.y(), prospective_trans.z());
+          if (it != voxel_scores_l_.end()) {
+              l_in_safe_region_ = true;
+              RCLCPP_INFO(this->get_logger(), "Left arm entered safe region. XYZ Limiter ENABLED.");
+          }
+      } else {
+          // Hard boundary check for XYZ
+          if (ix < min_ix_ || ix > max_ix_ || iy > -min_iy_ || iy < -max_iy_ || iz < min_iz_ || iz > max_iz_) {
+              trans_rejected = true;
+          }
+          // Always apply angle limit
+          if (std::abs(angle_axis.angle()) > M_PI / 2.0) {
+              rot_rejected = true;
+          }
+      }
+      
+      if (!trans_rejected) {
+          accum_l_trans_ += delta_trans;
+          target_l_.translation() = prospective_trans;
+      }
+      if (!rot_rejected) {
+          accum_l_rot_ = delta_rot * accum_l_rot_;
+          target_l_.linear() = prospective_rot_mat;
+      }
     }
   }
 
@@ -464,11 +690,23 @@ private:
   Eigen::Vector3d accum_r_trans_ = Eigen::Vector3d::Zero();
   Eigen::Matrix3d accum_r_rot_ = Eigen::Matrix3d::Identity();
 
+  bool l_in_safe_region_ = false;
+  bool r_in_safe_region_ = false;
   bool swapped_ = false;
   bool left_btn0_ = false, left_btn1_ = false;
   bool right_btn0_ = false, right_btn1_ = false;
   rclcpp::Time swap_timer_start_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   rclcpp::Time last_swap_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+
+  std::unordered_map<VoxelKey, std::vector<float>, VoxelHash> voxel_scores_l_;
+  
+  int min_ix_ = 9999, max_ix_ = -9999;
+  int min_iy_ = 9999, max_iy_ = -9999;
+  int min_iz_ = 9999, max_iz_ = -9999;
+  std::unordered_map<VoxelKey, std::vector<float>, VoxelHash> voxel_scores_r_;
+  
+  std::vector<Eigen::Quaterniond> target_quats_r_;
+  std::vector<Eigen::Quaterniond> target_quats_l_;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_l_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_r_;
@@ -590,23 +828,23 @@ int main(int argc, char **argv) {
                          col_cfg, err_hist, dist_hist);
 
     // Print solver status every 20 ticks or if stalled
-    if (++step_counter % 20 == 0 || res.stalled) {
-      std::cout << "\n--- Step " << step_counter << " ---" << std::endl;
-      solver.printStep(step_counter, res);
-
-      Eigen::Isometry3d curr_r = Eigen::Isometry3d::Identity();
-      curr_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
-      double pos_err =
-          (curr_r.translation() - current_target_r.translation()).norm();
-      std::cout << "Target R pos: "
-                << current_target_r.translation().transpose() << std::endl;
-      std::cout << "Current R pos: " << curr_r.translation().transpose()
-                << std::endl;
-      std::cout << "Pos error: " << pos_err << std::endl;
-      if (res.stalled) {
-        std::cout << "[WARNING] Solver STALLED!" << std::endl;
-      }
-    }
+    // if (++step_counter % 20 == 0 || res.stalled) {
+    //   std::cout << "\n--- Step " << step_counter << " ---" << std::endl;
+    //   solver.printStep(step_counter, res);
+    // 
+    //   Eigen::Isometry3d curr_r = Eigen::Isometry3d::Identity();
+    //   curr_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+    //   double pos_err =
+    //       (curr_r.translation() - current_target_r.translation()).norm();
+    //   std::cout << "Target R pos: "
+    //             << current_target_r.translation().transpose() << std::endl;
+    //   std::cout << "Current R pos: " << curr_r.translation().transpose()
+    //             << std::endl;
+    //   std::cout << "Pos error: " << pos_err << std::endl;
+    //   if (res.stalled) {
+    //     std::cout << "[WARNING] Solver STALLED!" << std::endl;
+    //   }
+    // }
 
     // Ensure simulation state is updated for rendering
     mj_forward(m, d);

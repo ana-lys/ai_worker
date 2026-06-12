@@ -331,7 +331,9 @@ int main(int argc, char** argv) {
                 if (std::getline(ss, token, ',')) p.qy = std::stod(token);
                 if (std::getline(ss, token, ',')) p.qz = std::stod(token);
                 if (std::getline(ss, token, ',')) p.qw = std::stod(token);
-                pareto_front.push_back(p);
+                if (p.x >= 0.2) {
+                    pareto_front.push_back(p);
+                }
             }
             std::cout << "Loaded " << pareto_front.size() << " points." << std::endl;
         }
@@ -377,7 +379,7 @@ int main(int argc, char** argv) {
         base_scores[pair.first] = scores;
     }
 
-    std::cout << "Extracting Boundary and Smoothing Scores..." << std::endl;
+    std::cout << "Extracting All Voxel Categories..." << std::endl;
     std::ofstream out_voxels("src/ai_worker/ffw_collision_checker/explore/pareto_boundary_voxels.csv");
     if (!out_voxels.is_open()) out_voxels.open("explore/pareto_boundary_voxels.csv");
     if (!out_voxels.is_open()) out_voxels.open("pareto_boundary_voxels.csv");
@@ -385,65 +387,130 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < target_quats.size(); ++i) out_voxels << ",score_" << i;
     out_voxels << "\n";
 
+    std::ofstream out_bin("src/ai_worker/ffw_collision_checker/explore/pareto_boundary_voxels.bin", std::ios::binary);
+    if (!out_bin.is_open()) out_bin.open("explore/pareto_boundary_voxels.bin", std::ios::binary);
+    if (!out_bin.is_open()) out_bin.open("pareto_boundary_voxels.bin", std::ios::binary);
+
     int directions[6][3] = {
         {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
     };
     int boundary_count = 0;
+    int blocked_count = 0;
+    int interior_count = 0;
 
+    int min_ix = 1000, max_ix = -1000;
+    int min_iy = 1000, max_iy = -1000;
+    int min_iz = 1000, max_iz = -1000;
     for (const auto& pair : voxels) {
-        const VoxelKey& k = pair.first;
-        bool is_boundary = false;
-        for (int i = 0; i < 6; ++i) {
-            VoxelKey neighbor = {k.x + directions[i][0], k.y + directions[i][1], k.z + directions[i][2]};
-            if (voxels.find(neighbor) == voxels.end()) {
-                is_boundary = true;
-                break;
-            }
-        }
+        min_ix = std::min(min_ix, pair.first.x);
+        max_ix = std::max(max_ix, pair.first.x);
+        min_iy = std::min(min_iy, pair.first.y);
+        max_iy = std::max(max_iy, pair.first.y);
+        min_iz = std::min(min_iz, pair.first.z);
+        max_iz = std::max(max_iz, pair.first.z);
+    }
+    
+    // Explicitly extend X minimum to 0.0 and maximum to 0.9 to capture blocked regions
+    int x_min_cap_idx = static_cast<int>(std::floor(0.0 / VOXEL_SIZE));
+    int x_max_cap_idx = static_cast<int>(std::floor(0.9 / VOXEL_SIZE));
+    min_ix = std::min(min_ix, x_min_cap_idx);
+    max_ix = std::max(max_ix, x_max_cap_idx);
+    
+    // Add 1 voxel padding to Y and Z to ensure the workspace is fully encased in hard blocks
+    min_iy -= 1;
+    max_iy += 1;
+    min_iz -= 1;
+    max_iz += 1;
 
-        if (is_boundary) {
-            boundary_count++;
-            std::vector<double> smoothed(target_quats.size(), 0.0);
-            
-            double sum_score = 0.0;
-            for (size_t i = 0; i < target_quats.size(); ++i) {
-                double my_score = base_scores[k][i];
-                double max_neighbor = -1.0;
+    for (int ix = min_ix; ix <= max_ix; ++ix) {
+        for (int iy = min_iy; iy <= max_iy; ++iy) {
+            for (int iz = min_iz; iz <= max_iz; ++iz) {
+                VoxelKey k = {ix, iy, iz};
                 
-                for (int j = 0; j < 6; ++j) {
-                    VoxelKey neighbor = {k.x + directions[j][0], k.y + directions[j][1], k.z + directions[j][2]};
-                    auto it = base_scores.find(neighbor);
-                    if (it != base_scores.end()) {
-                        if (it->second[i] > max_neighbor) {
-                            max_neighbor = it->second[i];
+                double vx = (k.x + 0.5) * VOXEL_SIZE;
+                double vy = (k.y + 0.5) * VOXEL_SIZE;
+                double vz = (k.z + 0.5) * VOXEL_SIZE;
+                
+                if (voxels.find(k) == voxels.end()) {
+                    // BLOCKED VOXEL
+                    blocked_count++;
+                    out_voxels << vx << "," << vy << "," << vz << ",0.0";
+                    for (size_t i = 0; i < target_quats.size(); ++i) out_voxels << ",0.0";
+                    out_voxels << "\n";
+                    
+                    std::vector<float> bin_row(129, 0.0f);
+                    bin_row[0] = vx; bin_row[1] = vy; bin_row[2] = vz; bin_row[3] = 0.0f;
+                    out_bin.write(reinterpret_cast<const char*>(bin_row.data()), bin_row.size() * sizeof(float));
+                } else {
+                    bool is_boundary = false;
+                    for (int dx = -1; dx <= 1 && !is_boundary; ++dx) {
+                        for (int dy = -1; dy <= 1 && !is_boundary; ++dy) {
+                            for (int dz = -1; dz <= 1 && !is_boundary; ++dz) {
+                                if (dx == 0 && dy == 0 && dz == 0) continue;
+                                VoxelKey neighbor = {k.x + dx, k.y + dy, k.z + dz};
+                                if (voxels.find(neighbor) == voxels.end()) {
+                                    is_boundary = true;
+                                }
+                            }
                         }
                     }
+
+                    if (is_boundary) {
+                        // SOFT BLOCK (Pareto Boundary)
+                        boundary_count++;
+                        std::vector<double> smoothed(target_quats.size(), 0.0);
+                        double sum_score = 0.0;
+                        for (size_t i = 0; i < target_quats.size(); ++i) {
+                            double my_score = base_scores[k][i];
+                            double max_neighbor = -1.0;
+                            for (int j = 0; j < 6; ++j) {
+                                VoxelKey neighbor = {k.x + directions[j][0], k.y + directions[j][1], k.z + directions[j][2]};
+                                auto it = base_scores.find(neighbor);
+                                if (it != base_scores.end()) {
+                                    if (it->second[i] > max_neighbor) {
+                                        max_neighbor = it->second[i];
+                                    }
+                                }
+                            }
+                            double neighbor_term = max_neighbor;
+                            if (max_neighbor > 0.0) {
+                                neighbor_term = 0.25 * max_neighbor;
+                            }
+                            smoothed[i] = std::max(my_score, neighbor_term);
+                            sum_score += smoothed[i];
+                        }
+                        double versatility = sum_score / target_quats.size();
+                        out_voxels << vx << "," << vy << "," << vz << "," << versatility;
+                        for (double s : smoothed) out_voxels << "," << s;
+                        out_voxels << "\n";
+
+                        std::vector<float> bin_row(129, 0.0f);
+                        bin_row[0] = vx; bin_row[1] = vy; bin_row[2] = vz; bin_row[3] = versatility;
+                        for (size_t i = 0; i < target_quats.size(); ++i) bin_row[4+i] = smoothed[i];
+                        out_bin.write(reinterpret_cast<const char*>(bin_row.data()), bin_row.size() * sizeof(float));
+                    } else {
+                        // NO BLOCK (Interior)
+                        interior_count++;
+                        out_voxels << vx << "," << vy << "," << vz << ",1.0";
+                        for (size_t i = 0; i < target_quats.size(); ++i) out_voxels << ",1.0";
+                        out_voxels << "\n";
+                        
+                        std::vector<float> bin_row(129, 1.0f);
+                        bin_row[0] = vx; bin_row[1] = vy; bin_row[2] = vz; bin_row[3] = 1.0f;
+                        out_bin.write(reinterpret_cast<const char*>(bin_row.data()), bin_row.size() * sizeof(float));
+                    }
                 }
-                
-                double neighbor_term = max_neighbor;
-                if (max_neighbor > 0.0) {
-                    neighbor_term = 0.25 * max_neighbor;
-                }
-                
-                smoothed[i] = std::max(my_score, neighbor_term);
-                sum_score += smoothed[i];
             }
-            
-            double versatility = sum_score / target_quats.size();
-
-            double vx = (k.x + 0.5) * VOXEL_SIZE;
-            double vy = (k.y + 0.5) * VOXEL_SIZE;
-            double vz = (k.z + 0.5) * VOXEL_SIZE;
-
-            out_voxels << vx << "," << vy << "," << vz << "," << versatility;
-            for (double s : smoothed) out_voxels << "," << s;
-            out_voxels << "\n";
         }
     }
     out_voxels.close();
+    if (out_bin.is_open()) out_bin.close();
 
-    std::cout << "Total boundary voxels processed: " << boundary_count << std::endl;
-    std::cout << "Done! Saved boundary voxels to explore/pareto_boundary_voxels.csv" << std::endl;
+    std::cout << "Total processed voxels in bounding box: " << (blocked_count + boundary_count + interior_count) << std::endl;
+    std::cout << "  - Blocked (Unreached/Capped): " << blocked_count << std::endl;
+    std::cout << "  - Boundary (Soft Block):      " << boundary_count << std::endl;
+    std::cout << "  - Interior (No Block):        " << interior_count << std::endl;
+    std::cout << "Done! Saved all voxels to explore/pareto_boundary_voxels.csv" << std::endl;
     } // End of MODE == 1 || MODE == 2
 
     return 0;

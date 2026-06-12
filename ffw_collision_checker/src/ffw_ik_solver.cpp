@@ -475,16 +475,16 @@ StepResult IKSolver::solveStep(
 // ============================================================
 
 void IKSolver::printStep(int step, const StepResult& r) const {
-    std::printf(
-        "Step %3d | error=%.6f | obj=%.6f (ee=%.6f coll=%.6f)"
-        " | contacts=%d | min_dist=%.6f\n",
-        step,
-        r.error,
-        r.objective_total,
-        r.objective_ee,
-        r.objective_collision,
-        r.contacts.total_contacts,
-        std::isfinite(r.min_dist) ? r.min_dist : -1.0);
+    // std::printf(
+    //     "Step %3d | error=%.6f | obj=%.6f (ee=%.6f coll=%.6f)"
+    //     " | contacts=%d | min_dist=%.6f\n",
+    //     step,
+    //     r.error,
+    //     r.objective_total,
+    //     r.objective_ee,
+    //     r.objective_collision,
+    //     r.contacts.total_contacts,
+    //     std::isfinite(r.min_dist) ? r.min_dist : -1.0);
 }
 
 } // namespace ffw_ik

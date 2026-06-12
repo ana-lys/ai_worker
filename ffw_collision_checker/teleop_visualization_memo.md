@@ -23,3 +23,16 @@ This document summarizes the changes made to improve the MuJoCo visualization fo
    - Split the `SimpleViewer` framebuffer vertically into two distinct viewports.
    - **Top Viewport**: A new camera (`cam_top_`) placed directly in front of the robot (Azimuth 180, Elevation -15) to monitor symmetrical alignment.
    - **Bottom Viewport**: Retained the original default camera, allowing for arbitrary user control while still having a fixed reference above.
+
+5. **Decoupled Teleop Boundary Limits**
+   - Fixed the "getting stuck" issue when the arm hits a boundary. Previously, the XYZ limits and Rotation limits were coupled, meaning if the orientation was twisted beyond its limit, all translation would be blocked as well.
+   - Decoupled `trans_rejected` and `rot_rejected` so that:
+     - Hitting an XYZ boundary blocks further translation but allows free rotation.
+     - Exceeding the `+- Pi/2` rotation limit blocks further rotation but allows free translation.
+   - Removed a faulty "push back" logic that was causing massive orientation drift on the right arm, ensuring the zero-point of the orientation remains stable and consistent.
+   - Re-enabled the safe region logic to correctly update the teleop accumulators while driving into the safe region.
+
+6. **Pareto Boundary Navigation (Free Space)**
+   - Removed the strict requirement for the arm to only stay within explicitly mapped voxel points ("soft bounds").
+   - XYZ translation is now constrained purely by the global Pareto bounding box ("hard bounds").
+   - This allows the arm to move smoothly through unmapped interior "free space" without incorrectly getting blocked by missing voxel data.
