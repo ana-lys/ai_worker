@@ -337,6 +337,38 @@ public:
     r = target_r_;
   }
 
+  void clip_target(const Eigen::Isometry3d &achieved_l,
+                   const Eigen::Isometry3d &achieved_r,
+                   double max_dist = 0.015, double max_angle = 0.2) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+
+    // Left arm clipping
+    Eigen::Vector3d err_l = target_l_.translation() - achieved_l.translation();
+    if (err_l.norm() > max_dist) {
+      target_l_.translation() = achieved_l.translation() + err_l.normalized() * max_dist;
+      accum_l_trans_ = target_l_.translation() - initial_l_.translation();
+    }
+    Eigen::AngleAxisd err_rot_l(target_l_.linear() * achieved_l.linear().transpose());
+    if (std::abs(err_rot_l.angle()) > max_angle) {
+      Eigen::AngleAxisd clamped_rot_l(max_angle * (err_rot_l.angle() > 0 ? 1 : -1), err_rot_l.axis());
+      target_l_.linear() = clamped_rot_l.toRotationMatrix() * achieved_l.linear();
+      accum_l_rot_ = target_l_.linear() * initial_l_.linear().transpose();
+    }
+
+    // Right arm clipping
+    Eigen::Vector3d err_r = target_r_.translation() - achieved_r.translation();
+    if (err_r.norm() > max_dist) {
+      target_r_.translation() = achieved_r.translation() + err_r.normalized() * max_dist;
+      accum_r_trans_ = target_r_.translation() - initial_r_.translation();
+    }
+    Eigen::AngleAxisd err_rot_r(target_r_.linear() * achieved_r.linear().transpose());
+    if (std::abs(err_rot_r.angle()) > max_angle) {
+      Eigen::AngleAxisd clamped_rot_r(max_angle * (err_rot_r.angle() > 0 ? 1 : -1), err_rot_r.axis());
+      target_r_.linear() = clamped_rot_r.toRotationMatrix() * achieved_r.linear();
+      accum_r_rot_ = target_r_.linear() * initial_r_.linear().transpose();
+    }
+  }
+
   void publish_joints(mjModel *m, mjData *d) {
     sensor_msgs::msg::JointState msg;
     msg.header.stamp = this->now();
@@ -651,6 +683,22 @@ int main(int argc, char **argv) {
 
     // Ensure simulation state is updated for rendering
     mj_forward(m, d);
+
+    // Dynamic error-bounding clamp (Leash)
+    Eigen::Isometry3d achieved_l = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d achieved_r = Eigen::Isometry3d::Identity();
+    if (left_id >= 0) {
+      achieved_l.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
+      achieved_l.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * left_id).cast<double>();
+    }
+    if (right_id >= 0) {
+      achieved_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+      achieved_r.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * right_id).cast<double>();
+    }
+    node->clip_target(achieved_l, achieved_r);
+    
+    // Update target variables so the viewer spheres reflect the clipped target
+    node->get_targets(current_target_l, current_target_r);
 
     viewer.setGoalPose(current_target_l, current_target_r,
                        solver_cfg.track_orientation);
