@@ -187,10 +187,14 @@ public:
     if (id_l >= 0 && id_r >= 0) {
       char text_l[256];
       char text_r[256];
+      Eigen::Vector3d rpy_l = extract_rpy(pose_l_.linear());
+      Eigen::Vector3d rpy_r = extract_rpy(pose_r_.linear());
       const mjtNum* pl = d->site_xpos + 3 * id_l;
       const mjtNum* pr = d->site_xpos + 3 * id_r;
-      snprintf(text_l, sizeof(text_l), "LEFT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f", pl[0], pl[1], pl[2]);
-      snprintf(text_r, sizeof(text_r), "RIGHT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f", pr[0], pr[1], pr[2]);
+      snprintf(text_l, sizeof(text_l), "LEFT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  %7.3f\nPitch: %7.3f\nYaw:   %7.3f", 
+               pl[0], pl[1], pl[2], rpy_l[0], rpy_l[1], rpy_l[2]);
+      snprintf(text_r, sizeof(text_r), "RIGHT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  %7.3f\nPitch: %7.3f\nYaw:   %7.3f", 
+               pr[0], pr[1], pr[2], rpy_r[0], rpy_r[1], rpy_r[2]);
       mjr_overlay(mjFONT_BIG, mjGRID_TOPLEFT, vp_full, text_l, nullptr, &con_);
       mjr_overlay(mjFONT_BIG, mjGRID_TOPRIGHT, vp_full, text_r, nullptr, &con_);
     }
@@ -256,6 +260,13 @@ public:
   }
 
   bool enabled() const { return enabled_; }
+
+  static Eigen::Vector3d extract_rpy(const Eigen::Matrix3d& R) {
+      double pitch = std::asin(std::clamp(R(0, 2), -1.0, 1.0));
+      double yaw = std::atan2(-R(0, 1), R(0, 0));
+      double roll = std::atan2(-R(1, 2), R(2, 2));
+      return Eigen::Vector3d(roll, pitch, yaw);
+  }
 
 private:
   mjModel *m_ = nullptr;
@@ -367,11 +378,13 @@ private:
       accum_l_rot_ = delta_rot * accum_l_rot_;
       target_l_.translation() = initial_l_.translation() + accum_l_trans_;
       target_l_.linear() = accum_l_rot_ * initial_l_.linear();
+      clamp_target_angle(target_l_, initial_l_, accum_l_rot_);
     } else {
       accum_r_trans_ += delta_trans;
       accum_r_rot_ = delta_rot * accum_r_rot_;
       target_r_.translation() = initial_r_.translation() + accum_r_trans_;
       target_r_.linear() = accum_r_rot_ * initial_r_.linear();
+      clamp_target_angle(target_r_, initial_r_, accum_r_rot_);
     }
   }
 
@@ -400,11 +413,13 @@ private:
       accum_r_rot_ = delta_rot * accum_r_rot_;
       target_r_.translation() = initial_r_.translation() + accum_r_trans_;
       target_r_.linear() = accum_r_rot_ * initial_r_.linear();
+      clamp_target_angle(target_r_, initial_r_, accum_r_rot_);
     } else {
       accum_l_trans_ += delta_trans;
       accum_l_rot_ = delta_rot * accum_l_rot_;
       target_l_.translation() = initial_l_.translation() + accum_l_trans_;
       target_l_.linear() = accum_l_rot_ * initial_l_.linear();
+      clamp_target_angle(target_l_, initial_l_, accum_l_rot_);
     }
   }
 
@@ -444,6 +459,29 @@ private:
       }
       swap_timer_start_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
     }
+  }
+
+  void clamp_target_angle(Eigen::Isometry3d& target, Eigen::Isometry3d& initial, Eigen::Matrix3d& accum) {
+      // 1. Find the absolute rotation from the World Identity frame to the target pose
+      // Since the reference is Identity, the relative rotation is just target.linear()
+      Eigen::Matrix3d abs_rot = target.linear();
+      
+      // 2. Convert to Angle-Axis to get the pure 3D rotation angle from World Identity
+      Eigen::AngleAxisd angle_axis(abs_rot);
+      double angle = angle_axis.angle();
+      
+      // Eigen AngleAxisd returns an angle in [0, pi]. 
+      // If the absolute angle from World Identity exceeds pi/2 (90 degrees), scale it back!
+      double limit = M_PI / 2.0;
+      if (angle > limit) {
+          Eigen::AngleAxisd clamped_abs_rot(limit, angle_axis.axis());
+          
+          // Reconstruct the target using the clamped absolute rotation
+          target.linear() = clamped_abs_rot.toRotationMatrix();
+          
+          // Update the accumulator so the teleop doesn't wind up while clamped
+          accum = target.linear() * initial.linear().transpose();
+      }
   }
 
   Eigen::Isometry3d initial_l_ = Eigen::Isometry3d::Identity();
@@ -555,9 +593,13 @@ int main(int argc, char **argv) {
   // damping
   solver_cfg.ori_weight = 0.5;
 
+  // Use the Manipulability solver!
+  solver_cfg.nullspace_type = 3;
+  solver_cfg.nullspace_amplitude = 0.8;
+
   ffw_ik::CollisionCostConfig col_cfg;
   col_cfg.collision_margin = 0.10;
-  col_cfg.weight_scale = 0.005;
+  col_cfg.weight_scale = 0.025;
 
   ffw_ik::IKSolver solver(m);
   SimpleViewer viewer(m);
@@ -584,7 +626,7 @@ int main(int argc, char **argv) {
     prev_target_l = current_target_l;
     prev_target_r = current_target_r;
 
-    // Run one gradient step of the IK solver
+    // Run one gradient step using the single solver
     ffw_ik::StepResult res =
         solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
                          col_cfg, err_hist, dist_hist);
@@ -592,7 +634,6 @@ int main(int argc, char **argv) {
     // Print solver status every 20 ticks or if stalled
     if (++step_counter % 20 == 0 || res.stalled) {
       std::cout << "\n--- Step " << step_counter << " ---" << std::endl;
-      solver.printStep(step_counter, res);
 
       Eigen::Isometry3d curr_r = Eigen::Isometry3d::Identity();
       curr_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);

@@ -16,7 +16,7 @@
   -->
   <default>
 
-    <geom margin="0.155" gap="0.0" />
+    <geom margin="0.30" gap="0.0" />
 
     <!-- Robot default -->
     <default class="robot">

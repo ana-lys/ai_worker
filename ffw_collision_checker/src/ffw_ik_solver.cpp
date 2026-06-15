@@ -3,10 +3,38 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <numeric>
 #include <stdexcept>
+#include <future>
+#include <iostream>
 
 namespace ffw_ik {
+
+static double computeManipulability(mjModel* m, mjData* d, int id_l, int id_r, int nv, std::vector<mjtNum>& jacp_l, std::vector<mjtNum>& jacr_l, std::vector<mjtNum>& jacp_r, std::vector<mjtNum>& jacr_r, bool track_ori) {
+    int task_dim = track_ori ? 12 : 6;
+    Eigen::MatrixXd J = Eigen::MatrixXd::Zero(task_dim, nv);
+    using RowMat3xN = Eigen::Matrix<mjtNum, 3, Eigen::Dynamic, Eigen::RowMajor>;
+    
+    if (track_ori) {
+        mj_jacSite(m, d, jacp_l.data(), jacr_l.data(), id_l);
+        mj_jacSite(m, d, jacp_r.data(), jacr_r.data(), id_r);
+        J.block(0, 0, 3, nv) = Eigen::Map<const RowMat3xN>(jacp_l.data(), 3, nv).cast<double>();
+        J.block(3, 0, 3, nv) = Eigen::Map<const RowMat3xN>(jacr_l.data(), 3, nv).cast<double>();
+        J.block(6, 0, 3, nv) = Eigen::Map<const RowMat3xN>(jacp_r.data(), 3, nv).cast<double>();
+        J.block(9, 0, 3, nv) = Eigen::Map<const RowMat3xN>(jacr_r.data(), 3, nv).cast<double>();
+    } else {
+        mj_jacSite(m, d, jacp_l.data(), nullptr, id_l);
+        mj_jacSite(m, d, jacp_r.data(), nullptr, id_r);
+        J.block(0, 0, 3, nv) = Eigen::Map<const RowMat3xN>(jacp_l.data(), 3, nv).cast<double>();
+        J.block(3, 0, 3, nv) = Eigen::Map<const RowMat3xN>(jacp_r.data(), 3, nv).cast<double>();
+    }
+    
+    Eigen::MatrixXd JJt = J * J.transpose();
+    double det = JJt.determinant();
+    if (det < 0.0) det = 0.0;
+    return std::sqrt(det);
+}
 
 // ============================================================
 // Construction
@@ -47,6 +75,15 @@ IKSolver::IKSolver(mjModel* model)
     id_lUB_ = mj_name2id(m_, mjOBJ_SITE, "left_UB_site");
     id_rUA_ = mj_name2id(m_, mjOBJ_SITE, "right_UA_site");
     id_rUB_ = mj_name2id(m_, mjOBJ_SITE, "right_UB_site");
+
+    nullspace_phase_offsets_.resize(nv_);
+    nullspace_frequencies_.resize(nv_);
+    for (int i = 0; i < nv_; ++i) {
+        // Pseudo-random phase offsets so joints don't swing in perfect unison
+        nullspace_phase_offsets_[i] = std::sin(i * 1.37) * M_PI;
+        // Pseudo-random frequency multipliers so joints oscillate at different speeds
+        nullspace_frequencies_[i] = 1.0 + 0.3 * std::sin(i * 2.11);
+    }
 }
 
 // ============================================================
@@ -252,7 +289,7 @@ StepResult IKSolver::solveStep(
     // Contact query
     computeContacts(d, cfg.topk_contacts, result.contacts);
     result.min_dist = result.contacts.closest.empty()
-        ? std::numeric_limits<double>::quiet_NaN()
+        ? 0.30
         : result.contacts.closest.front().dist;
 
     result.objective_ee        = eeObjective(result.error);
@@ -405,6 +442,114 @@ StepResult IKSolver::solveStep(
     g_ext_.head(nv_) = g_;
     g_ext_.tail(num_slacks).setConstant(col.slack_penalty); // Linear penalty to push slacks to 0
 
+    // 1b. Dynamic Null-Space Injection
+    if (cfg.nullspace_weight > 0.0) {
+        nullspace_time_ += cfg.step_size;
+        
+        // Quadratically fade out the null-space weight as the EE error approaches zero.
+        // We use raw, unweighted errors to ensure null-space stays active 
+        // if orientation is still far off, even if translation is perfect!
+        double max_raw_pos = std::max(err_.segment<3>(0).norm(), err_.segment<3>(6).norm());
+        double max_raw_ori = cfg.track_orientation ? std::max(err_.segment<3>(3).norm(), err_.segment<3>(9).norm()) : 0.0;
+        
+        // 5cm translation or 0.2 rad (~11 deg) orientation keeps it fully active
+        double pos_scale = std::min(1.0, (max_raw_pos * max_raw_pos) / (0.05 * 0.05));
+        double ori_scale = std::min(1.0, (max_raw_ori * max_raw_ori) / (0.20 * 0.20));
+        double scale = std::max(pos_scale, ori_scale);
+        
+        double active_weight = cfg.nullspace_weight * scale;
+
+        double w_curr = 0.0;
+        if (cfg.nullspace_type == 3 && active_weight > 1e-9) {
+            mj_kinematics(m_, d);
+            w_curr = computeManipulability(m_, d, id_l_, id_r_, nv_, jacp_l_, jacr_l_, jacp_r_, jacr_r_, cfg.track_orientation);
+            
+            if (manipulability_grad_.size() != nv_) {
+                manipulability_grad_ = Eigen::VectorXd::Zero(nv_);
+                manipulability_idx_ = 0;
+            }
+            
+            // Interleaved gradient descent: evaluate subset of joints per step
+            int group_size = (nv_ + 4) / 5; // roughly divide into 5 groups
+            int end_idx = std::min(nv_, manipulability_idx_ + group_size);
+            
+            for (int i = manipulability_idx_; i < end_idx; ++i) {
+                int jid = m_->dof_jntid[i];
+                const char* jname = mj_id2name(m_, mjOBJ_JOINT, jid);
+                if (jname && strstr(jname, "head") != nullptr) {
+                    manipulability_grad_(i) = 0.0;
+                    continue;
+                }
+                
+                double delta = 1e-4;
+                int q_adr = m_->jnt_qposadr[jid];
+                double q_orig = d->qpos[q_adr];
+                
+                d->qpos[q_adr] += delta;
+                mj_kinematics(m_, d);
+                // Note: mj_comPos removed for speed
+                double w_new = computeManipulability(m_, d, id_l_, id_r_, nv_, jacp_l_, jacr_l_, jacp_r_, jacr_r_, cfg.track_orientation);
+                
+                d->qpos[q_adr] = q_orig;
+                manipulability_grad_(i) = (w_new - w_curr) / delta;
+            }
+            
+            manipulability_idx_ = end_idx;
+            if (manipulability_idx_ >= nv_) {
+                manipulability_idx_ = 0;
+            }
+            
+            // Restore clean state for the rest of the solver
+            mj_kinematics(m_, d);
+        }
+
+        // Apply velocities to gradients
+        if (active_weight > 1e-9) {
+            last_active_nullspace_weight_ = active_weight;
+            for (int i = 0; i < nv_; ++i) {
+                double v_null_i = 0.0;
+                
+                if (cfg.nullspace_type == 0) {
+                    double phase = (i < (int)nullspace_phase_offsets_.size()) ? nullspace_phase_offsets_[i] : 0.0;
+                    double freq_mult = (i < (int)nullspace_frequencies_.size()) ? nullspace_frequencies_[i] : 1.0;
+                    double ramp_up = std::min(1.0, nullspace_time_ / (3.0 * cfg.step_size)); // Ramp up over exactly 3 steps
+                    v_null_i = ramp_up * cfg.nullspace_amplitude * std::sin(2.0 * M_PI * cfg.nullspace_frequency * freq_mult * nullspace_time_ + phase);
+                } else if (cfg.nullspace_type == 1) {
+                    int jid = m_->dof_jntid[i];
+                    if (m_->jnt_limited[jid]) {
+                        double q_min = m_->jnt_range[jid * 2];
+                        double q_max = m_->jnt_range[jid * 2 + 1];
+                        double q_curr = d->qpos[m_->jnt_qposadr[jid]];
+                        double q_mid = (q_min + q_max) / 2.0;
+                        double range = q_max - q_min;
+                        if (range > 1e-6) {
+                            double normalized_err = (q_mid - q_curr) / (range / 2.0);
+                            v_null_i = cfg.nullspace_amplitude * normalized_err;
+                        }
+                    }
+                } else if (cfg.nullspace_type == 2) {
+                    double phase = (i < (int)nullspace_phase_offsets_.size()) ? nullspace_phase_offsets_[i] : 0.0;
+                    double freq_mult = (i < (int)nullspace_frequencies_.size()) ? nullspace_frequencies_[i] : 1.0;
+                    double ramp_up = std::min(1.0, nullspace_time_ / (3.0 * cfg.step_size)); // Ramp up over exactly 3 steps
+                    v_null_i = -ramp_up * cfg.nullspace_amplitude * std::sin(2.0 * M_PI * cfg.nullspace_frequency * freq_mult * nullspace_time_ + phase);
+                } else if (cfg.nullspace_type == 3) {
+                    double grad = 0.0;
+                    if (manipulability_grad_.size() == nv_) {
+                        grad = manipulability_grad_(i);
+                    }
+                    double ramp_up = std::min(1.0, nullspace_time_ / (3.0 * cfg.step_size));
+                    v_null_i = ramp_up * cfg.nullspace_amplitude * grad;
+                }
+                // Add w * I to Hessian
+                H_ext_(i, i) += active_weight;
+                // Subtract w * v_null from gradient
+                g_ext_(i) -= active_weight * v_null_i;
+            }
+        }
+    } else {
+        last_active_nullspace_weight_ = 0.0;
+    }
+
     // 2. Inequality Constraints
     C_ext_.setZero();
     lb_ext_.setConstant(-1e20); // Default no lower bound
@@ -424,6 +569,19 @@ StepResult IKSolver::solveStep(
             min_vel = std::max(min_vel, (q_min - q_curr) / cfg.step_size);
             max_vel = std::min(max_vel, (q_max - q_curr) / cfg.step_size);
         }
+
+        const char* jname = mj_id2name(m_, mjOBJ_JOINT, jid);
+        if (jname) {
+            std::string name_str(jname);
+            for (const auto& frozen_name : cfg.frozen_joints) {
+                if (name_str.find(frozen_name) != std::string::npos) {
+                    min_vel = 0.0;
+                    max_vel = 0.0;
+                    break;
+                }
+            }
+        }
+
         lb_ext_(i) = min_vel;
         ub_ext_(i) = max_vel;
     }
@@ -456,10 +614,9 @@ StepResult IKSolver::solveStep(
     qp_->settings.initial_guess = proxsuite::proxqp::InitialGuessStatus::COLD_START_WITH_PREVIOUS_RESULT;
 
     // Use a flag to track if we've initialized this specific qp_ instance
-    static bool local_qp_initialized = false;
-    if (!local_qp_initialized || qp_topk_ != num_slacks) {
+    if (!qp_initialized_ || qp_topk_ != num_slacks) {
         qp_->init(H_ext_, g_ext_, std::nullopt, std::nullopt, C_ext_, lb_ext_, ub_ext_);
-        local_qp_initialized = true;
+        qp_initialized_ = true;
     } else {
         qp_->update(H_ext_, g_ext_, std::nullopt, std::nullopt, C_ext_, lb_ext_, ub_ext_);
     }
@@ -485,6 +642,117 @@ void IKSolver::printStep(int step, const StepResult& r) const {
         r.objective_collision,
         r.contacts.total_contacts,
         std::isfinite(r.min_dist) ? r.min_dist : -1.0);
+}
+
+// ============================================================
+// MultiIKSolver Implementation
+// ============================================================
+
+MultiIKSolver::MultiIKSolver(mjModel *m)
+    : m_(m), current_best_idx_(0) {
+    solver0_ = std::make_unique<IKSolver>(m_);
+    solver1_ = std::make_unique<IKSolver>(m_);
+    solver2_ = std::make_unique<IKSolver>(m_);
+    d0_ = mj_makeData(m_);
+    d1_ = mj_makeData(m_);
+    d2_ = mj_makeData(m_);
+}
+
+MultiIKSolver::~MultiIKSolver() {
+    mj_deleteData(d0_);
+    mj_deleteData(d1_);
+    mj_deleteData(d2_);
+}
+
+StepResult MultiIKSolver::solveStepMulti(mjData *d, const Eigen::Isometry3d &target_l,
+                                         const Eigen::Isometry3d &target_r, 
+                                         const SolverConfig &base_cfg, 
+                                         const CollisionCostConfig &col_cfg,
+                                         std::deque<double> &err_hist,
+                                         std::deque<double> &dist_hist) {
+    mj_copyData(d0_, m_, d);
+    mj_copyData(d1_, m_, d);
+    mj_copyData(d2_, m_, d);
+
+    SolverConfig cfg0 = base_cfg; cfg0.nullspace_type = 0;
+    SolverConfig cfg1 = base_cfg; cfg1.nullspace_type = 1;
+    SolverConfig cfg2 = base_cfg; cfg2.nullspace_type = 2; // Anti-Sinusoidal
+
+    std::deque<double> err0 = err_hist, err1 = err_hist, err2 = err_hist;
+    std::deque<double> dist0 = dist_hist, dist1 = dist_hist, dist2 = dist_hist;
+
+    auto f0 = std::async(std::launch::async, [&]() {
+        return solver0_->solveStep(d0_, target_l, target_r, cfg0, col_cfg, err0, dist0);
+    });
+    auto f1 = std::async(std::launch::async, [&]() {
+        return solver1_->solveStep(d1_, target_l, target_r, cfg1, col_cfg, err1, dist1);
+    });
+    auto f2 = std::async(std::launch::async, [&]() {
+        return solver2_->solveStep(d2_, target_l, target_r, cfg2, col_cfg, err2, dist2);
+    });
+
+    StepResult r0 = f0.get();
+    StepResult r1 = f1.get();
+    StepResult r2 = f2.get();
+
+    auto evaluate_error = [&](mjData* data) {
+        int left_id = mj_name2id(m_, mjOBJ_SITE, "left_gripper_site");
+        int right_id = mj_name2id(m_, mjOBJ_SITE, "right_gripper_site");
+        
+        double total = 0.0;
+        if (left_id >= 0) {
+            Eigen::Isometry3d curr_l = Eigen::Isometry3d::Identity();
+            curr_l.translation() = Eigen::Vector3d::Map(data->site_xpos + 3 * left_id);
+            curr_l.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(data->site_xmat + 9 * left_id).cast<double>();
+            total += (curr_l.translation() - target_l.translation()).norm();
+            Eigen::AngleAxisd aa_l(curr_l.linear().transpose() * target_l.linear());
+            total += aa_l.angle();
+        }
+        if (right_id >= 0) {
+            Eigen::Isometry3d curr_r = Eigen::Isometry3d::Identity();
+            curr_r.translation() = Eigen::Vector3d::Map(data->site_xpos + 3 * right_id);
+            curr_r.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(data->site_xmat + 9 * right_id).cast<double>();
+            total += (curr_r.translation() - target_r.translation()).norm();
+            Eigen::AngleAxisd aa_r(curr_r.linear().transpose() * target_r.linear());
+            total += aa_r.angle();
+        }
+        return total;
+    };
+
+    double e0 = evaluate_error(d0_);
+    double e1 = evaluate_error(d1_);
+    double e2 = evaluate_error(d2_);
+
+    double errors[3] = {e0, e1, e2};
+    int best_idx = current_best_idx_;
+    double best_err = errors[current_best_idx_];
+
+    for (int i = 0; i < 3; i++) {
+        // Use hysteresis of 1e-4 rad/m to prevent floating point jitter
+        if (i != current_best_idx_ && errors[i] < best_err - 1e-4) {
+            best_idx = i;
+            best_err = errors[i];
+        }
+    }
+
+    current_best_idx_ = best_idx;
+    StepResult best_res = r0;
+
+    if (best_idx == 0) {
+        mj_copyData(d, m_, d0_);
+        err_hist = err0; dist_hist = dist0;
+        best_res = r0;
+    } else if (best_idx == 1) {
+        mj_copyData(d, m_, d1_);
+        err_hist = err1; dist_hist = dist1;
+        best_res = r1;
+    } else {
+        mj_copyData(d, m_, d2_);
+        err_hist = err2; dist_hist = dist2;
+        best_res = r2;
+    }
+
+    return best_res;
 }
 
 } // namespace ffw_ik
