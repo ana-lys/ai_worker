@@ -7,6 +7,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "std_msgs/msg/string.hpp"
 
 using std::placeholders::_1;
 
@@ -46,6 +47,11 @@ public:
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
       "joy", 10, std::bind(&SpaceMouseMapper::joy_callback, this, _1));
 
+    mode_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+          current_mode_ = msg->data;
+      });
+
     // Initialize pose at origin
     ee_goal_ = Eigen::Isometry3d::Identity();
 
@@ -68,6 +74,8 @@ private:
 
   void control_timer_callback()
   {
+    if (current_mode_ == "BASE") return;
+
     sensor_msgs::msg::Joy joy;
     {
       std::lock_guard<std::mutex> lock(joy_mutex_);
@@ -179,6 +187,7 @@ private:
   }
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
 
@@ -186,6 +195,7 @@ private:
   std::mutex joy_mutex_;
   sensor_msgs::msg::Joy latest_joy_;
   bool joy_received_ {false};
+  std::string current_mode_ {"BASE"};
 
   Eigen::Isometry3d ee_goal_;
   double command_dt_ {0.01};

@@ -33,6 +33,9 @@
 #include <mujoco/mujoco.h>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/joy.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
+#include <trajectory_msgs/msg/joint_trajectory_point.hpp>
 
 // ============================================================
 // Minimal GLFW / MuJoCo viewer
@@ -311,15 +314,40 @@ public:
     joy_sub_r_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/right/joy", 10, std::bind(&TeleopNode::joy_callback_r, this, _1));
 
-    joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
-        "joint_states", 10);
+    this->declare_parameter("hardware_mode", false);
+    hardware_mode_ = this->get_parameter("hardware_mode").as_bool();
 
-    swap_check_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(100),
-        std::bind(&TeleopNode::swap_check_callback, this));
+    mode_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            if (msg->data == "ARM" && current_mode_ == "BASE") {
+                if (hardware_mode_) {
+                    hardware_sync_requested_ = true;
+                }
+            }
+            current_mode_ = msg->data;
+        });
+
+    if (!hardware_mode_) {
+        joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
+            "joint_states", 10);
+    } else {
+        real_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+            "/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+                std::lock_guard<std::mutex> lock(pose_mutex_);
+                latest_real_joints_ = *msg;
+            });
+    }
+
+    left_traj_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+        "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory", 10);
+    right_traj_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+        "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory", 10);
+    lift_traj_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+        "/leader/joystick_controller_right/joint_trajectory", 10);
 
     RCLCPP_INFO(this->get_logger(),
-                "SpaceMouse IK Teleop started! Listening to both arms.");
+                "SpaceMouse IK Teleop started! Hardware Mode: %s", hardware_mode_ ? "TRUE" : "FALSE");
   }
 
   void set_initial_poses(const Eigen::Isometry3d &l,
@@ -370,19 +398,147 @@ public:
   }
 
   void publish_joints(mjModel *m, mjData *d) {
-    sensor_msgs::msg::JointState msg;
-    msg.header.stamp = this->now();
-    for (int i = 0; i < m->njnt; ++i) {
-      if (m->jnt_type[i] == mjJNT_HINGE || m->jnt_type[i] == mjJNT_SLIDE) {
-        const char *name = mj_id2name(m, mjOBJ_JOINT, i);
-        if (name) {
-          msg.name.push_back(name);
-          msg.position.push_back(d->qpos[m->jnt_qposadr[i]]);
+    if (!hardware_mode_ && joint_pub_) {
+      sensor_msgs::msg::JointState msg;
+      msg.header.stamp = this->now();
+      for (int i = 0; i < m->njnt; ++i) {
+        if (m->jnt_type[i] == mjJNT_HINGE || m->jnt_type[i] == mjJNT_SLIDE) {
+          const char *name = mj_id2name(m, mjOBJ_JOINT, i);
+          if (name) {
+            msg.name.push_back(name);
+            msg.position.push_back(d->qpos[m->jnt_qposadr[i]]);
+          }
         }
       }
+      joint_pub_->publish(msg);
     }
-    joint_pub_->publish(msg);
+    
+    if (current_mode_ == "ARM") {
+      publish_arm_trajectory(m, d, "l");
+      publish_arm_trajectory(m, d, "r");
+      publish_lift_trajectory(m, d);
+    }
   }
+
+  void publish_arm_trajectory(mjModel *m, mjData *d, const std::string& prefix) {
+      trajectory_msgs::msg::JointTrajectory traj;
+      traj.header.stamp = rclcpp::Time(0); // instant execution
+      
+      std::vector<std::string> joint_names = {
+          "arm_" + prefix + "_joint1", "arm_" + prefix + "_joint2", "arm_" + prefix + "_joint3",
+          "arm_" + prefix + "_joint4", "arm_" + prefix + "_joint5", "arm_" + prefix + "_joint6",
+          "arm_" + prefix + "_joint7", "gripper_" + prefix + "_joint1"
+      };
+      
+      trajectory_msgs::msg::JointTrajectoryPoint point;
+      point.time_from_start.sec = 0;
+      point.time_from_start.nanosec = 0;
+      
+      for (const auto& name : joint_names) {
+          traj.joint_names.push_back(name);
+          if (name == "gripper_l_joint1") {
+              point.positions.push_back(gripper_l_pos_);
+          } else if (name == "gripper_r_joint1") {
+              point.positions.push_back(gripper_r_pos_);
+          } else {
+              int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
+              if (jnt_id >= 0) {
+                  point.positions.push_back(d->qpos[m->jnt_qposadr[jnt_id]]);
+              } else {
+                  point.positions.push_back(0.0);
+              }
+          }
+          point.velocities.push_back(0.0);
+      }
+      
+      static std::vector<double> prev_positions_l;
+      static std::vector<double> prev_positions_r;
+      std::vector<double>& prev_positions = (prefix == "l") ? prev_positions_l : prev_positions_r;
+      
+      bool changed = false;
+      if (prev_positions.size() != point.positions.size()) {
+          changed = true;
+      } else {
+          for (size_t i = 0; i < point.positions.size(); ++i) {
+              if (std::abs(point.positions[i] - prev_positions[i]) > 1e-4) {
+                  changed = true;
+                  break;
+              }
+          }
+      }
+      
+      if (!changed) return;
+      prev_positions = point.positions;
+      
+      traj.points.push_back(point);
+      if (prefix == "l") left_traj_pub_->publish(traj);
+      else right_traj_pub_->publish(traj);
+  }
+
+  void publish_lift_trajectory(mjModel *m, mjData *d) {
+      trajectory_msgs::msg::JointTrajectory traj;
+      traj.header.stamp = rclcpp::Time(0); // instant execution
+      
+      traj.joint_names.push_back("lift_joint");
+      
+      trajectory_msgs::msg::JointTrajectoryPoint point;
+      point.time_from_start.sec = 0;
+      point.time_from_start.nanosec = 0;
+      
+      int jnt_id = mj_name2id(m, mjOBJ_JOINT, "lift_joint");
+      if (jnt_id >= 0) {
+          point.positions.push_back(d->qpos[m->jnt_qposadr[jnt_id]]);
+      } else {
+          point.positions.push_back(0.0);
+      }
+      point.velocities.push_back(0.0);
+      
+      traj.points.push_back(point);
+      if (lift_traj_pub_) {
+          lift_traj_pub_->publish(traj);
+      }
+  }
+
+  void apply_hardware_sync(mjModel *m, mjData *d) {
+      std::lock_guard<std::mutex> lock(pose_mutex_);
+      if (!hardware_sync_requested_) return;
+
+      for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
+          std::string name = latest_real_joints_.name[i];
+          if (name == "gripper_l_joint1") gripper_l_pos_ = latest_real_joints_.position[i];
+          if (name == "gripper_r_joint1") gripper_r_pos_ = latest_real_joints_.position[i];
+          if (name.find("gripper") != std::string::npos) continue; // Skip grippers
+          
+          int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
+          if (jnt_id >= 0) {
+              d->qpos[m->jnt_qposadr[jnt_id]] = latest_real_joints_.position[i];
+          }
+      }
+      
+      mj_forward(m, d);
+      
+      int left_id = mj_name2id(m, mjOBJ_SITE, "left_gripper_site");
+      int right_id = mj_name2id(m, mjOBJ_SITE, "right_gripper_site");
+      
+      if (left_id >= 0) {
+          initial_l_.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
+          initial_l_.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * left_id).cast<double>();
+          target_l_ = initial_l_;
+          accum_l_trans_.setZero();
+          accum_l_rot_.setIdentity();
+      }
+      if (right_id >= 0) {
+          initial_r_.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+          initial_r_.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * right_id).cast<double>();
+          target_r_ = initial_r_;
+          accum_r_trans_.setZero();
+          accum_r_rot_.setIdentity();
+      }
+
+      hardware_sync_requested_ = false;
+      RCLCPP_INFO(this->get_logger(), "Hardware sync complete! Snapped MuJoCo to real robot.");
+  }
+
 
 private:
   void pose_callback_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -405,19 +561,11 @@ private:
     last_mapper_l_trans_ = trans;
     last_mapper_l_rot_ = rot_mat;
 
-    if (!swapped_) {
-      accum_l_trans_ += delta_trans;
-      accum_l_rot_ = delta_rot * accum_l_rot_;
-      target_l_.translation() = initial_l_.translation() + accum_l_trans_;
-      target_l_.linear() = accum_l_rot_ * initial_l_.linear();
-      clamp_target_angle(target_l_, initial_l_, accum_l_rot_);
-    } else {
-      accum_r_trans_ += delta_trans;
-      accum_r_rot_ = delta_rot * accum_r_rot_;
-      target_r_.translation() = initial_r_.translation() + accum_r_trans_;
-      target_r_.linear() = accum_r_rot_ * initial_r_.linear();
-      clamp_target_angle(target_r_, initial_r_, accum_r_rot_);
-    }
+    accum_l_trans_ += delta_trans;
+    accum_l_rot_ = delta_rot * accum_l_rot_;
+    target_l_.translation() = initial_l_.translation() + accum_l_trans_;
+    target_l_.linear() = accum_l_rot_ * initial_l_.linear();
+    clamp_target_angle(target_l_, initial_l_, accum_l_rot_);
   }
 
   void pose_callback_r(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -440,56 +588,28 @@ private:
     last_mapper_r_trans_ = trans;
     last_mapper_r_rot_ = rot_mat;
 
-    if (!swapped_) {
-      accum_r_trans_ += delta_trans;
-      accum_r_rot_ = delta_rot * accum_r_rot_;
-      target_r_.translation() = initial_r_.translation() + accum_r_trans_;
-      target_r_.linear() = accum_r_rot_ * initial_r_.linear();
-      clamp_target_angle(target_r_, initial_r_, accum_r_rot_);
-    } else {
-      accum_l_trans_ += delta_trans;
-      accum_l_rot_ = delta_rot * accum_l_rot_;
-      target_l_.translation() = initial_l_.translation() + accum_l_trans_;
-      target_l_.linear() = accum_l_rot_ * initial_l_.linear();
-      clamp_target_angle(target_l_, initial_l_, accum_l_rot_);
-    }
+    accum_r_trans_ += delta_trans;
+    accum_r_rot_ = delta_rot * accum_r_rot_;
+    target_r_.translation() = initial_r_.translation() + accum_r_trans_;
+    target_r_.linear() = accum_r_rot_ * initial_r_.linear();
+    clamp_target_angle(target_r_, initial_r_, accum_r_rot_);
   }
 
   void joy_callback_l(const sensor_msgs::msg::Joy::SharedPtr msg) {
-    if (msg->buttons.size() >= 2) {
-      left_btn0_ = (msg->buttons[0] == 1);
-      left_btn1_ = (msg->buttons[1] == 1);
+    if (msg->buttons.empty()) return;
+    left_btn0_ = (msg->buttons[0] == 1);
+    left_btn1_ = false;
+    for (size_t i = 1; i < msg->buttons.size(); ++i) {
+        if (msg->buttons[i] == 1) left_btn1_ = true;
     }
   }
 
   void joy_callback_r(const sensor_msgs::msg::Joy::SharedPtr msg) {
-    if (msg->buttons.size() >= 2) {
-      right_btn0_ = (msg->buttons[0] == 1);
-      right_btn1_ = (msg->buttons[1] == 1);
-    }
-  }
-
-  void swap_check_callback() {
-    auto now = this->now();
-    if (left_btn0_ && right_btn0_) {
-      if (swap_timer_start_.nanoseconds() == 0) {
-        swap_timer_start_ = now;
-        RCLCPP_INFO(this->get_logger(),
-                    "Both Left buttons held. Starting 5s swap timer...");
-      } else if ((now - swap_timer_start_).seconds() >= 5.0) {
-        if ((now - last_swap_time_).seconds() >= 5.0) {
-          swapped_ = !swapped_;
-          last_swap_time_ = now;
-          RCLCPP_INFO(this->get_logger(),
-                      "SWAP TRIGGERED! ARMS HAVE BEEN SWAPPED.");
-        }
-      }
-    } else {
-      if (swap_timer_start_.nanoseconds() != 0 &&
-          (now - swap_timer_start_).seconds() < 5.0) {
-        RCLCPP_INFO(this->get_logger(), "Swap cancelled. Buttons released.");
-      }
-      swap_timer_start_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    if (msg->buttons.empty()) return;
+    right_btn0_ = (msg->buttons[0] == 1);
+    right_btn1_ = false;
+    for (size_t i = 1; i < msg->buttons.size(); ++i) {
+        if (msg->buttons[i] == 1) right_btn1_ = true;
     }
   }
 
@@ -534,18 +654,47 @@ private:
   Eigen::Vector3d accum_r_trans_ = Eigen::Vector3d::Zero();
   Eigen::Matrix3d accum_r_rot_ = Eigen::Matrix3d::Identity();
 
-  bool swapped_ = false;
   bool left_btn0_ = false, left_btn1_ = false;
   bool right_btn0_ = false, right_btn1_ = false;
-  rclcpp::Time swap_timer_start_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
-  rclcpp::Time last_swap_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+  
+  double gripper_l_pos_ = 1.1;
+  double gripper_r_pos_ = 1.1;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_l_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_r_;
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_l_;
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_r_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr real_joint_sub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
-  rclcpp::TimerBase::SharedPtr swap_check_timer_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr left_traj_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr right_traj_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr lift_traj_pub_;
+
+  bool hardware_mode_ = false;
+  bool hardware_sync_requested_ = false;
+  std::string current_mode_ = "BASE";
+  sensor_msgs::msg::JointState latest_real_joints_;
+
+public:
+  std::string get_current_mode() const { return current_mode_; }
+  void update_grippers(mjModel *m, mjData *d) {
+      if (current_mode_ != "ARM") return;
+      
+      if (left_btn0_) gripper_l_pos_ += 0.01; // close
+      if (left_btn1_) gripper_l_pos_ -= 0.01; // open
+      gripper_l_pos_ = std::clamp(gripper_l_pos_, 0.0, 1.2);
+
+      if (right_btn0_) gripper_r_pos_ += 0.01; // close
+      if (right_btn1_) gripper_r_pos_ -= 0.01; // open
+      gripper_r_pos_ = std::clamp(gripper_r_pos_, 0.0, 1.2);
+
+      static int log_counter = 0;
+      if ((left_btn0_ || left_btn1_ || right_btn0_ || right_btn1_) && log_counter++ % 50 == 0) {
+          RCLCPP_INFO(this->get_logger(), "Grippers -> L: %.2f (btns: %d, %d) | R: %.2f (btns: %d, %d)",
+                      gripper_l_pos_, left_btn0_, left_btn1_, gripper_r_pos_, right_btn0_, right_btn1_);
+      }
+  }
 };
 
 int main(int argc, char **argv) {
@@ -614,7 +763,7 @@ int main(int argc, char **argv) {
   ffw_ik::SolverConfig solver_cfg;
   solver_cfg.damping = 2e-3;
   solver_cfg.step_size = 0.15;
-  solver_cfg.tolerance = 5e-3;
+  solver_cfg.tolerance = 2.5e-3; // 0.25cm
   solver_cfg.track_orientation = true;
 
   // Loosen stall conditions to prevent giving up during slow teleop
@@ -659,27 +808,21 @@ int main(int argc, char **argv) {
     prev_target_r = current_target_r;
 
     // Run one gradient step using the single solver
-    ffw_ik::StepResult res =
-        solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
-                         col_cfg, err_hist, dist_hist);
+    if (node->get_current_mode() == "ARM") {
+      ffw_ik::StepResult res =
+          solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
+                           col_cfg, err_hist, dist_hist);
 
-    // Print solver status every 20 ticks or if stalled
-    if (++step_counter % 20 == 0 || res.stalled) {
-      std::cout << "\n--- Step " << step_counter << " ---" << std::endl;
-
-      Eigen::Isometry3d curr_r = Eigen::Isometry3d::Identity();
-      curr_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
-      double pos_err =
-          (curr_r.translation() - current_target_r.translation()).norm();
-      std::cout << "Target R pos: "
-                << current_target_r.translation().transpose() << std::endl;
-      std::cout << "Current R pos: " << curr_r.translation().transpose()
-                << std::endl;
-      std::cout << "Pos error: " << pos_err << std::endl;
-      if (res.stalled) {
-        std::cout << "[WARNING] Solver STALLED!" << std::endl;
+      // Print solver status every 20 ticks or if stalled
+      if (++step_counter % 20 == 0 || res.stalled) {
+        // Reduced verbosity
       }
+      
+      node->update_grippers(m, d);
     }
+
+    // Process any hardware sync requests before mj_forward
+    node->apply_hardware_sync(m, d);
 
     // Ensure simulation state is updated for rendering
     mj_forward(m, d);

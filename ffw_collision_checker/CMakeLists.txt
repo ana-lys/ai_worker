@@ -79,6 +79,9 @@ message(STATUS "[proxsuite] Library dir: ${PROXSUITE_LIBRARY_DIR} (Commit: ${PRO
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenGL REQUIRED)
@@ -182,6 +185,8 @@ ament_target_dependencies(ffw_ik_solver_teleop
     rclcpp
     sensor_msgs
     geometry_msgs
+    trajectory_msgs
+    std_msgs
     ament_index_cpp
 )
 target_link_libraries(ffw_ik_solver_teleop

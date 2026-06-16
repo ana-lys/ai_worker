@@ -49,9 +49,13 @@ else()
   target_link_libraries(spacemouse_mapper ffw_ik_solver_lib)
 endif()
 
+add_executable(spacemouse_base_teleop src/spacemouse_base_teleop.cpp)
+ament_target_dependencies(spacemouse_base_teleop rclcpp sensor_msgs geometry_msgs trajectory_msgs)
+
 # Install C++ executable
 install(TARGETS
   spacemouse_mapper
+  spacemouse_base_teleop
   DESTINATION lib/${PROJECT_NAME}
 )
 
