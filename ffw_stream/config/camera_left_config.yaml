@@ -1,0 +1,31 @@
+/**:
+  ros__parameters:
+    target_ip: "100.83.72.18"
+    target_port: 8080
+    chunk_size: 60000
+    
+    # Left Camera Device ID
+    device_id: "230422272589"
+
+    # Which streams to enable
+    enable_rgb: false
+    enable_depth: true
+    enable_ir: true
+
+    # RGB settings (Ignored since enable_rgb is false)
+    rgb_width: 640
+    rgb_height: 480
+    rgb_format: "RGB8"
+    rgb_fps: 15
+
+    # Depth settings (424x240 fits USB 2.0 bandwidth at 30fps)
+    depth_width: 424
+    depth_height: 240
+    depth_format: "Z16"
+    depth_fps: 30
+
+    # IR settings (424x240 fits USB 2.0 bandwidth at 30fps)
+    ir_width: 424
+    ir_height: 240
+    ir_format: "Y8"
+    ir_fps: 30
