@@ -11,6 +11,12 @@
 
 using std::placeholders::_1;
 
+struct ButtonClickState {
+    double last_press_time_sec = 0.0;
+    int count = 0;
+    bool prev_pressed = false;
+};
+
 class SpaceMouseMapper : public rclcpp::Node
 {
 public:
@@ -67,9 +73,39 @@ public:
 private:
   void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
   {
-    std::lock_guard<std::mutex> lock(joy_mutex_);
-    latest_joy_ = *msg;
-    joy_received_ = true;
+    {
+      std::lock_guard<std::mutex> lock(joy_mutex_);
+      latest_joy_ = *msg;
+      joy_received_ = true;
+    }
+
+    // Check buttons for double-click precision mode switch
+    std::lock_guard<std::mutex> lock(button_mutex_);
+    for (size_t i = 0; i < msg->buttons.size() && i < 2; ++i) {
+        bool pressed = msg->buttons[i] > 0;
+        if (pressed && !clicks_[i].prev_pressed) {
+            double now = this->now().seconds();
+            if ((now - clicks_[i].last_press_time_sec) > 0.5) {
+                clicks_[i].count = 1;
+            } else {
+                clicks_[i].count++;
+            }
+            clicks_[i].last_press_time_sec = now;
+        }
+        clicks_[i].prev_pressed = pressed;
+    }
+    
+    double now = this->now().seconds();
+    auto is_dc = [now](const ButtonClickState& state) {
+        return state.count >= 2 && (now - state.last_press_time_sec) < 1.0;
+    };
+    
+    if (is_dc(clicks_[0]) && is_dc(clicks_[1])) {
+        precision_mode_ = !precision_mode_;
+        RCLCPP_INFO(this->get_logger(), "PRECISION MODE TOGGLED: %s", precision_mode_ ? "ON" : "OFF");
+        clicks_[0].count = 0;
+        clicks_[1].count = 0;
+    }
   }
 
   void control_timer_callback()
@@ -108,6 +144,9 @@ private:
       trans_norm = 1.0;
     }
     Eigen::Vector3d trans_scaled = trans_raw * (trans_norm * trans_norm); // Cubic magnitude
+    if (precision_mode_) {
+      trans_scaled *= 0.1;
+    }
     double dx = trans_scaled.x();
     double dy = trans_scaled.y();
     double dz = trans_scaled.z();
@@ -126,6 +165,9 @@ private:
       rot_norm = 1.0;
     }
     Eigen::Vector3d rot_scaled = rot_raw * (rot_norm * rot_norm); // Cubic magnitude
+    if (precision_mode_) {
+      rot_scaled *= 0.1;
+    }
     double drx = rot_scaled.x();
     double dry = rot_scaled.y();
     double drz = rot_scaled.z();
@@ -199,6 +241,10 @@ private:
 
   Eigen::Isometry3d ee_goal_;
   double command_dt_ {0.01};
+  
+  std::mutex button_mutex_;
+  std::vector<ButtonClickState> clicks_{2};
+  bool precision_mode_ {false};
 };
 
 int main(int argc, char * argv[])
