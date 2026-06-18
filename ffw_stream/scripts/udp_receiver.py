@@ -18,11 +18,10 @@ sock_right.bind((UDP_IP, 8081))
 
 sockets = [sock_left, sock_right]
 
-# Buffer to hold chunks for the current frames for each camera
-# stream_type: 0=Color, 1=Depth, 2=IR
-frame_buffers = {
-    sock_left: {0: {}, 1: {}, 2: {}},
-    sock_right: {0: {}, 1: {}, 2: {}}
+# Persistent byte arrays to hold the raw frame data for robust assembly
+persistent_buffers = {
+    sock_left: {0: None, 1: None, 2: None},
+    sock_right: {0: None, 1: None, 2: None}
 }
 
 # 4(I) + 1(B) + 4(I) + 2(H) + 2(H) + 4(I) + 4(I) + 4(I) + 4(I) = 29 bytes
@@ -49,31 +48,19 @@ while True:
         
         payload = packet[HEADER_SIZE:]
         
-        buffers = frame_buffers[s]
-        
-        if frame_id not in buffers[stream_type]:
-            buffers[stream_type][frame_id] = {
-                'chunks_received': 0,
-                'total_chunks': total_chunks,
-                'chunks': {},
-                'width': width,
-                'height': height,
-            }
+        if persistent_buffers[s][stream_type] is None or len(persistent_buffers[s][stream_type]) != total_size:
+            persistent_buffers[s][stream_type] = bytearray(total_size)
             
-        buf = buffers[stream_type][frame_id]
+        start_idx = chunk_index * chunk_size
+        end_idx = start_idx + len(payload)
         
-        # Store chunk payload
-        if chunk_index not in buf['chunks']:
-            buf['chunks'][chunk_index] = payload
-            buf['chunks_received'] += 1
+        # Robustly copy payload directly into the persistent frame buffer
+        persistent_buffers[s][stream_type][start_idx:end_idx] = payload
         
-        # If all chunks for this frame are received, display it
-        if buf['chunks_received'] == buf['total_chunks']:
-            # Assemble
-            assembled_data = bytearray()
-            for i in range(buf['total_chunks']):
-                assembled_data.extend(buf['chunks'].get(i, b''))
-                
+        # If we received the last chunk of the frame, display it!
+        # (Even if intermediate chunks were dropped by the network, we still display it to maintain framerate)
+        if chunk_index == total_chunks - 1:
+            assembled_data = persistent_buffers[s][stream_type]
             prefix = "Left" if s == sock_left else "Right"
                 
             try:
@@ -87,7 +74,6 @@ while True:
                     img = np.frombuffer(assembled_data, dtype=np.uint16).reshape((height, width))
                     
                     # D405 default depth scale is usually 0.1mm per unit
-                    # Clamp at 0.3 meters (3000 units)
                     MAX_DEPTH_UNITS = 3000
                     
                     img_clamped = np.clip(img, 0, MAX_DEPTH_UNITS)
@@ -103,10 +89,5 @@ while True:
                     
             except Exception as e:
                 print(f"Failed to display frame: {e}")
-                
-            # Clean up this frame and any older frames to prevent memory leaks
-            keys_to_delete = [fid for fid in buffers[stream_type].keys() if fid <= frame_id]
-            for fid in keys_to_delete:
-                del buffers[stream_type][fid]
                 
     cv2.waitKey(1) # Needs to be called to update OpenCV windows
