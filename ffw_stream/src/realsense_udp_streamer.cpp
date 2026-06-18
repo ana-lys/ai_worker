@@ -123,7 +123,18 @@ public:
 
         try {
             profile_ = pipe_.start(cfg);
-            RCLCPP_INFO(this->get_logger(), "RealSense pipeline started successfully.");
+            
+            // HARD-LOCK TO 30 FPS: 
+            // By default, RealSense firmware lowers the framerate in low-light conditions to increase exposure time.
+            // Disabling 'AUTO_EXPOSURE_PRIORITY' forces the camera to maintain strict 30 FPS even if the image gets dark.
+            auto dev = profile_.get_device();
+            for (auto& sensor : dev.query_sensors()) {
+                if (sensor.supports(RS2_OPTION_AUTO_EXPOSURE_PRIORITY)) {
+                    sensor.set_option(RS2_OPTION_AUTO_EXPOSURE_PRIORITY, 0.0f);
+                }
+            }
+            
+            RCLCPP_INFO(this->get_logger(), "RealSense pipeline started successfully. Hardware locked to requested FPS.");
         } catch (const rs2::error & e) {
             RCLCPP_ERROR(this->get_logger(), "RealSense config error: %s", e.what());
             return;
