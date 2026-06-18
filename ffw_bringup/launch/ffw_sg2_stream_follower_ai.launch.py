@@ -289,6 +289,7 @@ def generate_launch_description():
     )
 
     # Camera UDP stream launch include
+    bringup_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_bringup'), 'launch'])
     stream_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_stream'), 'launch'])
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([stream_launch_dir,
