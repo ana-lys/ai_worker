@@ -199,10 +199,10 @@ private:
                 continue;
             }
 
-            if (frame_id > 0 && frame_id % 3600 == 0) {
+            if (frame_id > 0 && frame_id % 30 == 0) {
                 auto now = std::chrono::steady_clock::now();
                 double elapsed = std::chrono::duration<double>(now - last_time).count();
-                RCLCPP_INFO(this->get_logger(), "Capture FPS: %.1f Hz", 3600.0 / elapsed);
+                RCLCPP_INFO(this->get_logger(), "Capture FPS: %.1f Hz", 30.0 / elapsed);
                 last_time = now;
             }
 
