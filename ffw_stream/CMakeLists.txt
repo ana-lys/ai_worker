@@ -9,11 +9,15 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(realsense2 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0)
 
 add_executable(realsense_udp_streamer src/realsense_udp_streamer.cpp)
 target_include_directories(realsense_udp_streamer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
+  $<INSTALL_INTERFACE:include>
+  ${GSTREAMER_INCLUDE_DIRS}
+)
 target_compile_features(realsense_udp_streamer PUBLIC c_std_99 cxx_std_17)
 
 ament_target_dependencies(realsense_udp_streamer
@@ -22,6 +26,7 @@ ament_target_dependencies(realsense_udp_streamer
 
 target_link_libraries(realsense_udp_streamer
   realsense2::realsense2
+  ${GSTREAMER_LIBRARIES}
 )
 
 install(TARGETS realsense_udp_streamer

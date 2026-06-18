@@ -1,128 +1,145 @@
-import socket
-import struct
-import numpy as np
 import cv2
-import select
-import time
+import numpy as np
+import threading
+import gi
+gi.require_version('Gst', '1.0')
+gi.require_version('GstApp', '1.0')
+from gi.repository import Gst, GstApp, GLib
 
-UDP_IP = "0.0.0.0" # Listen on all interfaces
+Gst.init(None)
 
-# Set up socket for Left Camera (Port 8080)
-sock_left = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock_left.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024 * 10)
-sock_left.bind((UDP_IP, 8080))
-
-# Set up socket for Right Camera (Port 8081)
-sock_right = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock_right.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024 * 10)
-sock_right.bind((UDP_IP, 8081))
-
-sockets = [sock_left, sock_right]
-
-# Persistent byte arrays to hold the raw frame data for robust assembly
-persistent_buffers = {
-    sock_left: {0: None, 1: None, 2: None},
-    sock_right: {0: None, 1: None, 2: None}
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+# Based on camera_left_config.yaml and camera_right_config.yaml
+# We only receive what is being sent. If left Depth/IR are sent, we listen to those ports.
+streams = {
+    "Left RGB":   {"port": 8080, "type": "rgb"},
+    "Left Depth": {"port": 8082, "type": "depth"},
+    "Left IR":    {"port": 8084, "type": "ir"},
+    
+    "Right RGB":  {"port": 8081, "type": "rgb"},
+    "Right Depth":{"port": 8083, "type": "depth"},
+    "Right IR":   {"port": 8085, "type": "ir"}
 }
 
-fps_trackers = {} # key: (s, stream_type), value: [frames, start_time]
-last_frame_id = {}
+# ---------------------------------------------------------
+# Global Image Buffers
+# ---------------------------------------------------------
+latest_images = {k: None for k in streams.keys()}
+lock = threading.Lock()
 
-# 4(I) + 1(B) + 4(I) + 2(H) + 2(H) + 4(I) + 4(I) + 4(I) + 4(I) = 29 bytes
-HEADER_FORMAT = '<IBIHHIIII'
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+# ---------------------------------------------------------
+# GStreamer Pipeline Builders
+# ---------------------------------------------------------
+def create_pipeline(name, info):
+    port = info["port"]
+    stype = info["type"]
+    
+    if stype == "rgb":
+        # H264 decompressed to BGR
+        pipe_str = (
+            f"udpsrc port={port} ! application/x-rtp, media=video, clock-rate=90000, encoding-name=H264 ! "
+            f"rtph264depay ! decodebin ! videoconvert ! video/x-raw,format=BGR ! appsink name=sink drop=true max-buffers=1"
+        )
+    elif stype == "ir":
+        # H264 decompressed to Grayscale
+        pipe_str = (
+            f"udpsrc port={port} ! application/x-rtp, media=video, clock-rate=90000, encoding-name=H264 ! "
+            f"rtph264depay ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 ! appsink name=sink drop=true max-buffers=1"
+        )
+    elif stype == "depth":
+        # Raw 16-bit payload
+        pipe_str = (
+            f"udpsrc port={port} caps=\"application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)RAW, sampling=(string)GRAY16_LE, depth=(string)16, width=(string)480, height=(string)270\" ! "
+            f"rtpvrawdepay ! appsink name=sink drop=true max-buffers=1"
+        )
+    
+    pipeline = Gst.parse_launch(pipe_str)
+    appsink = pipeline.get_by_name("sink")
+    appsink.set_property("emit-signals", True)
+    
+    def on_new_sample(sink, name=name, stype=stype):
+        sample = sink.emit("pull-sample")
+        if not sample: return Gst.FlowReturn.OK
+        
+        buf = sample.get_buffer()
+        caps = sample.get_caps()
+        
+        # Extract metadata
+        struct = caps.get_structure(0)
+        w = struct.get_value("width")
+        h = struct.get_value("height")
+        
+        # Extract bytes
+        _, map_info = buf.map(Gst.MapFlags.READ)
+        data = map_info.data
+        
+        try:
+            if stype == "rgb":
+                img = np.ndarray((h, w, 3), buffer=data, dtype=np.uint8)
+            elif stype == "ir":
+                img = np.ndarray((h, w), buffer=data, dtype=np.uint8)
+            elif stype == "depth":
+                img = np.ndarray((h, w), buffer=data, dtype=np.uint16)
+            
+            with lock:
+                latest_images[name] = img.copy()
+        except Exception as e:
+            pass
+            
+        buf.unmap(map_info)
+        return Gst.FlowReturn.OK
 
-print(f"Listening for RealSense streams on {UDP_IP}:8080 (Left) and {UDP_IP}:8081 (Right)...")
+    appsink.connect("new-sample", on_new_sample)
+    return pipeline
+
+# ---------------------------------------------------------
+# Start Pipelines
+# ---------------------------------------------------------
+pipelines = []
+for name, info in streams.items():
+    p = create_pipeline(name, info)
+    p.set_state(Gst.State.PLAYING)
+    pipelines.append(p)
+
+print("Listening for GStreamer UDP streams...")
+print("Make sure you have python3-gst-1.0 installed.")
+
+# ---------------------------------------------------------
+# Main Display Loop
+# ---------------------------------------------------------
+import time
+fps_trackers = {k: [0, time.time()] for k in streams.keys()}
 
 while True:
-    # Use select to multiplex both sockets so we don't block on just one
-    readable, _, _ = select.select(sockets, [], [], 0.01)
-    
-    for s in readable:
-        try:
-            packet, addr = s.recvfrom(65536)
-        except BlockingIOError:
-            continue
-            
-        if len(packet) < HEADER_SIZE:
-            continue
-            
-        header_data = packet[:HEADER_SIZE]
-        frame_id, stream_type, total_size, chunk_index, total_chunks, chunk_size, width, height, format_rs = struct.unpack(HEADER_FORMAT, header_data)
-        
-        payload = packet[HEADER_SIZE:]
-        
-        if persistent_buffers[s][stream_type] is None or len(persistent_buffers[s][stream_type]) != total_size:
-            persistent_buffers[s][stream_type] = bytearray(total_size)
-            
-        start_idx = chunk_index * chunk_size
-        end_idx = start_idx + len(payload)
-        
-        # Robustly copy payload directly into the persistent frame buffer
-        persistent_buffers[s][stream_type][start_idx:end_idx] = payload
-        
-        # Track the last seen frame_id for this stream
-        if s not in last_frame_id: last_frame_id[s] = {0:-1, 1:-1, 2:-1}
-        
-        # If the sender moved on to a NEW frame_id, it means the previous frame is completely finished sending!
-        # This is the most bulletproof way to trigger a display update, guaranteeing it always fires even if the last chunk is dropped.
-        if frame_id > last_frame_id[s][stream_type]:
-            last_frame_id[s][stream_type] = frame_id
-            
-            assembled_data = persistent_buffers[s][stream_type]
-            prefix = "Left" if s == sock_left else "Right"
+    with lock:
+        for name, img in latest_images.items():
+            if img is not None:
+                display_img = img
                 
-            try:
-                if stream_type == 0: # Color (RGB8)
-                    frame_data = np.frombuffer(assembled_data, dtype=np.uint8)
-                    img = frame_data.reshape((height, width, 3))
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) # OpenCV expects BGR
-                    cv2.imshow(f"{prefix} RGB", img)
-                    
-                elif stream_type == 1: # Depth (Z16)
-                    img = np.frombuffer(assembled_data, dtype=np.uint16).reshape((height, width))
-                    
-                    # D405 default depth scale is usually 0.1mm per unit
+                # Apply colormap to depth
+                if streams[name]["type"] == "depth":
                     MAX_DEPTH_UNITS = 3000
-                    
                     img_clamped = np.clip(img, 0, MAX_DEPTH_UNITS)
                     img_normalized = (img_clamped / float(MAX_DEPTH_UNITS) * 255).astype(np.uint8)
-                    img_color = cv2.applyColorMap(img_normalized, cv2.COLORMAP_JET)
-                    
-                    cv2.imshow(f"{prefix} Depth", img_color)
-                    
-                elif stream_type == 2: # IR (D405 often outputs 16-bit or UYVY for IR)
-                    frame_data = np.frombuffer(assembled_data, dtype=np.uint8)
-                    bpp = len(frame_data) // (height * width)
-                    
-                    if bpp == 1:
-                        img = frame_data.reshape((height, width))
-                    elif bpp == 2:
-                        img_raw = frame_data.reshape((height, width, 2))
-                        img = img_raw[:, :, 1]
-                    elif bpp == 3:
-                        img = frame_data.reshape((height, width, 3))
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                    else:
-                        img = np.zeros((height, width), dtype=np.uint8)
-                        
-                    cv2.imshow(f"{prefix} IR", img)
-                    
-            except Exception as e:
-                # ignore silent errors from incomplete partial frames when initializing
-                pass
+                    display_img = cv2.applyColorMap(img_normalized, cv2.COLORMAP_JET)
                 
-            # FPS tracking
-            tracker_key = (s, stream_type)
-            if tracker_key not in fps_trackers:
-                fps_trackers[tracker_key] = [0, time.time()]
-            fps_trackers[tracker_key][0] += 1
-            
-            if fps_trackers[tracker_key][0] == 30:
-                elapsed = time.time() - fps_trackers[tracker_key][1]
-                fps = 30.0 / elapsed
-                stream_name = "RGB" if stream_type == 0 else "Depth" if stream_type == 1 else "IR"
-                print(f"[{prefix} {stream_name}] Receiver FPS: {fps:.1f} Hz")
-                fps_trackers[tracker_key] = [0, time.time()]
+                cv2.imshow(name, display_img)
+                latest_images[name] = None
                 
-    cv2.waitKey(1) # Needs to be called to update OpenCV windows
+                # Track FPS
+                fps_trackers[name][0] += 1
+                if fps_trackers[name][0] == 30:
+                    elapsed = time.time() - fps_trackers[name][1]
+                    fps = 30.0 / elapsed
+                    print(f"[{name}] Receiver FPS: {fps:.1f} Hz")
+                    fps_trackers[name] = [0, time.time()]
+
+    key = cv2.waitKey(1)
+    if key == 27 or key == ord('q'):
+        break
+
+for p in pipelines:
+    p.set_state(Gst.State.NULL)
+cv2.destroyAllWindows()
