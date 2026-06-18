@@ -1,6 +1,8 @@
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler, EmitEvent
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -78,6 +80,16 @@ def generate_launch_description():
         }]
     )
 
+    # Failsafe shutdown event
+    failsafe_event = RegisterEventHandler(
+        OnProcessExit(
+            target_action=base_teleop_node,
+            on_exit=[
+                EmitEvent(event=Shutdown(reason='SpaceMouse Base Teleop terminated due to Joint State Failsafe!'))
+            ]
+        )
+    )
+
     return LaunchDescription([
         hardware_mode_arg,
         left_device_id_arg,
@@ -85,5 +97,6 @@ def generate_launch_description():
         left_mapper,
         right_mapper,
         base_teleop_node,
-        ik_solver_node
+        ik_solver_node,
+        failsafe_event
     ])

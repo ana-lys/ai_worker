@@ -8,14 +8,9 @@
 #include "sensor_msgs/msg/joy.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 using std::placeholders::_1;
-
-struct ButtonClickState {
-    double last_press_time_sec = 0.0;
-    int count = 0;
-    bool prev_pressed = false;
-};
 
 class SpaceMouseMapper : public rclcpp::Node
 {
@@ -58,6 +53,11 @@ public:
           current_mode_ = msg->data;
       });
 
+    precision_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/spacemouse/" + target_arm_ + "/precision_mode", 10, [this](const std_msgs::msg::Bool::SharedPtr msg) {
+          precision_mode_ = msg->data;
+      });
+
     // Initialize pose at origin
     ee_goal_ = Eigen::Isometry3d::Identity();
 
@@ -73,39 +73,9 @@ public:
 private:
   void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
   {
-    {
-      std::lock_guard<std::mutex> lock(joy_mutex_);
-      latest_joy_ = *msg;
-      joy_received_ = true;
-    }
-
-    // Check buttons for double-click precision mode switch
-    std::lock_guard<std::mutex> lock(button_mutex_);
-    for (size_t i = 0; i < msg->buttons.size() && i < 2; ++i) {
-        bool pressed = msg->buttons[i] > 0;
-        if (pressed && !clicks_[i].prev_pressed) {
-            double now = this->now().seconds();
-            if ((now - clicks_[i].last_press_time_sec) > 0.5) {
-                clicks_[i].count = 1;
-            } else {
-                clicks_[i].count++;
-            }
-            clicks_[i].last_press_time_sec = now;
-        }
-        clicks_[i].prev_pressed = pressed;
-    }
-    
-    double now = this->now().seconds();
-    auto is_dc = [now](const ButtonClickState& state) {
-        return state.count >= 2 && (now - state.last_press_time_sec) < 1.0;
-    };
-    
-    if (is_dc(clicks_[0]) && is_dc(clicks_[1])) {
-        precision_mode_ = !precision_mode_;
-        RCLCPP_INFO(this->get_logger(), "PRECISION MODE TOGGLED: %s", precision_mode_ ? "ON" : "OFF");
-        clicks_[0].count = 0;
-        clicks_[1].count = 0;
-    }
+    std::lock_guard<std::mutex> lock(joy_mutex_);
+    latest_joy_ = *msg;
+    joy_received_ = true;
   }
 
   void control_timer_callback()
@@ -230,6 +200,7 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr precision_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
 
@@ -242,8 +213,6 @@ private:
   Eigen::Isometry3d ee_goal_;
   double command_dt_ {0.01};
   
-  std::mutex button_mutex_;
-  std::vector<ButtonClickState> clicks_{2};
   bool precision_mode_ {false};
 };
 

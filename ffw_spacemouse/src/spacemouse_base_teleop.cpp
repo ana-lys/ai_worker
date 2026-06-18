@@ -13,6 +13,7 @@
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "trajectory_msgs/msg/joint_trajectory_point.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 using std::placeholders::_1;
 
@@ -82,18 +83,31 @@ public:
     head_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
       this->get_parameter("head_topic").as_string(), 10);
     mode_pub_ = this->create_publisher<std_msgs::msg::String>("/teleop_mode", 10);
+    left_precision_pub_ = this->create_publisher<std_msgs::msg::Bool>("/spacemouse/left/precision_mode", 10);
+    right_precision_pub_ = this->create_publisher<std_msgs::msg::Bool>("/spacemouse/right/precision_mode", 10);
 
     // Initial state
     current_lift_pos_ = 0.0;
     current_head_pos_ = {0.0, 0.0};
     current_mode_ = "BASE";
     
+    // Failsafe timer (checks every 1.0 seconds)
+    failsafe_timer_ = this->create_wall_timer(
+      std::chrono::seconds(1),
+      std::bind(&SpaceMouseBaseTeleop::failsafe_check, this));
+    
     // Publish initial mode after a short delay
     std::thread([this]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        
         std_msgs::msg::String mode_msg;
         mode_msg.data = current_mode_;
         mode_pub_->publish(mode_msg);
+        
+        std_msgs::msg::Bool prec_msg;
+        prec_msg.data = false;
+        left_precision_pub_->publish(prec_msg);
+        right_precision_pub_->publish(prec_msg);
     }).detach();
 
     RCLCPP_INFO(this->get_logger(), "SpaceMouse Base Teleop Started. Mode: %s", current_mode_.c_str());
@@ -102,6 +116,7 @@ public:
 private:
   void joint_state_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
   {
+    joint_state_count_++;
     std::lock_guard<std::mutex> lock(joint_mutex_);
     
     for (size_t i = 0; i < msg->name.size(); ++i) {
@@ -143,7 +158,7 @@ private:
             }
             left_clicks_[i].prev_pressed = pressed;
         }
-        check_four_button_double_click();
+        check_button_double_clicks();
     }
 
     // Base control (Swerve)
@@ -183,7 +198,7 @@ private:
             }
             right_clicks_[i].prev_pressed = pressed;
         }
-        check_four_button_double_click();
+        check_button_double_clicks();
     }
 
     // Auxiliary control (Lift & Head)
@@ -243,6 +258,9 @@ private:
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr lift_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr left_precision_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr right_precision_pub_;
+  rclcpp::TimerBase::SharedPtr failsafe_timer_;
 
   std::mutex joint_mutex_;
   double current_lift_pos_;
@@ -257,16 +275,33 @@ private:
   std::mutex button_mutex_;
   std::vector<ButtonClickState> left_clicks_{2};
   std::vector<ButtonClickState> right_clicks_{2};
+  
+  bool left_precision_mode_ {false};
+  bool right_precision_mode_ {false};
+  int joint_state_count_ {0};
+  int failsafe_check_cycles_ {0};
 
-  void check_four_button_double_click() {
+  void failsafe_check() {
+      failsafe_check_cycles_++;
+      if (failsafe_check_cycles_ > 3) { // Start checking after 3 seconds to allow startup
+          if (joint_state_count_ < 70) {
+              RCLCPP_FATAL(this->get_logger(), "CRITICAL: Joint states Hz dropped to %d! Failsafe triggering shutdown.", joint_state_count_);
+              rclcpp::shutdown();
+          }
+      }
+      joint_state_count_ = 0;
+  }
+
+  void check_button_double_clicks() {
       double now = this->now().seconds();
       auto is_dc = [now](const ButtonClickState& state) {
           return state.count >= 2 && (now - state.last_press_time_sec) < 1.0;
       };
       
-      if (is_dc(left_clicks_[0]) && is_dc(left_clicks_[1]) && 
-          is_dc(right_clicks_[0]) && is_dc(right_clicks_[1])) {
-          
+      bool left_dc = is_dc(left_clicks_[0]) && is_dc(left_clicks_[1]);
+      bool right_dc = is_dc(right_clicks_[0]) && is_dc(right_clicks_[1]);
+      
+      if (left_dc && right_dc) {
           current_mode_ = (current_mode_ == "BASE") ? "ARM" : "BASE";
           RCLCPP_INFO(this->get_logger(), "ALL FOUR BUTTONS DOUBLE CLICKED! SWITCHING MODE TO: %s", current_mode_.c_str());
           
@@ -274,10 +309,30 @@ private:
           mode_msg.data = current_mode_;
           mode_pub_->publish(mode_msg);
           
-          left_clicks_[0].count = 0;
-          left_clicks_[1].count = 0;
-          right_clicks_[0].count = 0;
-          right_clicks_[1].count = 0;
+          left_clicks_[0].count = 0; left_clicks_[1].count = 0;
+          right_clicks_[0].count = 0; right_clicks_[1].count = 0;
+      } 
+      else if (left_dc) {
+          bool right_active = (now - right_clicks_[0].last_press_time_sec < 1.0) || (now - right_clicks_[1].last_press_time_sec < 1.0);
+          if (!right_active) {
+              left_precision_mode_ = !left_precision_mode_;
+              RCLCPP_INFO(this->get_logger(), "LEFT PRECISION MODE TOGGLED: %s", left_precision_mode_ ? "ON" : "OFF");
+              std_msgs::msg::Bool msg;
+              msg.data = left_precision_mode_;
+              left_precision_pub_->publish(msg);
+              left_clicks_[0].count = 0; left_clicks_[1].count = 0;
+          }
+      } 
+      else if (right_dc) {
+          bool left_active = (now - left_clicks_[0].last_press_time_sec < 1.0) || (now - left_clicks_[1].last_press_time_sec < 1.0);
+          if (!left_active) {
+              right_precision_mode_ = !right_precision_mode_;
+              RCLCPP_INFO(this->get_logger(), "RIGHT PRECISION MODE TOGGLED: %s", right_precision_mode_ ? "ON" : "OFF");
+              std_msgs::msg::Bool msg;
+              msg.data = right_precision_mode_;
+              right_precision_pub_->publish(msg);
+              right_clicks_[0].count = 0; right_clicks_[1].count = 0;
+          }
       }
   }
 };
