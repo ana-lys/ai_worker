@@ -228,6 +228,7 @@ private:
         header.height = frame.get_height();
         header.format = frame.get_profile().format();
 
+        auto next_send = std::chrono::steady_clock::now();
         for (uint16_t i = 0; i < total_chunks; ++i) {
             uint32_t chunk_len = std::min((uint32_t)chunk_size_, total_size - i * chunk_size_);
             std::vector<uint8_t> packet(sizeof(UDPChunkHeader) + chunk_len);
@@ -246,9 +247,11 @@ private:
                 RCLCPP_WARN(this->get_logger(), "Failed to send chunk: %s", strerror(errno));
             }
             
-            // Pace the UDP packets to prevent micro-bursts from overflowing the network switch / OS buffers
-            // 50 microseconds spacing prevents drops while still sending a full frame in ~9ms
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            // Precise busy-wait pacing (50us). Standard Linux sleep_for() oversleeps by 1-2 milliseconds!
+            next_send += std::chrono::microseconds(50);
+            while (std::chrono::steady_clock::now() < next_send) {
+                // busy wait to guarantee microsecond precision without yielding to OS scheduler
+            }
         }
     }
 

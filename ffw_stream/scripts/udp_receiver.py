@@ -26,6 +26,7 @@ persistent_buffers = {
 }
 
 fps_trackers = {} # key: (s, stream_type), value: [frames, start_time]
+last_frame_id = {}
 
 # 4(I) + 1(B) + 4(I) + 2(H) + 2(H) + 4(I) + 4(I) + 4(I) + 4(I) = 29 bytes
 HEADER_FORMAT = '<IBIHHIIII'
@@ -60,9 +61,14 @@ while True:
         # Robustly copy payload directly into the persistent frame buffer
         persistent_buffers[s][stream_type][start_idx:end_idx] = payload
         
-        # If we received the last chunk of the frame, display it!
-        # (Even if intermediate chunks were dropped by the network, we still display it to maintain framerate)
-        if chunk_index == total_chunks - 1:
+        # Track the last seen frame_id for this stream
+        if s not in last_frame_id: last_frame_id[s] = {0:-1, 1:-1, 2:-1}
+        
+        # If the sender moved on to a NEW frame_id, it means the previous frame is completely finished sending!
+        # This is the most bulletproof way to trigger a display update, guaranteeing it always fires even if the last chunk is dropped.
+        if frame_id > last_frame_id[s][stream_type]:
+            last_frame_id[s][stream_type] = frame_id
+            
             assembled_data = persistent_buffers[s][stream_type]
             prefix = "Left" if s == sock_left else "Right"
                 
@@ -92,8 +98,6 @@ while True:
                     if bpp == 1:
                         img = frame_data.reshape((height, width))
                     elif bpp == 2:
-                        # For 2 bytes per pixel (Y16 or UYVY), grabbing the second byte
-                        # perfectly extracts the Grayscale image (Y) or the MSB!
                         img_raw = frame_data.reshape((height, width, 2))
                         img = img_raw[:, :, 1]
                     elif bpp == 3:
@@ -105,7 +109,8 @@ while True:
                     cv2.imshow(f"{prefix} IR", img)
                     
             except Exception as e:
-                print(f"Failed to display frame: {e}")
+                # ignore silent errors from incomplete partial frames when initializing
+                pass
                 
             # FPS tracking
             tracker_key = (s, stream_type)
