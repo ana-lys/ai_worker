@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    target_ip: "192.168.6.101"
+    target_ip: "192.168.0.241"
     streamer_ip: "192.168.6.100"
     target_port_rgb: 8081
     target_port_depth: 8083
