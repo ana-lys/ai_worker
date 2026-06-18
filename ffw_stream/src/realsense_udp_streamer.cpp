@@ -1,9 +1,12 @@
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/float32.hpp>
 #include <librealsense2/rs.hpp>
 
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
+
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
 #include <iostream>
 #include <vector>
@@ -53,9 +56,15 @@ public:
         this->declare_parameter<int>("ir_fps", 30);
         this->declare_parameter<std::string>("ir_format", "y8");
 
+        this->declare_parameter<int>("target_port_metadata", 8089);
+        
         target_ip_ = this->get_parameter("target_ip").as_string();
 
-        fps_pub_ = this->create_publisher<std_msgs::msg::Float32>("fps", 10);
+        metadata_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+        memset(&metadata_addr_, 0, sizeof(metadata_addr_));
+        metadata_addr_.sin_family = AF_INET;
+        metadata_addr_.sin_port = htons(this->get_parameter("target_port_metadata").as_int());
+        inet_pton(AF_INET, target_ip_.c_str(), &metadata_addr_.sin_addr);
 
         discoverDevices();
 
@@ -202,25 +211,18 @@ private:
                 continue;
             }
 
-            if (frame_id > 0 && frame_id % 30 == 0) {
-                auto now = std::chrono::steady_clock::now();
-                double elapsed_total = std::chrono::duration<double>(now - start_time).count();
-                double fps = (double)frame_id / elapsed_total;
-                
-                std_msgs::msg::Float32 fps_msg;
-                fps_msg.data = fps;
-                fps_pub_->publish(fps_msg);
-            }
-
-            if (e_rgb && appsrc_rgb_) pushGstBuffer(frames.get_color_frame(), appsrc_rgb_);
-            if (e_dep && appsrc_depth_) pushGstBuffer(frames.get_depth_frame(), appsrc_depth_);
-            if (e_ir && appsrc_ir_) pushGstBuffer(frames.get_infrared_frame(), appsrc_ir_);
+            auto now = std::chrono::steady_clock::now();
+            double current_timestamp = std::chrono::duration<double>(now.time_since_epoch()).count();
+            
+            if (e_rgb && appsrc_rgb_) pushGstBuffer(frames.get_color_frame(), appsrc_rgb_, "RGB", frame_id, current_timestamp);
+            if (e_dep && appsrc_depth_) pushGstBuffer(frames.get_depth_frame(), appsrc_depth_, "Depth", frame_id, current_timestamp);
+            if (e_ir && appsrc_ir_) pushGstBuffer(frames.get_infrared_frame(), appsrc_ir_, "IR", frame_id, current_timestamp);
             
             frame_id++;
         }
     }
 
-    void pushGstBuffer(const rs2::video_frame& frame, GstElement* appsrc) {
+    void pushGstBuffer(const rs2::video_frame& frame, GstElement* appsrc, const std::string& stream_name, uint32_t frame_id, double timestamp) {
         if (!frame || !appsrc) return;
         
         const uint8_t* data = (const uint8_t*)frame.get_data();
@@ -236,6 +238,11 @@ private:
         
         if (ret != GST_FLOW_OK) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Error pushing buffer to GStreamer");
+        } else {
+            // Send metadata packet
+            char msg[256];
+            int len = snprintf(msg, sizeof(msg), "{\"stream\":\"%s\",\"frame_id\":%u,\"timestamp\":%f}", stream_name.c_str(), frame_id, timestamp);
+            sendto(metadata_sock_, msg, len, 0, (struct sockaddr*)&metadata_addr_, sizeof(metadata_addr_));
         }
     }
 
@@ -253,7 +260,8 @@ private:
     std::thread stream_thread_;
     std::atomic<bool> running_{false};
     
-    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr fps_pub_;
+    int metadata_sock_ = -1;
+    struct sockaddr_in metadata_addr_;
 };
 
 int main(int argc, char** argv) {
