@@ -4,6 +4,7 @@
     target_port_rgb: 8081
     target_port_depth: 8083
     target_port_ir: 8085
+    target_port_metadata: 8091
     
     # Right Camera Device ID
     device_id: "230422271116"

@@ -4,6 +4,7 @@
     target_port_rgb: 8080
     target_port_depth: 8082
     target_port_ir: 8084
+    target_port_metadata: 8089
     
     # Left Camera Device ID
     device_id: "230422272589"

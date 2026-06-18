@@ -211,7 +211,7 @@ private:
                 continue;
             }
 
-            auto now = std::chrono::steady_clock::now();
+            auto now = std::chrono::system_clock::now();
             double current_timestamp = std::chrono::duration<double>(now.time_since_epoch()).count();
             
             if (e_rgb && appsrc_rgb_) pushGstBuffer(frames.get_color_frame(), appsrc_rgb_, "RGB", frame_id, current_timestamp);

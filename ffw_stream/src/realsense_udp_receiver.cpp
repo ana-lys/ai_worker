@@ -5,6 +5,10 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
 #include <opencv2/opencv.hpp>
 
 #include <iostream>
@@ -18,6 +22,7 @@ public:
         this->declare_parameter<int>("target_port_rgb", 8080);
         this->declare_parameter<int>("target_port_depth", 8082);
         this->declare_parameter<int>("target_port_ir", 8084);
+        this->declare_parameter<int>("target_port_metadata", 8089);
 
         // Camera identity for display namespaces
         this->declare_parameter<std::string>("camera_name", "Camera");
@@ -70,12 +75,14 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "C++ UDP Receiver Initialized.");
         
+        metadata_thread_ = std::thread(&RealsenseUDPReceiver::metadataLoop, this);
         display_thread_ = std::thread(&RealsenseUDPReceiver::displayLoop, this);
     }
 
     ~RealsenseUDPReceiver() {
         running_ = false;
         if (display_thread_.joinable()) display_thread_.join();
+        if (metadata_thread_.joinable()) metadata_thread_.join();
         
         if (pipeline_rgb_) { gst_element_set_state(pipeline_rgb_, GST_STATE_NULL); gst_object_unref(pipeline_rgb_); }
         if (pipeline_depth_) { gst_element_set_state(pipeline_depth_, GST_STATE_NULL); gst_object_unref(pipeline_depth_); }
@@ -154,12 +161,34 @@ private:
         latest_images_[stream_name] = frame;
         
         frames_received_[stream_name]++;
-        auto now = std::chrono::steady_clock::now();
+        auto now = std::chrono::system_clock::now();
+        
+        double latency = 0.0;
+        uint32_t metadata_drops = 0;
+        uint32_t video_drops = 0;
+        {
+            std::lock_guard<std::mutex> lock(meta_mutex_);
+            if (latest_timestamp_[stream_name] > 0.0) {
+                double current_time = std::chrono::duration<double>(now.time_since_epoch()).count();
+                latency = current_time - latest_timestamp_[stream_name];
+            }
+            metadata_drops = total_drops_[stream_name];
+            
+            // Calculate video frames lost since last successful metadata received
+            uint32_t expected_frames = sender_frame_ids_[stream_name];
+            if (expected_frames > total_video_frames_received_[stream_name]) {
+                video_drops = expected_frames - total_video_frames_received_[stream_name];
+            }
+        }
+        total_video_frames_received_[stream_name]++;
+
         if (frames_received_[stream_name] == 30) {
-            double elapsed = std::chrono::duration<double>(now - fps_timers_[stream_name]).count();
-            RCLCPP_INFO(this->get_logger(), "[%s] Receiver FPS: %.1f", stream_name.c_str(), 30.0 / elapsed);
+            auto steady_now = std::chrono::steady_clock::now();
+            double elapsed = std::chrono::duration<double>(steady_now - fps_timers_[stream_name]).count();
+            RCLCPP_INFO(this->get_logger(), "[%s] Receiver FPS: %.1f | Latency: %.1f ms | Metadata Drops: %u | Video Drops: %u", 
+                        stream_name.c_str(), 30.0 / elapsed, latency * 1000.0, metadata_drops, video_drops);
             frames_received_[stream_name] = 0;
-            fps_timers_[stream_name] = now;
+            fps_timers_[stream_name] = steady_now;
         }
     }
 
@@ -195,6 +224,55 @@ private:
         }
     }
 
+    void metadataLoop() {
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(this->get_parameter("target_port_metadata").as_int());
+
+        int opt = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to bind metadata UDP socket");
+            return;
+        }
+
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        char buffer[512];
+        while (running_ && rclcpp::ok()) {
+            int len = recv(sock, buffer, sizeof(buffer) - 1, 0);
+            if (len > 0) {
+                buffer[len] = '\0';
+                char stream_name[32];
+                uint32_t frame_id;
+                double timestamp;
+                if (sscanf(buffer, "{\"stream\":\"%31[^\"]\",\"frame_id\":%u,\"timestamp\":%lf}", stream_name, &frame_id, &timestamp) == 3) {
+                    std::string stream(stream_name);
+                    std::lock_guard<std::mutex> lock(meta_mutex_);
+                    
+                    if (sender_frame_ids_[stream] > 0) {
+                        uint32_t expected = sender_frame_ids_[stream] + 1;
+                        if (frame_id > expected) {
+                            total_drops_[stream] += (frame_id - expected);
+                            RCLCPP_WARN(this->get_logger(), "[%s] Network Drop Detected! Missed %d frames. Total Drops: %d", 
+                                        stream.c_str(), frame_id - expected, total_drops_[stream]);
+                        }
+                    }
+                    sender_frame_ids_[stream] = frame_id;
+                    latest_timestamp_[stream] = timestamp;
+                }
+            }
+        }
+        close(sock);
+    }
+
     std::string camera_name_;
     GstElement* pipeline_rgb_ = nullptr;
     GstElement* appsink_rgb_ = nullptr;
@@ -212,7 +290,14 @@ private:
     std::map<std::string, int> frames_received_;
     std::map<std::string, std::chrono::steady_clock::time_point> fps_timers_;
 
+    std::mutex meta_mutex_;
+    std::map<std::string, uint32_t> sender_frame_ids_;
+    std::map<std::string, uint32_t> total_drops_;
+    std::map<std::string, uint32_t> total_video_frames_received_;
+    std::map<std::string, double> latest_timestamp_;
+
     std::thread display_thread_;
+    std::thread metadata_thread_;
     bool running_{true};
 };
 
