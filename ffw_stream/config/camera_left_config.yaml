@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    target_ip: "100.83.72.18"
+    target_ip: "192.168.0.241"
     target_port: 8080
     chunk_size: 1400
     

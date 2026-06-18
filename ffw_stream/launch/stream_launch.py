@@ -8,7 +8,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     target_ip_arg = DeclareLaunchArgument(
         'target_ip',
-        default_value='100.83.72.18',
+        default_value='192.168.0.241',
         description='Target IP for UDP streaming'
     )
     target_ip = LaunchConfiguration('target_ip')
