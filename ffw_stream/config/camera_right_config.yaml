@@ -2,7 +2,7 @@
   ros__parameters:
     target_ip: "100.83.72.18"
     target_port: 8081
-    chunk_size: 60000
+    chunk_size: 1400
     
     # Right Camera Device ID
     device_id: "230422271116"
