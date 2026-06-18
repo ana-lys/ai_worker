@@ -19,6 +19,10 @@ public:
         this->declare_parameter<int>("target_port_depth", 8082);
         this->declare_parameter<int>("target_port_ir", 8084);
 
+        // Camera identity for display namespaces
+        this->declare_parameter<std::string>("camera_name", "Camera");
+        camera_name_ = this->get_parameter("camera_name").as_string();
+
         // Streams enabled
         this->declare_parameter<bool>("enable_rgb", true);
         this->declare_parameter<bool>("enable_depth", true);
@@ -177,7 +181,8 @@ private:
                             cv::applyColorMap(img_normalized, display_img, cv::COLORMAP_JET);
                         }
                         
-                        cv::imshow(pair.first, display_img);
+                        std::string window_name = camera_name_ + " - " + pair.first;
+                        cv::imshow(window_name, display_img);
                         pair.second = cv::Mat(); // consume
                     }
                 }
@@ -190,6 +195,7 @@ private:
         }
     }
 
+    std::string camera_name_;
     GstElement* pipeline_rgb_ = nullptr;
     GstElement* appsink_rgb_ = nullptr;
     GstElement* pipeline_depth_ = nullptr;
