@@ -175,9 +175,15 @@ private:
             metadata_drops = total_drops_[stream_name];
             
             // Calculate video frames lost since last successful metadata received
-            uint32_t expected_frames = sender_frame_ids_[stream_name];
-            if (expected_frames > total_video_frames_received_[stream_name]) {
-                video_drops = expected_frames - total_video_frames_received_[stream_name];
+            if (first_frame_id_[stream_name] == 0 && sender_frame_ids_[stream_name] > 0) {
+                first_frame_id_[stream_name] = sender_frame_ids_[stream_name];
+            }
+            
+            if (first_frame_id_[stream_name] > 0) {
+                uint32_t expected_frames = (sender_frame_ids_[stream_name] - first_frame_id_[stream_name]) + 1;
+                if (expected_frames > total_video_frames_received_[stream_name]) {
+                    video_drops = expected_frames - total_video_frames_received_[stream_name];
+                }
             }
         }
         total_video_frames_received_[stream_name]++;
@@ -291,6 +297,7 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> fps_timers_;
 
     std::mutex meta_mutex_;
+    std::map<std::string, uint32_t> first_frame_id_;
     std::map<std::string, uint32_t> sender_frame_ids_;
     std::map<std::string, uint32_t> total_drops_;
     std::map<std::string, uint32_t> total_video_frames_received_;
