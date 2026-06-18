@@ -71,7 +71,7 @@ public:
             cfg.enable_stream(RS2_STREAM_COLOR, w, h, getFormat(this->get_parameter("rgb_format").as_string()), fps);
             
             int port = this->get_parameter("target_port_rgb").as_int();
-            std::string pipe_str = "appsrc name=src ! video/x-raw,format=RGB,width=" + std::to_string(w) + 
+            std::string pipe_str = "appsrc name=src is-live=true do-timestamp=true ! video/x-raw,format=RGB,width=" + std::to_string(w) + 
                                    ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
                                    "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency speed-preset=ultrafast ! "
                                    "rtph264pay config-interval=1 ! udpsink host=" + target_ip_ + " port=" + std::to_string(port);
@@ -88,7 +88,7 @@ public:
             int port = this->get_parameter("target_port_depth").as_int();
             // Depth must be lossless / uncompressed RTP to maintain millimeter precision
             // We trick rtpvrawpay by disguising the 16-bit depth (GRAY16_LE) as UYVY, which is also exactly 2 bytes per pixel.
-            std::string pipe_str = "appsrc name=src ! video/x-raw,format=UYVY,width=" + std::to_string(w) + 
+            std::string pipe_str = "appsrc name=src is-live=true do-timestamp=true ! video/x-raw,format=UYVY,width=" + std::to_string(w) + 
                                    ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
                                    "rtpvrawpay ! udpsink host=" + target_ip_ + " port=" + std::to_string(port);
                                    
@@ -105,7 +105,7 @@ public:
             // IR is usually sent as raw grayscale, but we compress it if possible.
             // Wait, D405 IR stride is often 2 bytes per pixel. Let's use GRAY16_LE as the cap, then convert down to 8-bit to compress.
             // "videoconvert ! video/x-raw,format=GRAY8 ! nvvidconv ! ... nvv4l2h264enc"
-            std::string pipe_str = "appsrc name=src ! video/x-raw,format=GRAY16_LE,width=" + std::to_string(w) + 
+            std::string pipe_str = "appsrc name=src is-live=true do-timestamp=true ! video/x-raw,format=GRAY16_LE,width=" + std::to_string(w) + 
                                    ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
                                    "videoconvert ! video/x-raw,format=GRAY8 ! "
                                    "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency speed-preset=ultrafast ! "
