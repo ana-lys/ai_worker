@@ -90,7 +90,7 @@ public:
             // We trick rtpvrawpay by disguising the 16-bit depth (GRAY16_LE) as UYVY, which is also exactly 2 bytes per pixel.
             std::string pipe_str = "appsrc name=src is-live=true do-timestamp=true format=time ! video/x-raw,format=UYVY,width=" + std::to_string(w) + 
                                    ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
-                                   "rtpvrawpay ! udpsink host=" + target_ip_ + " port=" + std::to_string(port);
+                                   "rtpvrawpay ! udpsink host=" + target_ip_ + " port=" + std::to_string(port) + " max-bitrate=80000000";
                                    
             initGstPipeline(pipe_str, pipeline_depth_, appsrc_depth_);
         }

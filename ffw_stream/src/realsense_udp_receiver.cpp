@@ -53,7 +53,7 @@ public:
             int port = this->get_parameter("target_port_depth").as_int();
             int w = this->get_parameter("depth_width").as_int();
             int h = this->get_parameter("depth_height").as_int();
-            std::string pipe_str = "udpsrc port=" + std::to_string(port) + 
+            std::string pipe_str = "udpsrc port=" + std::to_string(port) + " buffer-size=2500000"
                                    " ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=YCbCr-4:2:2,depth=(string)8,"
                                    "width=(string)" + std::to_string(w) + ",height=(string)" + std::to_string(h) + " ! "
                                    "rtpvrawdepay ! appsink name=sink drop=true max-buffers=1";
