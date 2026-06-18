@@ -49,9 +49,9 @@ def create_pipeline(name, info):
             f"rtph264depay ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 ! appsink name=sink drop=true max-buffers=1"
         )
     elif stype == "depth":
-        # Raw 16-bit payload
+        # Raw 16-bit payload disguised as UYVY
         pipe_str = (
-            f"udpsrc port={port} ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=GRAY16_LE,depth=16,width=480,height=270 ! "
+            f"udpsrc port={port} ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=YCbCr-4:2:2,depth=8,width=480,height=270 ! "
             f"rtpvrawdepay ! appsink name=sink drop=true max-buffers=1"
         )
     

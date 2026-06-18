@@ -87,7 +87,8 @@ public:
             
             int port = this->get_parameter("target_port_depth").as_int();
             // Depth must be lossless / uncompressed RTP to maintain millimeter precision
-            std::string pipe_str = "appsrc name=src ! video/x-raw,format=GRAY16_LE,width=" + std::to_string(w) + 
+            // We trick rtpvrawpay by disguising the 16-bit depth (GRAY16_LE) as UYVY, which is also exactly 2 bytes per pixel.
+            std::string pipe_str = "appsrc name=src ! video/x-raw,format=UYVY,width=" + std::to_string(w) + 
                                    ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
                                    "rtpvrawpay ! udpsink host=" + target_ip_ + " port=" + std::to_string(port);
                                    
