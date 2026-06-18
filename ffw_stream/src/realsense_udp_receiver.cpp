@@ -54,8 +54,8 @@ public:
             int w = this->get_parameter("depth_width").as_int();
             int h = this->get_parameter("depth_height").as_int();
             std::string pipe_str = "udpsrc port=" + std::to_string(port) + 
-                                   " ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=YCbCr-4:2:2,depth=8,"
-                                   "width=" + std::to_string(w) + ",height=" + std::to_string(h) + " ! "
+                                   " ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=YCbCr-4:2:2,depth=(string)8,"
+                                   "width=(string)" + std::to_string(w) + ",height=(string)" + std::to_string(h) + " ! "
                                    "rtpvrawdepay ! appsink name=sink drop=true max-buffers=1";
             initGstPipeline("Depth", pipe_str, pipeline_depth_, appsink_depth_);
         }
