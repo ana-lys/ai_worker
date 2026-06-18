@@ -31,6 +31,7 @@ public:
         this->declare_parameter<int>("target_port_rgb", 8080);
         this->declare_parameter<int>("target_port_depth", 8082);
         this->declare_parameter<int>("target_port_ir", 8084);
+        this->declare_parameter<std::string>("depth_transport", "udp");
 
         // Device
         this->declare_parameter<std::string>("device_id", "");
@@ -98,11 +99,20 @@ public:
             cfg.enable_stream(RS2_STREAM_DEPTH, w, h, getFormat(this->get_parameter("depth_format").as_string()), fps);
             
             int port = this->get_parameter("target_port_depth").as_int();
-            // Depth must be lossless / uncompressed RTP to maintain millimeter precision
-            // We trick rtpvrawpay by disguising the 16-bit depth (GRAY16_LE) as UYVY, which is also exactly 2 bytes per pixel.
-            std::string pipe_str = "appsrc name=src is-live=true do-timestamp=true format=time max-bytes=2000000 ! video/x-raw,format=UYVY,width=" + std::to_string(w) + 
-                                   ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
-                                   "rtpvrawpay ! udpsink host=" + target_ip_ + " port=" + std::to_string(port) + " max-bitrate=250000000";
+            std::string depth_transport = this->get_parameter("depth_transport").as_string();
+            
+            std::string pipe_str;
+            if (depth_transport == "tcp") {
+                // TCP: Uses gdppay to perfectly serialize GstBuffers over a TCP stream
+                pipe_str = "appsrc name=src is-live=true do-timestamp=true format=time max-bytes=2000000 ! video/x-raw,format=UYVY,width=" + std::to_string(w) + 
+                           ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
+                           "gdppay ! tcpserversink host=0.0.0.0 port=" + std::to_string(port);
+            } else {
+                // UDP: Uses rtpvrawpay, requires max-bitrate pacing to prevent 259KB bursts from overflowing Gigabit NIC buffers
+                pipe_str = "appsrc name=src is-live=true do-timestamp=true format=time max-bytes=2000000 ! video/x-raw,format=UYVY,width=" + std::to_string(w) + 
+                           ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
+                           "rtpvrawpay ! udpsink host=" + target_ip_ + " port=" + std::to_string(port) + " max-bitrate=250000000";
+            }
                                    
             initGstPipeline(pipe_str, pipeline_depth_, appsrc_depth_);
         }

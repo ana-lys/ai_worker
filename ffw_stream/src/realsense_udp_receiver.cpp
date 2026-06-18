@@ -28,6 +28,11 @@ public:
         this->declare_parameter<std::string>("camera_name", "Camera");
         camera_name_ = this->get_parameter("camera_name").as_string();
 
+        this->declare_parameter<std::string>("depth_transport", "udp");
+
+        this->declare_parameter<std::string>("streamer_ip", "127.0.0.1");
+        streamer_ip_ = this->get_parameter("streamer_ip").as_string();
+
         this->declare_parameter<bool>("headless", false);
 
         // Streams enabled
@@ -58,12 +63,20 @@ public:
 
         if (this->get_parameter("enable_depth").as_bool()) {
             int port = this->get_parameter("target_port_depth").as_int();
-            int w = this->get_parameter("depth_width").as_int();
-            int h = this->get_parameter("depth_height").as_int();
-            std::string pipe_str = "udpsrc port=" + std::to_string(port) + " buffer-size=2500000"
-                                   " ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=YCbCr-4:2:2,depth=(string)8,"
-                                   "width=(string)" + std::to_string(w) + ",height=(string)" + std::to_string(h) + " ! queue ! "
-                                   "rtpvrawdepay ! queue ! appsink name=sink drop=true max-buffers=1";
+            std::string depth_transport = this->get_parameter("depth_transport").as_string();
+            
+            std::string pipe_str;
+            if (depth_transport == "tcp") {
+                pipe_str = "tcpclientsrc host=" + streamer_ip_ + " port=" + std::to_string(port) + 
+                           " ! gdpdepay ! queue ! appsink name=sink drop=true max-buffers=1";
+            } else {
+                int w = this->get_parameter("depth_width").as_int();
+                int h = this->get_parameter("depth_height").as_int();
+                pipe_str = "udpsrc port=" + std::to_string(port) + " buffer-size=2500000"
+                           " ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=YCbCr-4:2:2,depth=(string)8,"
+                           "width=(string)" + std::to_string(w) + ",height=(string)" + std::to_string(h) + " ! queue ! "
+                           "rtpvrawdepay ! queue ! appsink name=sink drop=true max-buffers=1";
+            }
             initGstPipeline("Depth", pipe_str, pipeline_depth_, appsink_depth_);
         }
 
@@ -287,6 +300,7 @@ private:
     }
 
     std::string camera_name_;
+    std::string streamer_ip_;
     GstElement* pipeline_rgb_ = nullptr;
     GstElement* appsink_rgb_ = nullptr;
     GstElement* pipeline_depth_ = nullptr;
