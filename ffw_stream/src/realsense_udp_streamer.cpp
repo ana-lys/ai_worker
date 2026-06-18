@@ -73,7 +73,7 @@ public:
             int port = this->get_parameter("target_port_rgb").as_int();
             std::string pipe_str = "appsrc name=src ! video/x-raw,format=RGB,width=" + std::to_string(w) + 
                                    ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
-                                   "videoconvert ! video/x-raw,format=I420 ! nvv4l2h264enc insert-sps-pps=true ! "
+                                   "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency speed-preset=ultrafast ! "
                                    "rtph264pay config-interval=1 ! udpsink host=" + target_ip_ + " port=" + std::to_string(port);
             
             initGstPipeline(pipe_str, pipeline_rgb_, appsrc_rgb_);
@@ -108,7 +108,7 @@ public:
             std::string pipe_str = "appsrc name=src ! video/x-raw,format=GRAY16_LE,width=" + std::to_string(w) + 
                                    ",height=" + std::to_string(h) + ",framerate=" + std::to_string(fps) + "/1 ! "
                                    "videoconvert ! video/x-raw,format=GRAY8 ! "
-                                   "videoconvert ! video/x-raw,format=I420 ! nvv4l2h264enc insert-sps-pps=true ! "
+                                   "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency speed-preset=ultrafast ! "
                                    "rtph264pay config-interval=1 ! udpsink host=" + target_ip_ + " port=" + std::to_string(port);
                                    
             initGstPipeline(pipe_str, pipeline_ir_, appsrc_ir_);
