@@ -173,6 +173,8 @@ private:
         bool e_dep = this->get_parameter("enable_depth").as_bool();
         bool e_ir  = this->get_parameter("enable_ir").as_bool();
 
+        auto last_time = std::chrono::steady_clock::now();
+
         while (running_ && rclcpp::ok()) {
             rs2::frameset frames;
             try {
@@ -180,6 +182,13 @@ private:
             } catch (const std::exception& e) {
                 RCLCPP_WARN(this->get_logger(), "Timeout waiting for frames: %s", e.what());
                 continue;
+            }
+
+            if (frame_id > 0 && frame_id % 30 == 0) {
+                auto now = std::chrono::steady_clock::now();
+                double elapsed = std::chrono::duration<double>(now - last_time).count();
+                RCLCPP_INFO(this->get_logger(), "Sending FPS: %.1f Hz", 30.0 / elapsed);
+                last_time = now;
             }
 
             rs2::video_frame color_frame = frames.get_color_frame();

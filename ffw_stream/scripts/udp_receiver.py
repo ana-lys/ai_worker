@@ -3,6 +3,7 @@ import struct
 import numpy as np
 import cv2
 import select
+import time
 
 UDP_IP = "0.0.0.0" # Listen on all interfaces
 
@@ -23,6 +24,8 @@ persistent_buffers = {
     sock_left: {0: None, 1: None, 2: None},
     sock_right: {0: None, 1: None, 2: None}
 }
+
+fps_trackers = {} # key: (s, stream_type), value: [frames, start_time]
 
 # 4(I) + 1(B) + 4(I) + 2(H) + 2(H) + 4(I) + 4(I) + 4(I) + 4(I) = 29 bytes
 HEADER_FORMAT = '<IBIHHIIII'
@@ -103,5 +106,18 @@ while True:
                     
             except Exception as e:
                 print(f"Failed to display frame: {e}")
+                
+            # FPS tracking
+            tracker_key = (s, stream_type)
+            if tracker_key not in fps_trackers:
+                fps_trackers[tracker_key] = [0, time.time()]
+            fps_trackers[tracker_key][0] += 1
+            
+            if fps_trackers[tracker_key][0] == 30:
+                elapsed = time.time() - fps_trackers[tracker_key][1]
+                fps = 30.0 / elapsed
+                stream_name = "RGB" if stream_type == 0 else "Depth" if stream_type == 1 else "IR"
+                print(f"[{prefix} {stream_name}] Receiver FPS: {fps:.1f} Hz")
+                fps_trackers[tracker_key] = [0, time.time()]
                 
     cv2.waitKey(1) # Needs to be called to update OpenCV windows
