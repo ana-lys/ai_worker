@@ -188,7 +188,7 @@ private:
         bool e_dep = this->get_parameter("enable_depth").as_bool();
         bool e_ir  = this->get_parameter("enable_ir").as_bool();
 
-        auto last_time = std::chrono::steady_clock::now();
+        auto start_time = std::chrono::steady_clock::now();
 
         while (running_ && rclcpp::ok()) {
             rs2::frameset frames;
@@ -201,9 +201,8 @@ private:
 
             if (frame_id > 0 && frame_id % 30 == 0) {
                 auto now = std::chrono::steady_clock::now();
-                double elapsed = std::chrono::duration<double>(now - last_time).count();
-                RCLCPP_INFO(this->get_logger(), "Capture FPS: %.1f Hz", 30.0 / elapsed);
-                last_time = now;
+                double elapsed_total = std::chrono::duration<double>(now - start_time).count();
+                RCLCPP_INFO(this->get_logger(), "Average Publishing Rate: %.1f Hz", (double)frame_id / elapsed_total);
             }
 
             if (e_rgb && appsrc_rgb_) pushGstBuffer(frames.get_color_frame(), appsrc_rgb_);
