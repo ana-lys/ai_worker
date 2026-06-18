@@ -218,19 +218,26 @@ private:
         header.format = frame.get_profile().format();
 
         for (uint16_t i = 0; i < total_chunks; ++i) {
+            uint32_t chunk_len = std::min((uint32_t)chunk_size_, total_size - i * chunk_size_);
+            std::vector<uint8_t> packet(sizeof(UDPChunkHeader) + chunk_len);
+
+            // Copy header
             header.chunk_index = i;
-            uint32_t offset = i * chunk_size_;
-            header.chunk_size = std::min((uint32_t)chunk_size_, total_size - offset);
-
-            std::vector<uint8_t> packet(sizeof(UDPChunkHeader) + header.chunk_size);
+            header.chunk_size = chunk_len;
             memcpy(packet.data(), &header, sizeof(UDPChunkHeader));
-            memcpy(packet.data() + sizeof(UDPChunkHeader), data + offset, header.chunk_size);
 
-            sendto(sockfd_, packet.data(), packet.size(), 0,
-                   (struct sockaddr *)&target_addr_, sizeof(target_addr_));
+            // Copy payload
+            memcpy(packet.data() + sizeof(UDPChunkHeader), data + i * chunk_size_, chunk_len);
+
+            ssize_t sent = sendto(sockfd_, packet.data(), packet.size(), 0,
+                                  (struct sockaddr*)&target_addr_, sizeof(target_addr_));
+            if (sent < 0) {
+                RCLCPP_WARN(this->get_logger(), "Failed to send chunk: %s", strerror(errno));
+            }
             
-            // Pace the UDP sends so the OS buffer doesn't overflow!
-            usleep(200); 
+            // Pace the UDP packets to prevent micro-bursts from overflowing the network switch / OS buffers
+            // 50 microseconds spacing prevents drops while still sending a full frame in ~9ms
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
     }
 

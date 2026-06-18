@@ -800,8 +800,8 @@ int main(int argc, char **argv) {
     node->get_targets(current_target_l, current_target_r);
 
     // Clear early-stopping history if the target has moved
-    if (!current_target_l.isApprox(prev_target_l, 1e-4) ||
-        !current_target_r.isApprox(prev_target_r, 1e-4)) {
+    if (!current_target_l.isApprox(prev_target_l, 1e-6) ||
+        !current_target_r.isApprox(prev_target_r, 1e-6)) {
       err_hist.clear();
     }
     prev_target_l = current_target_l;
