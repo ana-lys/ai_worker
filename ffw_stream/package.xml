@@ -14,7 +14,6 @@
   <depend>libgstreamer1.0-dev</depend>
   <depend>libgstreamer-plugins-base1.0-dev</depend>
   
-  <exec_depend>python-gst-1.0</exec_depend>
   <exec_depend>gstreamer1.0-plugins-good</exec_depend>
   <exec_depend>gstreamer1.0-plugins-bad</exec_depend>
   <exec_depend>gstreamer1.0-plugins-ugly</exec_depend>
