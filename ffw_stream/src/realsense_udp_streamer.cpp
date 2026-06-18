@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/float32.hpp>
 #include <librealsense2/rs.hpp>
 
 #include <gst/gst.h>
@@ -53,6 +54,8 @@ public:
         this->declare_parameter<std::string>("ir_format", "y8");
 
         target_ip_ = this->get_parameter("target_ip").as_string();
+
+        fps_pub_ = this->create_publisher<std_msgs::msg::Float32>("fps", 10);
 
         discoverDevices();
 
@@ -202,7 +205,11 @@ private:
             if (frame_id > 0 && frame_id % 30 == 0) {
                 auto now = std::chrono::steady_clock::now();
                 double elapsed_total = std::chrono::duration<double>(now - start_time).count();
-                RCLCPP_INFO(this->get_logger(), "Average Publishing Rate: %.1f Hz", (double)frame_id / elapsed_total);
+                double fps = (double)frame_id / elapsed_total;
+                
+                std_msgs::msg::Float32 fps_msg;
+                fps_msg.data = fps;
+                fps_pub_->publish(fps_msg);
             }
 
             if (e_rgb && appsrc_rgb_) pushGstBuffer(frames.get_color_frame(), appsrc_rgb_);
@@ -245,6 +252,8 @@ private:
     rs2::pipeline_profile profile_;
     std::thread stream_thread_;
     std::atomic<bool> running_{false};
+    
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr fps_pub_;
 };
 
 int main(int argc, char** argv) {
