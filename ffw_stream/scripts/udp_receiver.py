@@ -82,9 +82,23 @@ while True:
                     
                     cv2.imshow(f"{prefix} Depth", img_color)
                     
-                elif stream_type == 2: # IR (Y8)
+                elif stream_type == 2: # IR (D405 often outputs 16-bit or UYVY for IR)
                     frame_data = np.frombuffer(assembled_data, dtype=np.uint8)
-                    img = frame_data.reshape((height, width))
+                    bpp = len(frame_data) // (height * width)
+                    
+                    if bpp == 1:
+                        img = frame_data.reshape((height, width))
+                    elif bpp == 2:
+                        # For 2 bytes per pixel (Y16 or UYVY), grabbing the second byte
+                        # perfectly extracts the Grayscale image (Y) or the MSB!
+                        img_raw = frame_data.reshape((height, width, 2))
+                        img = img_raw[:, :, 1]
+                    elif bpp == 3:
+                        img = frame_data.reshape((height, width, 3))
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    else:
+                        img = np.zeros((height, width), dtype=np.uint8)
+                        
                     cv2.imshow(f"{prefix} IR", img)
                     
             except Exception as e:
