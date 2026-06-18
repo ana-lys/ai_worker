@@ -28,6 +28,8 @@ public:
         this->declare_parameter<std::string>("camera_name", "Camera");
         camera_name_ = this->get_parameter("camera_name").as_string();
 
+        this->declare_parameter<bool>("headless", false);
+
         // Streams enabled
         this->declare_parameter<bool>("enable_rgb", true);
         this->declare_parameter<bool>("enable_depth", true);
@@ -76,7 +78,12 @@ public:
         RCLCPP_INFO(this->get_logger(), "C++ UDP Receiver Initialized.");
         
         metadata_thread_ = std::thread(&RealsenseUDPReceiver::metadataLoop, this);
-        display_thread_ = std::thread(&RealsenseUDPReceiver::displayLoop, this);
+        
+        if (!this->get_parameter("headless").as_bool()) {
+            display_thread_ = std::thread(&RealsenseUDPReceiver::displayLoop, this);
+        } else {
+            RCLCPP_INFO(this->get_logger(), "Running in HEADLESS mode (No OpenCV Windows)");
+        }
     }
 
     ~RealsenseUDPReceiver() {
