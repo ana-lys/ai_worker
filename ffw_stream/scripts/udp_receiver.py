@@ -51,7 +51,7 @@ def create_pipeline(name, info):
     elif stype == "depth":
         # Raw 16-bit payload
         pipe_str = (
-            f"udpsrc port={port} caps=\"application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)RAW, sampling=(string)GRAY16_LE, depth=(string)16, width=(string)480, height=(string)270\" ! "
+            f"udpsrc port={port} ! application/x-rtp,media=video,clock-rate=90000,encoding-name=RAW,sampling=GRAY16_LE,depth=16,width=480,height=270 ! "
             f"rtpvrawdepay ! appsink name=sink drop=true max-buffers=1"
         )
     
