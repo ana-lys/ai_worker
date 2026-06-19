@@ -40,6 +40,9 @@ rs2_format getFormat(const std::string &fmt) {
 class RealsenseUDPStreamer : public rclcpp::Node {
 public:
   RealsenseUDPStreamer() : Node("realsense_udp_streamer") {
+    std::cout << "[DEBUG] RealsenseUDPStreamer constructor START" << std::endl;
+
+    std::cout << "[DEBUG] Declaring parameters..." << std::endl;
     this->declare_parameter<std::string>("target_ip", "127.0.0.1");
     this->declare_parameter<int>("target_port_rgb", 8080);
     this->declare_parameter<int>("target_port_depth", 8082);
@@ -63,20 +66,29 @@ public:
     this->declare_parameter<int>("ir_index", 1);
     this->declare_parameter<int>("target_port_metadata", 8089);
 
+    std::cout << "[DEBUG] Parameters declared. Getting target_ip..." << std::endl;
     target_ip_ = this->get_parameter("target_ip").as_string();
     ir_index_ = this->get_parameter("ir_index").as_int();
 
+    std::cout << "[DEBUG] Creating metadata socket..." << std::endl;
     metadata_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
     memset(&metadata_addr_, 0, sizeof(metadata_addr_));
     metadata_addr_.sin_family = AF_INET;
     metadata_addr_.sin_port = htons(this->get_parameter("target_port_metadata").as_int());
     inet_pton(AF_INET, target_ip_.c_str(), &metadata_addr_.sin_addr);
 
+    std::cout << "[DEBUG] Calling discoverDevices()..." << std::endl;
     discoverDevices();
+    std::cout << "[DEBUG] discoverDevices() finished." << std::endl;
 
-    rs2::config cfg;
-    std::string device_id = this->get_parameter("device_id").as_string();
-    if (!device_id.empty()) cfg.enable_device(device_id);
+    std::cout << "[DEBUG] Creating rs2::config..." << std::endl;
+    try {
+      rs2::config cfg;
+      std::string device_id = this->get_parameter("device_id").as_string();
+      if (!device_id.empty()) {
+        std::cout << "[DEBUG] Enabling device_id: " << device_id << std::endl;
+        cfg.enable_device(device_id);
+      }
 
     if (this->get_parameter("enable_rgb").as_bool()) {
       int w = this->get_parameter("rgb_width").as_int();
@@ -96,29 +108,41 @@ public:
       initFFmpegPipe(cmd, pipe_depth_, "Depth");
     }
 
-    if (this->get_parameter("enable_ir").as_bool()) {
-      int w = this->get_parameter("ir_width").as_int();
-      int h = this->get_parameter("ir_height").as_int();
-      int fps = this->get_parameter("ir_fps").as_int();
-      cfg.enable_stream(RS2_STREAM_INFRARED, ir_index_, w, h, getFormat(this->get_parameter("ir_format").as_string()), fps);
-      std::string cmd = "ffmpeg -hide_banner -loglevel error -y -f rawvideo -vcodec rawvideo -pix_fmt gray -s " + std::to_string(w) + "x" + std::to_string(h) + " -r " + std::to_string(fps) + " -i - -c:v libx264 -preset ultrafast -tune zerolatency -f rtp rtp://" + target_ip_ + ":" + std::to_string(this->get_parameter("target_port_ir").as_int());
-      initFFmpegPipe(cmd, pipe_ir_, "IR");
-    }
+      if (this->get_parameter("enable_ir").as_bool()) {
+        std::cout << "[DEBUG] Configuring IR stream..." << std::endl;
+        int w = this->get_parameter("ir_width").as_int();
+        int h = this->get_parameter("ir_height").as_int();
+        int fps = this->get_parameter("ir_fps").as_int();
+        cfg.enable_stream(RS2_STREAM_INFRARED, ir_index_, w, h, getFormat(this->get_parameter("ir_format").as_string()), fps);
+        std::string cmd = "ffmpeg -hide_banner -loglevel error -y -f rawvideo -vcodec rawvideo -pix_fmt gray -s " + std::to_string(w) + "x" + std::to_string(h) + " -r " + std::to_string(fps) + " -i - -c:v libx264 -preset ultrafast -tune zerolatency -f rtp rtp://" + target_ip_ + ":" + std::to_string(this->get_parameter("target_port_ir").as_int());
+        initFFmpegPipe(cmd, pipe_ir_, "IR");
+      }
 
-    try {
+      std::cout << "[DEBUG] Starting pipeline (pipe_.start(cfg))..." << std::endl;
       profile_ = pipe_.start(cfg);
+      std::cout << "[DEBUG] Pipeline started successfully." << std::endl;
+      
       auto dev = profile_.get_device();
       for (auto &sensor : dev.query_sensors()) {
         if (sensor.supports(RS2_OPTION_AUTO_EXPOSURE_PRIORITY)) sensor.set_option(RS2_OPTION_AUTO_EXPOSURE_PRIORITY, 0.0f);
         if (sensor.is<rs2::depth_sensor>()) depth_scale_ = sensor.as<rs2::depth_sensor>().get_depth_scale();
       }
     } catch (const rs2::error &e) {
+      std::cout << "[DEBUG] Caught rs2::error: " << e.what() << std::endl;
       RCLCPP_ERROR(this->get_logger(), "RealSense config error: %s", e.what());
+      return;
+    } catch (const std::exception &e) {
+      std::cout << "[DEBUG] Caught std::exception: " << e.what() << std::endl;
+      return;
+    } catch (...) {
+      std::cout << "[DEBUG] Caught unknown exception!" << std::endl;
       return;
     }
 
+    std::cout << "[DEBUG] Launching streamLoop thread..." << std::endl;
     running_ = true;
     stream_thread_ = std::thread(&RealsenseUDPStreamer::streamLoop, this);
+    std::cout << "[DEBUG] RealsenseUDPStreamer constructor END" << std::endl;
   }
 
   ~RealsenseUDPStreamer() {
@@ -130,10 +154,17 @@ public:
 
 private:
   void initFFmpegPipe(const std::string &cmd, std::shared_ptr<FFmpegPipe> &pipe, const std::string &name) {
+    std::cout << "[DEBUG] initFFmpegPipe for " << name << " START" << std::endl;
     pipe = std::make_shared<FFmpegPipe>();
     pipe->name = name;
+    std::cout << "[DEBUG] popen: " << cmd << std::endl;
     pipe->file = popen(cmd.c_str(), "w");
-    if (!pipe->file) RCLCPP_ERROR(this->get_logger(), "Failed to open FFmpeg pipe for %s", name.c_str());
+    if (!pipe->file) {
+      std::cout << "[DEBUG] popen FAILED for " << name << std::endl;
+      RCLCPP_ERROR(this->get_logger(), "Failed to open FFmpeg pipe for %s", name.c_str());
+    } else {
+      std::cout << "[DEBUG] popen SUCCESS for " << name << std::endl;
+    }
   }
 
   void pushFFmpegBuffer(const rs2::video_frame &frame, std::shared_ptr<FFmpegPipe> &pipe, const std::string &stream_name, uint32_t frame_id, double timestamp, bool is_depth = false) {
@@ -208,9 +239,13 @@ private:
 };
 
 int main(int argc, char **argv) {
+  std::cout << "[DEBUG] main START" << std::endl;
   rclcpp::init(argc, argv);
+  std::cout << "[DEBUG] rclcpp::init DONE. Creating node..." << std::endl;
   auto node = std::make_shared<RealsenseUDPStreamer>();
+  std::cout << "[DEBUG] Node created. Spinning..." << std::endl;
   rclcpp::spin(node);
   rclcpp::shutdown();
+  std::cout << "[DEBUG] main END" << std::endl;
   return 0;
 }
