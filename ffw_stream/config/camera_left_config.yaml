@@ -7,7 +7,7 @@
     target_port_metadata: 8089
     
     # Left Camera Device ID
-    device_id: "230422272589"
+    device_id: ""
 
     # Which streams to enable
     enable_rgb: false
