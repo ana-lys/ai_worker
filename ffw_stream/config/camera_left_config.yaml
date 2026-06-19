@@ -12,7 +12,7 @@
     # Which streams to enable
     enable_rgb: false
     enable_depth: true
-    enable_ir: true
+    enable_ir: false
 
     # RGB settings (Ignored since enable_rgb is false)
     rgb_width: 640
@@ -20,11 +20,11 @@
     rgb_format: "RGB8"
     rgb_fps: 15
 
-    # Depth settings (480x270 fits USB 2.0 bandwidth at 30fps)
-    depth_width: 480
-    depth_height: 270
+    # Depth settings
+    depth_width: 640
+    depth_height: 480
     depth_format: "Z16"
-    depth_fps: 30
+    depth_fps: 15
 
     # IR settings (480x270 fits USB 2.0 bandwidth at 30fps)
     ir_width: 480
