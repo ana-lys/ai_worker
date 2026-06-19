@@ -19,7 +19,8 @@
   <exec_depend>gstreamer1.0-plugins-good</exec_depend>
   <exec_depend>gstreamer1.0-plugins-bad</exec_depend>
   <exec_depend>gstreamer1.0-plugins-ugly</exec_depend>
-
+  <exec_depend>ffmpeg</exec_depend>
+  
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

@@ -58,11 +58,18 @@ target_link_libraries(realsense_udp_receiver
 install(TARGETS realsense_udp_receiver
   DESTINATION lib/${PROJECT_NAME})
 
-add_executable(test_rs2_barebone src/test_rs2_barebone.cpp)
-target_link_libraries(test_rs2_barebone
+add_executable(test_stream src/test_stream.cpp)
+target_compile_features(test_stream PUBLIC cxx_std_17)
+target_link_libraries(test_stream
   realsense2::realsense2
+  pthread
 )
-install(TARGETS test_rs2_barebone
+# Note: test_stream shells out to the `ffmpeg` CLI binary at runtime via
+# popen() for encoding/UDP streaming -- it does not link against
+# libavcodec/libavformat, so no find_package()/target_link_libraries()
+# entry for FFmpeg is needed here. The `ffmpeg` binary must just be
+# installed and on PATH at runtime (see package.xml exec_depend).
+install(TARGETS test_stream
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY config launch
