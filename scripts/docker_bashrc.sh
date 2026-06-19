@@ -14,11 +14,7 @@ source /root/ros2_ws/install/setup.bash 2>/dev/null
 alias b="colcon build"
 alias s="source install/setup.bash"
 
-# CRITICAL FIX for GStreamer Hangs:
-# Clear the corrupted GStreamer registry cache every time you log in
-rm -rf ~/.cache/gstreamer-1.0/
-
 echo "--------------------------------------------------------"
 echo " Persistent Docker .bashrc loaded!"
-echo " ROS 2 workspaces sourced. GStreamer registry cleared."
+echo " ROS 2 workspaces sourced."
 echo "--------------------------------------------------------"
