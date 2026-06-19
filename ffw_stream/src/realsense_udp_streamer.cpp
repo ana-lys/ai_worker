@@ -245,6 +245,8 @@ private:
 };
 
 int main(int argc, char **argv) {
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
   std::cout << "[DEBUG] main START" << std::endl;
   rclcpp::init(argc, argv);
   std::cout << "[DEBUG] rclcpp::init DONE. Creating node..." << std::endl;
