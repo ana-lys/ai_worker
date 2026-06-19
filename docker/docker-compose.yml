@@ -16,7 +16,6 @@ services:
      - DISPLAY=${DISPLAY}
      - QT_X11_NO_MITSHM=1
     volumes:
-      - /dev:/dev
       - /dev/shm:/dev/shm
       - /usr/local/zed/resources/:/usr/local/zed/resources/
       - /usr/local/zed/settings/:/usr/local/zed/settings/
