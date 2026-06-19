@@ -297,6 +297,10 @@ private:
       g_error_free(error);
       return;
     }
+    if (!pipeline) {
+      RCLCPP_ERROR(this->get_logger(), "GStreamer pipeline is NULL! Check if core plugins are missing.");
+      return;
+    }
     appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "src");
 
     ensureMainLoop();

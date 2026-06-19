@@ -19,9 +19,9 @@ alias s="source install/setup.bash"
 # into the container. We can't delete them, so we create a virtual plugin directory
 # that explicitly excludes them and point GStreamer there instead!
 export SAFE_GST_DIR="/tmp/safe_gst_plugins"
-if [ ! -d "$SAFE_GST_DIR" ]; then
+if [ ! -d "$SAFE_GST_DIR" ] || [ -z "$(ls -A $SAFE_GST_DIR)" ]; then
     mkdir -p "$SAFE_GST_DIR"
-    find /usr/lib/aarch64-linux-gnu/gstreamer-1.0/ -type f ! -name "libgstnv*" -exec ln -s {} "$SAFE_GST_DIR"/ \;
+    find /usr/lib/aarch64-linux-gnu/gstreamer-1.0/ \( -type f -o -type l \) ! -name "libgstnv*" -exec ln -sf {} "$SAFE_GST_DIR"/ \;
 fi
 export GST_PLUGIN_SYSTEM_PATH="$SAFE_GST_DIR"
 export GST_PLUGIN_PATH=""
