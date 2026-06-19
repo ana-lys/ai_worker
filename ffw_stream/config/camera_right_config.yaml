@@ -7,12 +7,15 @@
     target_port_metadata: 8091
     
     # Right Camera Device ID
-    device_id: ""
+    device_id: "230422271116"
 
     # Which streams to enable
     enable_rgb: false
     enable_depth: true
-    enable_ir: false
+    enable_ir: true
+
+    # Crucial for D405: it only has one IR stream, so index must be 0
+    ir_index: 0
 
     # RGB settings (Ignored since enable_rgb is false)
     rgb_width: 640
@@ -20,11 +23,11 @@
     rgb_format: "RGB8"
     rgb_fps: 15
 
-    # Depth settings
-    depth_width: 640
-    depth_height: 480
+    # Depth settings (480x270 fits USB 2.0 bandwidth at 30fps)
+    depth_width: 480
+    depth_height: 270
     depth_format: "Z16"
-    depth_fps: 15
+    depth_fps: 30
 
     # IR settings (480x270 fits USB 2.0 bandwidth at 30fps)
     ir_width: 480

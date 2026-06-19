@@ -1,56 +1,41 @@
 #include <librealsense2/rs.hpp>
 #include <iostream>
-#include <set>
+
+void test_camera(const std::string& serial, int ir_index) {
+    std::cout << "\n===========================================" << std::endl;
+    std::cout << "Testing Camera: " << serial << " with IR Index: " << ir_index << std::endl;
+    try {
+        rs2::pipeline pipe;
+        rs2::config cfg;
+        
+        cfg.enable_device(serial);
+        cfg.enable_stream(RS2_STREAM_DEPTH, 480, 270, RS2_FORMAT_Z16, 30);
+        
+        // Try enabling IR stream with the given index (D435 uses 1, D405 might need 0)
+        cfg.enable_stream(RS2_STREAM_INFRARED, ir_index, 480, 270, RS2_FORMAT_Y8, 30);
+        
+        std::cout << "Starting pipeline..." << std::endl;
+        pipe.start(cfg);
+        std::cout << "SUCCESS! Pipeline started." << std::endl;
+        
+        pipe.stop();
+    } catch (const rs2::error & e) {
+        std::cerr << "FAILED! RealSense error: " << e.what() << std::endl;
+    }
+}
 
 int main() {
-    try {
-        rs2::context ctx;
-        auto devices = ctx.query_devices();
-        if (devices.size() == 0) {
-            std::cout << "No RealSense devices found." << std::endl;
-            return 1;
-        }
-        
-        auto dev = devices[0];
-        std::cout << "===========================================" << std::endl;
-        std::cout << "Device Name: " << dev.get_info(RS2_CAMERA_INFO_NAME) << std::endl;
-        std::cout << "Firmware:    " << dev.get_info(RS2_CAMERA_INFO_FIRMWARE_VERSION) << std::endl;
-        std::cout << "===========================================" << std::endl;
-        
-        std::set<std::string> depth_res;
-        std::set<std::string> color_res;
-        std::set<std::string> ir_res;
-        
-        for (auto sensor : dev.query_sensors()) {
-            for (auto profile : sensor.get_stream_profiles()) {
-                if (profile.is<rs2::video_stream_profile>()) {
-                    auto video = profile.as<rs2::video_stream_profile>();
-                    std::string desc = std::to_string(video.width()) + "x" + std::to_string(video.height()) + 
-                                       " @ " + std::to_string(video.fps()) + "fps (" + rs2_format_to_string(video.format()) + ")";
-                    
-                    if (profile.stream_type() == RS2_STREAM_DEPTH) depth_res.insert(desc);
-                    else if (profile.stream_type() == RS2_STREAM_COLOR) color_res.insert(desc);
-                    else if (profile.stream_type() == RS2_STREAM_INFRARED) ir_res.insert(desc);
-                }
-            }
-        }
-        
-        std::cout << "\nSupported DEPTH Profiles:" << std::endl;
-        for (const auto& r : depth_res) std::cout << "  - " << r << std::endl;
-        
-        std::cout << "\nSupported COLOR Profiles:" << std::endl;
-        for (const auto& r : color_res) std::cout << "  - " << r << std::endl;
-        
-        std::cout << "\nSupported IR Profiles:" << std::endl;
-        if (ir_res.empty()) std::cout << "  (None)" << std::endl;
-        for (const auto& r : ir_res) std::cout << "  - " << r << std::endl;
-        
-        std::cout << "===========================================" << std::endl;
-        
-    } catch (const rs2::error & e) {
-        std::cerr << "RealSense error: " << e.what() << std::endl;
-        return 1;
-    }
+    std::string cam1 = "230422272589";
+    std::string cam2 = "230422271116";
+
+    std::cout << "The streamer node failed because it defaults to IR index 1 (for D435)." << std::endl;
+    std::cout << "Let's see if D405 fails with IR index 1, but succeeds with IR index 0:\n" << std::endl;
+
+    test_camera(cam1, 1); // This is what the streamer was doing
+    test_camera(cam1, 0); // This is what D405 probably requires
+
+    test_camera(cam2, 1);
+    test_camera(cam2, 0);
 
     return 0;
 }
