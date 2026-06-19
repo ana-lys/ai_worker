@@ -15,7 +15,7 @@ def generate_launch_description():
             executable='realsense_udp_receiver',
             name='left_receiver',
             namespace='camera_left',
-            parameters=[left_config, {'camera_name': 'Left Camera', 'depth_transport': 'udp'}],
+            parameters=[left_config, {'camera_name': 'Left Camera'}],
             output='screen'
         ),
         Node(
@@ -23,7 +23,7 @@ def generate_launch_description():
             executable='realsense_udp_receiver',
             name='right_receiver',
             namespace='camera_right',
-            parameters=[right_config, {'camera_name': 'Right Camera', 'depth_transport': 'udp'}],
+            parameters=[right_config, {'camera_name': 'Right Camera'}],
             output='screen'
         )
     ])

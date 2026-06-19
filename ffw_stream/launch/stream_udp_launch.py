@@ -14,14 +14,14 @@ def generate_launch_description():
             package='ffw_stream',
             executable='realsense_udp_streamer',
             name='camera_left_streamer',
-            parameters=[left_config, {'depth_transport': 'udp'}],
+            parameters=[left_config],
             output='screen'
         ),
         Node(
             package='ffw_stream',
             executable='realsense_udp_streamer',
             name='camera_right_streamer',
-            parameters=[right_config, {'depth_transport': 'udp'}],
+            parameters=[right_config],
             output='screen'
         )
     ])

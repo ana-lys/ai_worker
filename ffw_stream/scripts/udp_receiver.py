@@ -120,9 +120,12 @@ while True:
                 
                 # Apply colormap to depth
                 if streams[name]["type"] == "depth":
-                    MAX_DEPTH_UNITS = 3000
-                    img_clamped = np.clip(img, 0, MAX_DEPTH_UNITS)
-                    img_normalized = (img_clamped / float(MAX_DEPTH_UNITS) * 255).astype(np.uint8)
+                    # depth_scale converts raw Z16 to meters (default 0.001 = 1mm per unit)
+                    depth_scale = 0.001
+                    depth_meters = img.astype(np.float32) * depth_scale
+                    max_display_meters = 1.0
+                    img_clamped = np.clip(depth_meters, 0, max_display_meters)
+                    img_normalized = (img_clamped / max_display_meters * 255).astype(np.uint8)
                     display_img = cv2.applyColorMap(img_normalized, cv2.COLORMAP_JET)
                 
                 cv2.imshow(name, display_img)

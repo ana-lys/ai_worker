@@ -30,6 +30,7 @@ ament_target_dependencies(realsense_udp_streamer
 target_link_libraries(realsense_udp_streamer
   realsense2::realsense2
   ${GSTREAMER_LIBRARIES}
+  lz4
 )
 
 install(TARGETS realsense_udp_streamer
@@ -53,6 +54,7 @@ ament_target_dependencies(realsense_udp_receiver
 target_link_libraries(realsense_udp_receiver
   ${GSTREAMER_LIBRARIES}
   ${OpenCV_LIBS}
+  lz4
 )
 
 install(TARGETS realsense_udp_receiver
