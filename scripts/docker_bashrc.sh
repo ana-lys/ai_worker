@@ -14,6 +14,18 @@ source /root/ros2_ws/install/setup.bash 2>/dev/null
 alias b="colcon build"
 alias s="source install/setup.bash"
 
+# CRITICAL FIX for Jetson Headless EGL Crash:
+# The NVIDIA Docker runtime natively bind-mounts broken NVIDIA GStreamer plugins
+# into the container. We can't delete them (Resource busy), and they crash GStreamer
+# because they try to initialize EGL in a headless environment.
+# Since the container runs as privileged, we can shadow them with /dev/null!
+for f in /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstnv*.so; do
+    if [ -s "$f" ]; then
+        mount --bind /dev/null "$f" 2>/dev/null
+    fi
+done
+rm -rf ~/.cache/gstreamer-1.0/
+
 echo "--------------------------------------------------------"
 echo " Persistent Docker .bashrc loaded!"
 echo " ROS 2 workspaces sourced."
