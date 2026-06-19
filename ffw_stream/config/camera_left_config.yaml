@@ -14,8 +14,8 @@
     enable_depth: true
     enable_ir: true
 
-    # Crucial for D405: it only has one IR stream, so index must be 0
-    ir_index: 0
+    # Crucial for D405: IR stream uses index 1 (not 0)
+    ir_index: 1
 
     # Set to false to test camera init without GStreamer
     enable_gstreamer: false
