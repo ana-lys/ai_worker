@@ -46,6 +46,10 @@ public:
     this->declare_parameter<bool>("enable_depth", true);
     this->declare_parameter<bool>("enable_ir", false);
 
+    // Set to false to open the RS2 camera pipeline without starting any GStreamer
+    // pipelines. Useful to isolate camera init crashes from GStreamer crashes.
+    this->declare_parameter<bool>("enable_gstreamer", true);
+
     // Stream Configs
     this->declare_parameter<int>("rgb_width", 640);
     this->declare_parameter<int>("rgb_height", 480);
@@ -88,6 +92,13 @@ public:
       cfg.enable_device(device_id);
     }
 
+    bool enable_gst = this->get_parameter("enable_gstreamer").as_bool();
+    if (!enable_gst) {
+      RCLCPP_WARN(this->get_logger(),
+                  "GStreamer disabled (enable_gstreamer=false). Camera will open "
+                  "but no frames will be streamed over UDP.");
+    }
+
     if (this->get_parameter("enable_rgb").as_bool()) {
       int w = this->get_parameter("rgb_width").as_int();
       int h = this->get_parameter("rgb_height").as_int();
@@ -96,19 +107,20 @@ public:
           RS2_STREAM_COLOR, w, h,
           getFormat(this->get_parameter("rgb_format").as_string()), fps);
 
-      int port = this->get_parameter("target_port_rgb").as_int();
-      std::string pipe_str =
-          "appsrc name=src is-live=true format=time max-bytes=2000000 ! "
-          "video/x-raw,format=RGB,width=" +
-          std::to_string(w) + ",height=" + std::to_string(h) +
-          ",framerate=" + std::to_string(fps) +
-          "/1 ! "
-          "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency "
-          "speed-preset=ultrafast ! "
-          "rtph264pay config-interval=1 ! udpsink host=" +
-          target_ip_ + " port=" + std::to_string(port);
-
-      initGstPipeline(pipe_str, pipeline_rgb_, appsrc_rgb_);
+      if (enable_gst) {
+        int port = this->get_parameter("target_port_rgb").as_int();
+        std::string pipe_str =
+            "appsrc name=src is-live=true format=time max-bytes=2000000 ! "
+            "video/x-raw,format=RGB,width=" +
+            std::to_string(w) + ",height=" + std::to_string(h) +
+            ",framerate=" + std::to_string(fps) +
+            "/1 ! "
+            "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency "
+            "speed-preset=ultrafast ! "
+            "rtph264pay config-interval=1 ! udpsink host=" +
+            target_ip_ + " port=" + std::to_string(port);
+        initGstPipeline(pipe_str, pipeline_rgb_, appsrc_rgb_);
+      }
     }
 
     if (this->get_parameter("enable_depth").as_bool()) {
@@ -119,22 +131,23 @@ public:
           RS2_STREAM_DEPTH, w, h,
           getFormat(this->get_parameter("depth_format").as_string()), fps);
 
-      int port = this->get_parameter("target_port_depth").as_int();
-      // Depth frames are Z16 (16-bit grayscale), NOT UYVY. Use GRAY16_LE caps
-      // so the pipeline is self-describing instead of relying on incidental
-      // byte-width overlap with UYVY (which previously "worked" only because
-      // both formats are 2 bytes/pixel).
-      std::string pipe_str =
-          "appsrc name=src is-live=true format=time max-bytes=2000000 ! "
-          "video/x-raw,format=GRAY16_LE,width=" +
-          std::to_string(w) + ",height=" + std::to_string(h) +
-          ",framerate=" + std::to_string(fps) +
-          "/1 ! "
-          "rtpvrawpay ! udpsink host=" +
-          target_ip_ + " port=" + std::to_string(port) +
-          " max-bitrate=250000000";
-
-      initGstPipeline(pipe_str, pipeline_depth_, appsrc_depth_);
+      if (enable_gst) {
+        int port = this->get_parameter("target_port_depth").as_int();
+        // Depth frames are Z16 (16-bit grayscale), NOT UYVY. Use GRAY16_LE caps
+        // so the pipeline is self-describing instead of relying on incidental
+        // byte-width overlap with UYVY (which previously "worked" only because
+        // both formats are 2 bytes/pixel).
+        std::string pipe_str =
+            "appsrc name=src is-live=true format=time max-bytes=2000000 ! "
+            "video/x-raw,format=GRAY16_LE,width=" +
+            std::to_string(w) + ",height=" + std::to_string(h) +
+            ",framerate=" + std::to_string(fps) +
+            "/1 ! "
+            "rtpvrawpay ! udpsink host=" +
+            target_ip_ + " port=" + std::to_string(port) +
+            " max-bitrate=250000000";
+        initGstPipeline(pipe_str, pipeline_depth_, appsrc_depth_);
+      }
     }
 
     if (this->get_parameter("enable_ir").as_bool()) {
@@ -145,19 +158,20 @@ public:
                         getFormat(this->get_parameter("ir_format").as_string()),
                         fps);
 
-      int port = this->get_parameter("target_port_ir").as_int();
-      std::string pipe_str =
-          "appsrc name=src is-live=true format=time max-bytes=2000000 ! "
-          "video/x-raw,format=GRAY8,width=" +
-          std::to_string(w) + ",height=" + std::to_string(h) +
-          ",framerate=" + std::to_string(fps) +
-          "/1 ! "
-          "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency "
-          "speed-preset=ultrafast ! "
-          "rtph264pay config-interval=1 ! udpsink host=" +
-          target_ip_ + " port=" + std::to_string(port);
-
-      initGstPipeline(pipe_str, pipeline_ir_, appsrc_ir_);
+      if (enable_gst) {
+        int port = this->get_parameter("target_port_ir").as_int();
+        std::string pipe_str =
+            "appsrc name=src is-live=true format=time max-bytes=2000000 ! "
+            "video/x-raw,format=GRAY8,width=" +
+            std::to_string(w) + ",height=" + std::to_string(h) +
+            ",framerate=" + std::to_string(fps) +
+            "/1 ! "
+            "videoconvert ! video/x-raw,format=I420 ! x264enc tune=zerolatency "
+            "speed-preset=ultrafast ! "
+            "rtph264pay config-interval=1 ! udpsink host=" +
+            target_ip_ + " port=" + std::to_string(port);
+        initGstPipeline(pipe_str, pipeline_ir_, appsrc_ir_);
+      }
     }
 
     try {

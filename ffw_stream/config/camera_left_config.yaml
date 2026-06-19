@@ -17,6 +17,9 @@
     # Crucial for D405: it only has one IR stream, so index must be 0
     ir_index: 0
 
+    # Set to false to test camera init without GStreamer
+    enable_gstreamer: false
+
     # RGB settings (Ignored since enable_rgb is false)
     rgb_width: 640
     rgb_height: 480
