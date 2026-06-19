@@ -4,7 +4,6 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 
-#include <lz4.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -121,13 +120,19 @@ public:
           getFormat(this->get_parameter("depth_format").as_string()), fps);
 
       int port = this->get_parameter("target_port_depth").as_int();
+      // Depth frames are Z16 (16-bit grayscale), NOT UYVY. Use GRAY16_LE caps
+      // so the pipeline is self-describing instead of relying on incidental
+      // byte-width overlap with UYVY (which previously "worked" only because
+      // both formats are 2 bytes/pixel).
       std::string pipe_str =
-          "appsrc name=src is-live=true format=time ! "
-          "application/x-lz4,width=(int)" + std::to_string(w) +
-          ",height=(int)" + std::to_string(h) +
-          ",framerate=(fraction)" + std::to_string(fps) + "/1 ! "
-          "rtpgstpay ! udpsink host=" +
-          target_ip_ + " port=" + std::to_string(port);
+          "appsrc name=src is-live=true format=time max-bytes=2000000 ! "
+          "video/x-raw,format=GRAY16_LE,width=" +
+          std::to_string(w) + ",height=" + std::to_string(h) +
+          ",framerate=" + std::to_string(fps) +
+          "/1 ! "
+          "rtpvrawpay ! udpsink host=" +
+          target_ip_ + " port=" + std::to_string(port) +
+          " max-bitrate=250000000";
 
       initGstPipeline(pipe_str, pipeline_depth_, appsrc_depth_);
     }
@@ -297,10 +302,6 @@ private:
       g_error_free(error);
       return;
     }
-    if (!pipeline) {
-      RCLCPP_ERROR(this->get_logger(), "GStreamer pipeline is NULL! Check if core plugins are missing.");
-      return;
-    }
     appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "src");
 
     ensureMainLoop();
@@ -388,54 +389,8 @@ private:
       double ts = std::chrono::duration<double>(
                       std::chrono::system_clock::now().time_since_epoch())
                       .count();
-      pushLZ4GstBuffer(frames.get_depth_frame(), appsrc_depth_, "Depth",
-                       frame_id++, ts);
-    }
-  }
-
-  void pushLZ4GstBuffer(const rs2::video_frame &frame, GstElement *appsrc,
-                        const std::string &stream_name, uint32_t frame_id,
-                        double timestamp) {
-    if (!frame || !appsrc) return;
-
-    int src_size = frame.get_width() * frame.get_height() * frame.get_bytes_per_pixel();
-    int max_dst_size = LZ4_compressBound(src_size);
-    std::vector<uint8_t> compressed_data(max_dst_size);
-    
-    int compressed_size = LZ4_compress_default(
-        (const char*)frame.get_data(), 
-        (char*)compressed_data.data(), 
-        src_size, 
-        max_dst_size);
-
-    if (compressed_size <= 0) return;
-
-    GstBuffer *buffer = gst_buffer_new_allocate(NULL, compressed_size, NULL);
-    gst_buffer_fill(buffer, 0, compressed_data.data(), compressed_size);
-
-    GstClock *clock = gst_element_get_clock(appsrc);
-    if (clock) {
-      GstClockTime now = gst_clock_get_time(clock);
-      GstClockTime base = gst_element_get_base_time(appsrc);
-      GST_BUFFER_PTS(buffer) = (now > base) ? (now - base) : 0;
-      gst_object_unref(clock);
-    }
-
-    GstFlowReturn ret;
-    g_signal_emit_by_name(appsrc, "push-buffer", buffer, &ret);
-    gst_buffer_unref(buffer);
-
-    if (ret != GST_FLOW_OK) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                           "Error pushing LZ4 buffer");
-    } else {
-      char msg[256];
-      int len = snprintf(msg, sizeof(msg),
-                   "{\"stream\":\"%s\",\"frame_id\":%u,\"timestamp\":%f,"
-                   "\"depth_scale\":%e}",
-                   stream_name.c_str(), frame_id, timestamp, depth_scale_);
-      sendto(metadata_sock_, msg, len, 0, (struct sockaddr *)&metadata_addr_,
-             sizeof(metadata_addr_));
+      pushGstBuffer(frames.get_depth_frame(), appsrc_depth_, "Depth",
+                    frame_id++, ts);
     }
   }
 

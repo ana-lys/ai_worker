@@ -93,7 +93,7 @@ enter_container() {
         print_update_notice "${CURRENT_VER}" "${GIT_VER}"
     fi
 
-    docker exec -it "$CONTAINER_NAME" bash --rcfile /root/ros2_ws/src/ai_worker/scripts/docker_bashrc.sh
+    docker exec -it "$CONTAINER_NAME" bash
 }
 
 # Function to stop the container
