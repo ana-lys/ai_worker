@@ -249,7 +249,16 @@ int main(int argc, char **argv) {
   setvbuf(stderr, NULL, _IONBF, 0);
   std::cout << "[DEBUG] main START" << std::endl;
   rclcpp::init(argc, argv);
-  std::cout << "[DEBUG] rclcpp::init DONE. Creating node..." << std::endl;
+  std::cout << "[DEBUG] rclcpp::init DONE. Creating dummy node..." << std::endl;
+  
+  try {
+    auto dummy = std::make_shared<rclcpp::Node>("dummy_test_node");
+    std::cout << "[DEBUG] Dummy node created successfully!" << std::endl;
+  } catch (const std::exception &e) {
+    std::cout << "[DEBUG] Dummy node THREW EXCEPTION: " << e.what() << std::endl;
+  }
+
+  std::cout << "[DEBUG] Creating actual RealsenseUDPStreamer node..." << std::endl;
   auto node = std::make_shared<RealsenseUDPStreamer>();
   std::cout << "[DEBUG] Node created. Spinning..." << std::endl;
   rclcpp::spin(node);
