@@ -68,14 +68,12 @@ public:
 
     if (this->get_parameter("enable_depth").as_bool()) {
       int port = this->get_parameter("target_port_depth").as_int();
-      int w = this->get_parameter("depth_width").as_int();
-      int h = this->get_parameter("depth_height").as_int();
-      std::string pipe_str = "udpsrc port=" + std::to_string(port) +
-                             " buffer-size=2500000"
-                             " ! "
-                             "application/x-rtp,media=application,clock-rate=90000,encoding-name=X-GST"
-                             " ! rtpgstdepay ! appsink name=sink "
-                             "drop=true max-buffers=1 sync=false";
+      std::string pipe_str =
+          "udpsrc port=" + std::to_string(port) +
+          " ! "
+          "application/x-rtp,media=video,clock-rate=90000,encoding-name=H264 ! "
+          "rtph264depay ! decodebin ! videoconvert ! video/x-raw,format=GRAY8 "
+          "! appsink name=sink drop=true max-buffers=1 sync=false";
       initGstPipeline("Depth", pipe_str, pipeline_depth_, appsink_depth_,
                       bus_watch_id_depth_);
     }
@@ -277,15 +275,22 @@ private:
     else if (stream_name == "IR")
       expected_bytes = (size_t)w * h * 1;
     else if (stream_name == "Depth")
-      expected_bytes = (size_t)w * h * 2; // For depth this is the uncompressed size
+      expected_bytes = (size_t)w * h * 1; // Since we forced it to GRAY8
 
-    if (stream_name != "Depth" && map.size < expected_bytes) {
+    if (map.size < expected_bytes) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                            "[%s] Buffer too small (%zu < %zu), dropping frame",
                            stream_name.c_str(), map.size, expected_bytes);
       gst_buffer_unmap(buffer, &map);
       gst_sample_unref(sample);
       return;
+    }
+
+    // depth_scale_ is updated asynchronously by metadataLoop
+    float scale;
+    {
+      std::lock_guard<std::mutex> lock(meta_mutex_);
+      scale = depth_scale_;
     }
 
     if (stream_name == "RGB") {
@@ -299,19 +304,16 @@ private:
           cv_bridge::CvImage(header, "mono8", frame).toImageMsg();
       pub_ir_->publish(*msg);
     } else if (stream_name == "Depth") {
+      cv::Mat gray8(h, w, CV_8UC1, map.data);
       frame = cv::Mat(h, w, CV_16UC1);
-      int uncompressed_size = LZ4_decompress_safe(
-          (const char*)map.data,
-          (char*)frame.data,
-          map.size,
-          expected_bytes);
-          
-      if (uncompressed_size < 0 || (size_t)uncompressed_size != expected_bytes) {
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                               "[Depth] LZ4 Decompression failed or size mismatch. Dropping frame");
-          gst_buffer_unmap(buffer, &map);
-          gst_sample_unref(sample);
-          return;
+      
+      if (scale <= 0.000001f) scale = 0.001f; // fallback to 1mm if metadata hasn't arrived yet
+      float recovery_factor = 1.0f / (255.0f * scale);
+      
+      for (int r = 0; r < h; r++) {
+        for (int c = 0; c < w; c++) {
+          frame.at<uint16_t>(r, c) = (uint16_t)(gray8.at<uint8_t>(r, c) * recovery_factor);
+        }
       }
       
       sensor_msgs::msg::Image::SharedPtr msg =
