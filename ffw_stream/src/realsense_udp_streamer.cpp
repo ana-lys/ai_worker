@@ -42,6 +42,10 @@ public:
   RealsenseUDPStreamer() : Node("realsense_udp_streamer") {
     std::cout << "[DEBUG] RealsenseUDPStreamer constructor START" << std::endl;
 
+    std::cout << "[DEBUG] Creating rs2::pipeline..." << std::endl;
+    pipe_ = std::make_shared<rs2::pipeline>();
+    std::cout << "[DEBUG] rs2::pipeline created." << std::endl;
+
     std::cout << "[DEBUG] Declaring parameters..." << std::endl;
     this->declare_parameter<std::string>("target_ip", "127.0.0.1");
     this->declare_parameter<int>("target_port_rgb", 8080);
@@ -118,11 +122,12 @@ public:
         initFFmpegPipe(cmd, pipe_ir_, "IR");
       }
 
-      std::cout << "[DEBUG] Starting pipeline (pipe_.start(cfg))..." << std::endl;
-      profile_ = pipe_.start(cfg);
+      std::cout << "[DEBUG] Starting pipeline (pipe_->start(cfg))..." << std::endl;
+      auto prof = pipe_->start(cfg);
+      profile_ = std::make_shared<rs2::pipeline_profile>(prof);
       std::cout << "[DEBUG] Pipeline started successfully." << std::endl;
       
-      auto dev = profile_.get_device();
+      auto dev = profile_->get_device();
       for (auto &sensor : dev.query_sensors()) {
         if (sensor.supports(RS2_OPTION_AUTO_EXPOSURE_PRIORITY)) sensor.set_option(RS2_OPTION_AUTO_EXPOSURE_PRIORITY, 0.0f);
         if (sensor.is<rs2::depth_sensor>()) depth_scale_ = sensor.as<rs2::depth_sensor>().get_depth_scale();
@@ -148,7 +153,7 @@ public:
   ~RealsenseUDPStreamer() {
     running_ = false;
     if (stream_thread_.joinable()) stream_thread_.join();
-    try { pipe_.stop(); } catch (...) {}
+    try { if (pipe_) pipe_->stop(); } catch (...) {}
     if (metadata_sock_ >= 0) close(metadata_sock_);
   }
 
@@ -202,7 +207,8 @@ private:
     while (running_ && rclcpp::ok()) {
       rs2::frameset frames;
       try {
-        frames = pipe_.wait_for_frames(5000);
+        if (!pipe_) continue;
+        frames = pipe_->wait_for_frames(5000);
       } catch (const std::exception &e) {
         RCLCPP_WARN(this->get_logger(), "Timeout waiting for frames: %s", e.what());
         continue;
@@ -229,8 +235,8 @@ private:
   std::shared_ptr<FFmpegPipe> pipe_rgb_;
   std::shared_ptr<FFmpegPipe> pipe_depth_;
   std::shared_ptr<FFmpegPipe> pipe_ir_;
-  rs2::pipeline pipe_;
-  rs2::pipeline_profile profile_;
+  std::shared_ptr<rs2::pipeline> pipe_;
+  std::shared_ptr<rs2::pipeline_profile> profile_;
   std::thread stream_thread_;
   std::atomic<bool> running_{false};
   int metadata_sock_ = -1;
