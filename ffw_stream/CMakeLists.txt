@@ -57,6 +57,14 @@ target_link_libraries(realsense_udp_receiver
 
 install(TARGETS realsense_udp_receiver
   DESTINATION lib/${PROJECT_NAME})
+
+add_executable(test_rs2_barebone src/test_rs2_barebone.cpp)
+target_link_libraries(test_rs2_barebone
+  realsense2::realsense2
+)
+install(TARGETS test_rs2_barebone
+  DESTINATION lib/${PROJECT_NAME})
+
 install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
