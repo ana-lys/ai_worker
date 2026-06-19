@@ -118,16 +118,12 @@ public:
     }
 
     running_ = true;
-    stream_thread_rgb_ = std::thread(&RealsenseUDPStreamer::streamLoopRgb, this);
-    stream_thread_depth_ = std::thread(&RealsenseUDPStreamer::streamLoopDepth, this);
-    stream_thread_ir_ = std::thread(&RealsenseUDPStreamer::streamLoopIr, this);
+    stream_thread_ = std::thread(&RealsenseUDPStreamer::streamLoop, this);
   }
 
   ~RealsenseUDPStreamer() {
     running_ = false;
-    if (stream_thread_rgb_.joinable()) stream_thread_rgb_.join();
-    if (stream_thread_depth_.joinable()) stream_thread_depth_.join();
-    if (stream_thread_ir_.joinable()) stream_thread_ir_.join();
+    if (stream_thread_.joinable()) stream_thread_.join();
     try { pipe_.stop(); } catch (...) {}
     if (metadata_sock_ >= 0) close(metadata_sock_);
   }
@@ -170,30 +166,30 @@ private:
     }
   }
 
-  void streamLoopRgb() {
+  void streamLoop() {
     uint32_t frame_id = 0;
     while (running_ && rclcpp::ok()) {
-      rs2::frameset frames = pipe_.wait_for_frames(5000);
+      rs2::frameset frames;
+      try {
+        frames = pipe_.wait_for_frames(5000);
+      } catch (const std::exception &e) {
+        RCLCPP_WARN(this->get_logger(), "Timeout waiting for frames: %s", e.what());
+        continue;
+      }
+      
       double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-      pushFFmpegBuffer(frames.get_color_frame(), pipe_rgb_, "RGB", frame_id++, ts);
-    }
-  }
-
-  void streamLoopDepth() {
-    uint32_t frame_id = 0;
-    while (running_ && rclcpp::ok()) {
-      rs2::frameset frames = pipe_.wait_for_frames(5000);
-      double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-      pushFFmpegBuffer(frames.get_depth_frame(), pipe_depth_, "Depth", frame_id++, ts, true);
-    }
-  }
-
-  void streamLoopIr() {
-    uint32_t frame_id = 0;
-    while (running_ && rclcpp::ok()) {
-      rs2::frameset frames = pipe_.wait_for_frames(5000);
-      double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-      pushFFmpegBuffer(frames.get_infrared_frame(ir_index_), pipe_ir_, "IR", frame_id++, ts);
+      
+      if (pipe_rgb_) {
+        pushFFmpegBuffer(frames.get_color_frame(), pipe_rgb_, "RGB", frame_id, ts);
+      }
+      if (pipe_depth_) {
+        pushFFmpegBuffer(frames.get_depth_frame(), pipe_depth_, "Depth", frame_id, ts, true);
+      }
+      if (pipe_ir_) {
+        pushFFmpegBuffer(frames.get_infrared_frame(ir_index_), pipe_ir_, "IR", frame_id, ts);
+      }
+      
+      frame_id++;
     }
   }
 
@@ -204,9 +200,7 @@ private:
   std::shared_ptr<FFmpegPipe> pipe_ir_;
   rs2::pipeline pipe_;
   rs2::pipeline_profile profile_;
-  std::thread stream_thread_rgb_;
-  std::thread stream_thread_depth_;
-  std::thread stream_thread_ir_;
+  std::thread stream_thread_;
   std::atomic<bool> running_{false};
   int metadata_sock_ = -1;
   struct sockaddr_in metadata_addr_;
