@@ -308,6 +308,15 @@ private:
 
   void initGstPipeline(const std::string &pipe_str, GstElement *&pipeline,
                        GstElement *&appsrc) {
+    // Initialize GStreamer lazily so that nodes running with enable_gstreamer=false
+    // never call gst_init(). On Jetson, gst_init() crashes in headless mode due to
+    // NVIDIA EGL GStreamer plugins being mounted by the Docker runtime.
+    static bool gst_initialized = false;
+    if (!gst_initialized) {
+      gst_init(nullptr, nullptr);
+      gst_initialized = true;
+    }
+
     GError *error = nullptr;
     pipeline = gst_parse_launch(pipe_str.c_str(), &error);
     if (error) {
@@ -532,7 +541,6 @@ private:
 };
 
 int main(int argc, char **argv) {
-  gst_init(&argc, &argv);
   rclcpp::init(argc, argv);
   auto node = std::make_shared<RealsenseUDPStreamer>();
   rclcpp::spin(node);
