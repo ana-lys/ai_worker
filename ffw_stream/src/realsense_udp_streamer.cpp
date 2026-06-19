@@ -300,9 +300,24 @@ private:
       RCLCPP_ERROR(this->get_logger(), "GStreamer parse error: %s",
                    error->message);
       g_error_free(error);
+      pipeline = nullptr;
+      return;
+    }
+    if (!pipeline) {
+      RCLCPP_ERROR(this->get_logger(),
+                   "GStreamer pipeline is NULL after parse (no error reported). "
+                   "Check that all required plugins are installed. Pipeline: %s",
+                   pipe_str.c_str());
       return;
     }
     appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+    if (!appsrc) {
+      RCLCPP_ERROR(this->get_logger(),
+                   "GStreamer appsrc element 'src' not found in pipeline.");
+      gst_object_unref(pipeline);
+      pipeline = nullptr;
+      return;
+    }
 
     ensureMainLoop();
     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
