@@ -36,6 +36,7 @@
 // Build: g++ -std=c++17 udp_depth_ir_streamer.cpp -lrealsense2 -lpthread -o
 // udp_depth_ir_streamer
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cstdio>
@@ -234,6 +235,9 @@ int main(int argc, char **argv) {
             : "";
     serials.push_back(serial);
   }
+  
+  // Sort serials to ensure deterministic ordering (e.g., Left vs Right)
+  std::sort(serials.begin(), serials.end());
 
   log("Destination: " + dest_ip + "  base_port=" + std::to_string(base_port) +
       "  " + std::to_string(width) + "x" + std::to_string(height) + "@" +

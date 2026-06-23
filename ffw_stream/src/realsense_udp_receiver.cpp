@@ -173,6 +173,7 @@ private:
           cv::applyColorMap(depth, depth, custom_lut);
         }
         if (!ir.empty() && ir.channels() == 1) {
+          cv::normalize(ir, ir, 0, 255, cv::NORM_MINMAX);
           cv::cvtColor(ir, ir, cv::COLOR_GRAY2BGR);
         }
 

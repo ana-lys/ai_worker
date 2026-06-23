@@ -694,12 +694,12 @@ public:
   void update_grippers(mjModel *m, mjData *d) {
       if (current_mode_ != "ARM") return;
       
-      if (left_btn0_) gripper_l_pos_ += 0.01; // close
-      if (left_btn1_) gripper_l_pos_ -= 0.01; // open
+      if (left_btn0_) gripper_l_pos_ += 0.002; // close
+      if (left_btn1_) gripper_l_pos_ -= 0.002; // open
       gripper_l_pos_ = std::clamp(gripper_l_pos_, 0.0, 1.2);
 
-      if (right_btn0_) gripper_r_pos_ += 0.01; // close
-      if (right_btn1_) gripper_r_pos_ -= 0.01; // open
+      if (right_btn0_) gripper_r_pos_ += 0.002; // close
+      if (right_btn1_) gripper_r_pos_ -= 0.002; // open
       gripper_r_pos_ = std::clamp(gripper_r_pos_, 0.0, 1.2);
 
       static int log_counter = 0;
