@@ -201,10 +201,21 @@ int main(int argc, char **argv) {
 
   std::string dest_ip = argv[1];
   int base_port = std::atoi(argv[2]);
-  int width = argc > 3 ? std::atoi(argv[3]) : 480;
-  int height = argc > 4 ? std::atoi(argv[4]) : 270;
-  int fps = argc > 5 ? std::atoi(argv[5]) : 30;
-  float max_depth_m = argc > 6 ? static_cast<float>(std::atof(argv[6])) : 1.0f;
+
+  int width = 480;
+  int height = 270;
+  int fps = 30;
+  float max_depth_m = 1.0f;
+
+  if (argc > 3 && std::string(argv[3]) != "--ros-args") width = std::atoi(argv[3]);
+  if (argc > 4 && std::string(argv[4]) != "--ros-args") height = std::atoi(argv[4]);
+  if (argc > 5 && std::string(argv[5]) != "--ros-args") fps = std::atoi(argv[5]);
+  if (argc > 6 && std::string(argv[6]) != "--ros-args") max_depth_m = static_cast<float>(std::atof(argv[6]));
+
+  if (width == 0) width = 480;
+  if (height == 0) height = 270;
+  if (fps == 0) fps = 30;
+  if (max_depth_m <= 0) max_depth_m = 1.0f;
 
   std::signal(SIGINT, on_sigint);
 
