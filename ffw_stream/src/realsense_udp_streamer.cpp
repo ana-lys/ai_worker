@@ -236,8 +236,8 @@ int main(int argc, char **argv) {
     serials.push_back(serial);
   }
   
-  // Sort serials to ensure deterministic ordering (e.g., Left vs Right)
-  std::sort(serials.begin(), serials.end());
+  // Reverse the default SDK enumeration order so Left becomes 0 and Right becomes 1
+  std::reverse(serials.begin(), serials.end());
 
   log("Destination: " + dest_ip + "  base_port=" + std::to_string(base_port) +
       "  " + std::to_string(width) + "x" + std::to_string(height) + "@" +
