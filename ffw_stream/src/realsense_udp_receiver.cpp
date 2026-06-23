@@ -142,18 +142,26 @@ private:
             custom_lut = cv::Mat(256, 1, CV_8UC3);
             custom_lut.at<cv::Vec3b>(0, 0) = cv::Vec3b(0, 0, 0); // Invalid depth
             
-            // Zone 1: 0m -> 0.2m (Values 1 to 51)
-            // Hot Manipulation Zone: Red (too close) smoothly fading to Green (0.2m sweet spot)
-            for (int i = 1; i <= 51; ++i) { 
-              float ratio = (i - 1) / 50.0f;
-              custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(0, 255 * ratio, 255 * (1.0f - ratio));
-            }
-            
-            // Zone 2: 0.2m -> 1.0m (Values 52 to 255)
-            // Background Zone: Cyan smoothly fading into Dark Blue
-            for (int i = 52; i <= 255; ++i) { 
-              float ratio = (i - 52) / 203.0f;
-              custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(255 - (127 * ratio), 255 * (1.0f - ratio), 0);
+            // Generate smooth cool background with a sharp red quadratic highlight at 0.2m
+            for (int i = 1; i <= 255; ++i) { 
+              float x = i / 255.0f; // distance in meters (0 to 1.0)
+              
+              // Base cool gradient: Cyan (close) to Dark Blue (far)
+              float base_b = 255.0f - (127.0f * x);
+              float base_g = 255.0f * (1.0f - x);
+              float base_r = 0.0f;
+              
+              // Quadratic highlight strictly around 0.2m (spread of 0.04m)
+              float diff = x - 0.2f;
+              float c = 1.0f - std::pow(diff / 0.04f, 2.0f);
+              if (c < 0.0f) c = 0.0f; // clamp to 0 outside the critical range
+              
+              // Blend base color with Bright Red (0, 0, 255 in BGR) based on criticality
+              float b = base_b * (1.0f - c) + 0.0f * c;
+              float g = base_g * (1.0f - c) + 0.0f * c;
+              float r = base_r * (1.0f - c) + 255.0f * c;
+              
+              custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(b, g, r);
             }
           }
           cv::applyColorMap(depth, depth, custom_lut);
@@ -163,7 +171,8 @@ private:
         }
 
         // Ensure consistent sizes before concatenating
-        int w = 480, h = 270; 
+        // Default rotated dimensions are w=270, h=480
+        int w = 270, h = 480; 
         if (!depth.empty()) { w = depth.cols; h = depth.rows; }
         else if (!ir.empty()) { w = ir.cols; h = ir.rows; }
 
