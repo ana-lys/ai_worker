@@ -137,7 +137,16 @@ private:
 
         // Convert to BGR for display
         if (!depth.empty() && depth.channels() == 1) {
-          cv::applyColorMap(depth, depth, cv::COLORMAP_JET);
+          cv::Mat colored_depth;
+          cv::applyColorMap(depth, colored_depth, cv::COLORMAP_JET);
+          
+          // Highlight critical depth <= 0.2m
+          // Max depth is 1.0m (255), so 0.2m = 51. 0 is invalid depth.
+          cv::Mat danger_mask;
+          cv::inRange(depth, 1, 51, danger_mask);
+          colored_depth.setTo(cv::Scalar(0, 0, 255), danger_mask); // Solid Red
+          
+          depth = colored_depth;
         }
         if (!ir.empty() && ir.channels() == 1) {
           cv::cvtColor(ir, ir, cv::COLOR_GRAY2BGR);
