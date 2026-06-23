@@ -173,7 +173,7 @@ private:
           cv::applyColorMap(depth, depth, custom_lut);
         }
         if (!ir.empty() && ir.channels() == 1) {
-          cv::normalize(ir, ir, 0, 255, cv::NORM_MINMAX);
+          ir.convertTo(ir, -1, 1.5, 30); // Boost brightness slightly (alpha=1.5, beta=30)
           cv::cvtColor(ir, ir, cv::COLOR_GRAY2BGR);
         }
 
