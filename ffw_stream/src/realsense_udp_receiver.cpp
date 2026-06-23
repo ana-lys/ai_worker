@@ -139,21 +139,21 @@ private:
         if (!depth.empty() && depth.channels() == 1) {
           static cv::Mat custom_lut;
           if (custom_lut.empty()) {
-            custom_lut = cv::Mat(1, 256, CV_8UC3);
+            custom_lut = cv::Mat(256, 1, CV_8UC3);
             custom_lut.at<cv::Vec3b>(0, 0) = cv::Vec3b(0, 0, 0); // Invalid depth
             
             // Zone 1: 0m -> 0.2m (Values 1 to 51)
             // Hot Manipulation Zone: Red (too close) smoothly fading to Green (0.2m sweet spot)
             for (int i = 1; i <= 51; ++i) { 
               float ratio = (i - 1) / 50.0f;
-              custom_lut.at<cv::Vec3b>(0, i) = cv::Vec3b(0, 255 * ratio, 255 * (1.0f - ratio));
+              custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(0, 255 * ratio, 255 * (1.0f - ratio));
             }
             
             // Zone 2: 0.2m -> 1.0m (Values 52 to 255)
             // Background Zone: Cyan smoothly fading into Dark Blue
             for (int i = 52; i <= 255; ++i) { 
               float ratio = (i - 52) / 203.0f;
-              custom_lut.at<cv::Vec3b>(0, i) = cv::Vec3b(255 - (127 * ratio), 255 * (1.0f - ratio), 0);
+              custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(255 - (127 * ratio), 255 * (1.0f - ratio), 0);
             }
           }
           cv::applyColorMap(depth, depth, custom_lut);
