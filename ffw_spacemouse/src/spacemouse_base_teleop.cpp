@@ -105,9 +105,9 @@ public:
     current_head_pos_  = {0.0, 0.0};
     current_mode_      = "BASE";
 
-    // Failsafe timer (checks every 1.0 seconds)
+    // Failsafe timer (checks every 2.5 seconds)
     failsafe_timer_ = this->create_wall_timer(
-      std::chrono::seconds(1),
+      std::chrono::milliseconds(2500),
       std::bind(&SpaceMouseBaseTeleop::failsafe_check, this));
 
     // Publish initial mode and precision states after a short delay
@@ -284,10 +284,10 @@ private:
     }
     
     failsafe_check_cycles_++;
-    if (failsafe_check_cycles_ > 3) {  // allow 3s startup after first message
-      if (joint_state_count_ < 70) {
+    if (failsafe_check_cycles_ > 1) {  // allow first 2.5s startup after first message
+      if (joint_state_count_ < 175) {  // 70Hz * 2.5 seconds = 175
         RCLCPP_FATAL(this->get_logger(),
-          "CRITICAL: Joint states Hz dropped to %d! Failsafe triggering shutdown.", joint_state_count_);
+          "CRITICAL: Joint states 2.5-sec average dropped to %.1f Hz! Failsafe triggering shutdown.", joint_state_count_ / 2.5);
         rclcpp::shutdown();
       }
     }
