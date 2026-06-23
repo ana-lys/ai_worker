@@ -142,18 +142,24 @@ private:
             custom_lut = cv::Mat(256, 1, CV_8UC3);
             custom_lut.at<cv::Vec3b>(0, 0) = cv::Vec3b(0, 0, 0); // Invalid depth
             
-            // Generate smooth cool background with a sharp red quadratic highlight at 0.2m
+            // Generate smooth cool background with a sharp red highlight
             for (int i = 1; i <= 255; ++i) { 
               float x = i / 255.0f; // distance in meters (0 to 1.0)
+              
+              // Black out the really near range to hide self/gripper noise
+              if (x < 0.08f) {
+                custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(0, 0, 0);
+                continue;
+              }
               
               // Base cool gradient: Cyan (close) to Dark Blue (far)
               float base_b = 255.0f - (127.0f * x);
               float base_g = 255.0f * (1.0f - x);
               float base_r = 0.0f;
               
-              // Quadratic highlight strictly around 0.2m (spread of 0.04m)
-              float diff = x - 0.2f;
-              float c = 1.0f - std::pow(diff / 0.04f, 2.0f);
+              // Steeper ^4 highlight strictly around 0.15m (spread of 0.04m)
+              float diff = x - 0.15f;
+              float c = 1.0f - std::pow(diff / 0.04f, 4.0f);
               if (c < 0.0f) c = 0.0f; // clamp to 0 outside the critical range
               
               // Blend base color with Bright Red (0, 0, 255 in BGR) based on criticality
