@@ -90,6 +90,9 @@ private:
         cv::Mat gray;
         cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
         
+        // Rotate 90 degrees counter-clockwise as requested
+        cv::rotate(gray, gray, cv::ROTATE_90_COUNTERCLOCKWISE);
+        
         sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(header, "mono8", gray).toImageMsg();
         pub->publish(*msg);
 
