@@ -9,21 +9,6 @@ from launch_ros.actions import Node
 import launch_ros.parameter_descriptions
 from ament_index_python.packages import get_package_share_directory
 
-def get_joystick_id():
-    """Find the best available SpaceMouse device ID."""
-    try:
-        result = subprocess.check_output(
-            ['ros2', 'run', 'joy', 'joy_enumerate_devices'],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-        for line in result.splitlines():
-            if "3Dconnexion" in line:
-                return int(line.split(':')[0].strip())
-    except Exception:
-        pass
-    return 0
-
 def get_joint_limits_from_urdf():
     defaults = {
         'arm_lower_limits': [-3.14, -3.14, -3.14, -2.9361, -3.14, -1.57, -1.5804, 0.0],
@@ -32,7 +17,6 @@ def get_joint_limits_from_urdf():
     return defaults # Simplified for now
 
 def generate_launch_description():
-    target_id = get_joystick_id()
     joint_limits = get_joint_limits_from_urdf()
     
     target_arm_arg = DeclareLaunchArgument('target_arm', default_value='right', description='Target arm: left or right')

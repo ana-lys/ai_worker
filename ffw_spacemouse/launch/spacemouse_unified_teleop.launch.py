@@ -3,6 +3,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler, EmitEvent
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -14,8 +15,8 @@ def generate_launch_description():
 
     hardware_mode_arg = DeclareLaunchArgument(
         'hardware_mode',
-        default_value='false',
-        description='If true, the IK solver synchronizes its state with the real robot when switching to ARM mode.'
+        default_value='true',
+        description='If true, enables base teleop, mode switching, and hardware/Gazebo sync.'
     )
 
     left_device_id_arg = DeclareLaunchArgument('left_device_id', default_value='0')
@@ -41,31 +42,30 @@ def generate_launch_description():
 
     # Base Teleop Node
     base_teleop_node = Node(
+        condition=IfCondition(LaunchConfiguration('hardware_mode')),
         package='ffw_spacemouse',
         executable='spacemouse_base_teleop',
         name='spacemouse_base_teleop',
         output='screen',
         parameters=[{
-            'left_joy_topic': '/right/joy',
-            'right_joy_topic': '/left/joy',
-            'lift_topic': '/leader/joystick_controller_right/joint_trajectory',
+            'base_joy_topic': '/right/joy',
+            'aux_joy_topic':  '/left/joy',
             'head_topic': '/leader/joystick_controller_left/joint_trajectory',
             'max_linear_vel': 0.3,
             'max_angular_vel': 0.5,
-            'lift_step': 0.01,
-            'head_step': 0.05,
-            'axis_linear_x': 1,
-            'axis_linear_y': 0,
-            'axis_angular_z': 5,
-            'invert_linear_x': False,
-            'invert_linear_y': False,
-            'invert_angular_z': False,
+            'head_step': 0.03125,
+            'axis_x': 1,
+            'axis_y': 0,
+            'axis_yaw': 5,
             'axis_z': 2,
-            'axis_pitch': 5,
+            'axis_pitch': 4,
             'axis_head_pan': 3,
+            'invert_x': False,
+            'invert_y': False,
+            'invert_yaw': False,
             'invert_z': False,
             'invert_pitch': False,
-            'invert_head_pan': False
+            'invert_head_pan': False,
         }]
     )
 
@@ -82,7 +82,8 @@ def generate_launch_description():
 
     # Failsafe shutdown event
     failsafe_event = RegisterEventHandler(
-        OnProcessExit(
+        condition=IfCondition(LaunchConfiguration('hardware_mode')),
+        event_handler=OnProcessExit(
             target_action=base_teleop_node,
             on_exit=[
                 EmitEvent(event=Shutdown(reason='SpaceMouse Base Teleop terminated due to Joint State Failsafe!'))

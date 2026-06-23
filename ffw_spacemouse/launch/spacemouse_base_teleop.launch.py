@@ -8,8 +8,6 @@ import launch_ros.parameter_descriptions
 
 def get_joint_limits_from_urdf():
     defaults = {
-        'lift_lower_limits': [-0.5],
-        'lift_upper_limits': [0.0],
         'head_lower_limits': [-0.2317, -0.35],
         'head_upper_limits': [0.6951, 0.35],
     }
@@ -58,15 +56,15 @@ def generate_launch_description():
             name='spacemouse_base_teleop',
             output='screen',
             parameters=[{
-                'left_joy_topic': '/spacemouse/left/joy',
-                'right_joy_topic': '/spacemouse/right/joy',
+                'base_joy_topic': '/spacemouse/right/joy',
+                'aux_joy_topic':  '/spacemouse/left/joy',
                 'max_linear_vel': 1.0,
                 'max_angular_vel': 1.5,
                 'axis_x': 1,
                 'axis_y': 0,
                 'axis_yaw': 5,
                 'axis_z': 2,
-                'axis_pitch': 5,
+                'axis_pitch': 4,
                 'axis_head_pan': 3,
                 'invert_x': False,
                 'invert_y': False,
@@ -74,8 +72,7 @@ def generate_launch_description():
                 'invert_z': False,
                 'invert_pitch': False,
                 'invert_head_pan': False,
-                'lift_step': 0.01,
-                'head_step': 0.05,
+                'head_step': 0.03125,
                 **joint_limits,
             }]
         ),

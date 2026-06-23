@@ -314,30 +314,31 @@ public:
     joy_sub_r_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/right/joy", 10, std::bind(&TeleopNode::joy_callback_r, this, _1));
 
-    this->declare_parameter("hardware_mode", false);
+    // hardware_mode=true  (default): subscribe to real robot /joint_states for sync.
+    // hardware_mode=false (sim-only): drive MuJoCo internally only; publish nothing to ROS.
+    this->declare_parameter("hardware_mode", true);
     hardware_mode_ = this->get_parameter("hardware_mode").as_bool();
+
+    // If hardware_mode=false, base teleop is disabled, so there's no mode switch. Default to ARM.
+    current_mode_ = hardware_mode_ ? "BASE" : "ARM";
 
     mode_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
             std::lock_guard<std::mutex> lock(pose_mutex_);
             if (msg->data == "ARM" && current_mode_ == "BASE") {
-                if (hardware_mode_) {
-                    hardware_sync_requested_ = true;
-                }
+                hardware_sync_requested_ = true;
             }
             current_mode_ = msg->data;
         });
 
-    if (!hardware_mode_) {
-        joint_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
-            "joint_states", 10);
-    } else {
-        real_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-                std::lock_guard<std::mutex> lock(pose_mutex_);
-                latest_real_joints_ = *msg;
-            });
-    }
+    // Always subscribe to real/Gazebo robot joint states for sync on mode switch.
+    real_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+        "/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            latest_real_joints_ = *msg;
+            joint_msg_count_++;
+        });
+    // When hardware_mode=false: no joint_states publisher — MuJoCo is internal only.
 
     left_traj_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory", 10);
@@ -398,26 +399,11 @@ public:
   }
 
   void publish_joints(mjModel *m, mjData *d) {
-    if (!hardware_mode_ && joint_pub_) {
-      sensor_msgs::msg::JointState msg;
-      msg.header.stamp = this->now();
-      for (int i = 0; i < m->njnt; ++i) {
-        if (m->jnt_type[i] == mjJNT_HINGE || m->jnt_type[i] == mjJNT_SLIDE) {
-          const char *name = mj_id2name(m, mjOBJ_JOINT, i);
-          if (name) {
-            msg.name.push_back(name);
-            msg.position.push_back(d->qpos[m->jnt_qposadr[i]]);
-          }
-        }
-      }
-      joint_pub_->publish(msg);
-    }
-    
-    if (current_mode_ == "ARM") {
-      publish_arm_trajectory(m, d, "l");
-      publish_arm_trajectory(m, d, "r");
-      publish_lift_trajectory(m, d);
-    }
+    // Publish arm and lift trajectories continuously.
+    // In BASE mode, the goals are locked horizontally but can ascend/descend synchronously.
+    publish_arm_trajectory(m, d, "l");
+    publish_arm_trajectory(m, d, "r");
+    publish_lift_trajectory(m, d);
   }
 
   void publish_arm_trajectory(mjModel *m, mjData *d, const std::string& prefix) {
@@ -602,6 +588,22 @@ private:
     for (size_t i = 1; i < msg->buttons.size(); ++i) {
         if (msg->buttons[i] == 1) left_btn1_ = true;
     }
+
+    if (current_mode_ == "BASE" && msg->axes.size() > 2) {
+        // In BASE mode, left mouse Z axis controls synchronized lift of both IK targets
+        double z = msg->axes[2];
+        if (std::abs(z) > 0.01) {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            // Speed: 0.005 per tick at 100Hz = 0.5 m/s max velocity
+            double z_delta = z * 0.005;
+            
+            accum_l_trans_.z() += z_delta;
+            accum_r_trans_.z() += z_delta;
+            
+            target_l_.translation() = initial_l_.translation() + accum_l_trans_;
+            target_r_.translation() = initial_r_.translation() + accum_r_trans_;
+        }
+    }
   }
 
   void joy_callback_r(const sensor_msgs::msg::Joy::SharedPtr msg) {
@@ -666,17 +668,28 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_r_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr real_joint_sub_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr left_traj_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr right_traj_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr lift_traj_pub_;
 
-  bool hardware_mode_ = false;
-  bool hardware_sync_requested_ = false;
+  bool hardware_mode_ = true;
+  std::atomic<bool> hardware_sync_requested_{false};
   std::string current_mode_ = "BASE";
   sensor_msgs::msg::JointState latest_real_joints_;
+  int joint_msg_count_ = 0;
 
 public:
+  bool is_hardware_mode() const { return hardware_mode_; }
+  bool is_sync_requested() const { return hardware_sync_requested_; }
+  void request_hardware_sync() { hardware_sync_requested_ = true; }
+  
+  int get_and_reset_joint_msg_count() {
+      std::lock_guard<std::mutex> lock(pose_mutex_);
+      int count = joint_msg_count_;
+      joint_msg_count_ = 0;
+      return count;
+  }
+
   std::string get_current_mode() const { return current_mode_; }
   void update_grippers(mjModel *m, mjData *d) {
       if (current_mode_ != "ARM") return;
@@ -790,6 +803,46 @@ int main(int argc, char **argv) {
   // Start ROS thread
   std::thread ros_thread([&node]() { rclcpp::spin(node); });
 
+  if (node->is_hardware_mode()) {
+      RCLCPP_INFO(node->get_logger(), "Waiting up to 30s for stable /joint_states (>=95Hz for 1s)...");
+      auto wait_start = std::chrono::steady_clock::now();
+      auto window_start = wait_start;
+      node->get_and_reset_joint_msg_count();
+      bool stable = false;
+
+      while (rclcpp::ok() && !stable && viewer.enabled()) {
+          auto now = std::chrono::steady_clock::now();
+          if (std::chrono::duration_cast<std::chrono::seconds>(now - wait_start).count() > 30) {
+              RCLCPP_WARN(node->get_logger(), "Timeout waiting for stable /joint_states! Starting anyway.");
+              break;
+          }
+          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - window_start).count() >= 1000) {
+              int count = node->get_and_reset_joint_msg_count();
+              RCLCPP_INFO(node->get_logger(), "/joint_states rate: %d Hz", count);
+              if (count >= 95) {
+                  RCLCPP_INFO(node->get_logger(), "Stable /joint_states achieved! Performing initial sync...");
+                  stable = true;
+                  node->request_hardware_sync();
+              }
+              window_start = now;
+          }
+          
+          // Render the viewer so the OS doesn't kill the unresponsive window
+          viewer.render(d);
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      
+      // Wait for sync to actually complete
+      while (rclcpp::ok() && node->is_sync_requested() && viewer.enabled()) {
+          node->apply_hardware_sync(m, d);
+          viewer.render(d);
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      
+      // Update targets to reflect the synced state
+      node->get_targets(init_l, init_r);
+  }
+
   // Main interaction loop
   int step_counter = 0;
   Eigen::Isometry3d prev_target_l = init_l;
@@ -807,19 +860,18 @@ int main(int argc, char **argv) {
     prev_target_l = current_target_l;
     prev_target_r = current_target_r;
 
-    // Run one gradient step using the single solver
-    if (node->get_current_mode() == "ARM") {
-      ffw_ik::StepResult res =
-          solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
-                           col_cfg, err_hist, dist_hist);
+    // Run one gradient step continuously in ALL modes.
+    // In BASE mode, targets are stationary except for synchronized Z movement.
+    ffw_ik::StepResult res =
+        solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
+                         col_cfg, err_hist, dist_hist);
 
-      // Print solver status every 20 ticks or if stalled
-      if (++step_counter % 20 == 0 || res.stalled) {
-        // Reduced verbosity
-      }
-      
-      node->update_grippers(m, d);
+    // Print solver status every 20 ticks or if stalled
+    if (++step_counter % 20 == 0 || res.stalled) {
+      // Reduced verbosity
     }
+    
+    node->update_grippers(m, d);
 
     // Process any hardware sync requests before mj_forward
     node->apply_hardware_sync(m, d);
