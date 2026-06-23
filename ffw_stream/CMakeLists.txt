@@ -10,7 +10,6 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(realsense2 REQUIRED)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -19,7 +18,6 @@ add_executable(realsense_udp_streamer src/realsense_udp_streamer.cpp)
 target_include_directories(realsense_udp_streamer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  ${GSTREAMER_INCLUDE_DIRS}
 )
 target_compile_features(realsense_udp_streamer PUBLIC c_std_99 cxx_std_17)
 
@@ -29,7 +27,7 @@ ament_target_dependencies(realsense_udp_streamer
 
 target_link_libraries(realsense_udp_streamer
   realsense2::realsense2
-  ${GSTREAMER_LIBRARIES}
+  pthread
 )
 
 install(TARGETS realsense_udp_streamer
@@ -39,7 +37,6 @@ add_executable(realsense_udp_receiver src/realsense_udp_receiver.cpp)
 target_include_directories(realsense_udp_receiver PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  ${GSTREAMER_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
 target_compile_features(realsense_udp_receiver PUBLIC c_std_99 cxx_std_17)
@@ -51,26 +48,13 @@ ament_target_dependencies(realsense_udp_receiver
 )
 
 target_link_libraries(realsense_udp_receiver
-  ${GSTREAMER_LIBRARIES}
   ${OpenCV_LIBS}
 )
 
 install(TARGETS realsense_udp_receiver
   DESTINATION lib/${PROJECT_NAME})
 
-add_executable(test_stream src/test_stream.cpp)
-target_compile_features(test_stream PUBLIC cxx_std_17)
-target_link_libraries(test_stream
-  realsense2::realsense2
-  pthread
-)
-# Note: test_stream shells out to the `ffmpeg` CLI binary at runtime via
-# popen() for encoding/UDP streaming -- it does not link against
-# libavcodec/libavformat, so no find_package()/target_link_libraries()
-# entry for FFmpeg is needed here. The `ffmpeg` binary must just be
-# installed and on PATH at runtime (see package.xml exec_depend).
-install(TARGETS test_stream
-  DESTINATION lib/${PROJECT_NAME})
+
 
 install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
