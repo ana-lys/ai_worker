@@ -70,7 +70,7 @@ FILE *open_ffmpeg_sender(const std::string &ip, int port, int width, int height,
   cmd << "-c:v libx264 -preset ultrafast -tune zerolatency "
       << "-g 10 -pix_fmt yuv420p ";
 
-  cmd << "-f mpegts udp://" << ip << ":" << port << "?pkt_size=1316";
+  cmd << "-f rtp rtp://" << ip << ":" << port << "?pkt_size=1316";
   log("  ffmpeg cmd: " + cmd.str());
   return popen(cmd.str().c_str(), "w");
 }

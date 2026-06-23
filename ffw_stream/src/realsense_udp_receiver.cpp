@@ -55,13 +55,16 @@ public:
 
 private:
   void streamLoop(int cam_index, const std::string& type, int port, rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub) {
-    std::string pipeline = "udp://@0.0.0.0:" + std::to_string(port);
+    std::string pipeline = "udpsrc port=" + std::to_string(port) + 
+      " caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+      "rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
+    
     std::string feed_name = "Cam" + std::to_string(cam_index) + "_" + type;
     
     RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
 
     while (running_ && rclcpp::ok()) {
-      cv::VideoCapture cap(pipeline, cv::CAP_FFMPEG);
+      cv::VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
       
       if (!cap.isOpened()) {
         RCLCPP_WARN(this->get_logger(), "[%s] Failed to open UDP stream, retrying in 2s...", feed_name.c_str());
@@ -188,9 +191,6 @@ private:
 };
 
 int main(int argc, char **argv) {
-  // CRITICAL: Use low_delay flag to minimize FFMPEG buffering, but keep default probesize so it doesn't desync and blackout on UDP packet drops
-  setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "flags;low_delay", 1);
-  
   rclcpp::init(argc, argv);
   auto node = std::make_shared<RealsenseUDPReceiver>();
   rclcpp::spin(node);
