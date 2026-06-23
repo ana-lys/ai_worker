@@ -51,8 +51,10 @@ def generate_launch_description():
         {'name': 'camera_namespace1', 'default': 'camera_left', 'description': 'camera1 namespace'},
         {'name': 'serial_no1', 'default': serial1, 'description': 'choose device1 by serial number'},
         {'name': 'depth_module.depth_profile1', 'default': '480,270,30', 'description': 'depth stream profile for camera1'},
-        {'name': 'depth_module.color_profile1', 'default': '424,240,30', 'description': 'Depth module color stream profile for d405 camera1'},
+        {'name': 'depth_module.color_profile1', 'default': '480,270,30', 'description': 'Depth module color stream profile for d405 camera1'},
         {'name': 'colorizer.enable1', 'default': 'true', 'description': 'enable colorizer filter for camera1'},
+        {'name': 'pointcloud.enable1', 'default': 'true', 'description': 'enable pointcloud for camera1'},
+        {'name': 'align_depth.enable1', 'default': 'true', 'description': 'enable align depth for camera1'},
     ]
 
     params1 = duplicate_params(rs_launch.configurable_parameters, '1')
