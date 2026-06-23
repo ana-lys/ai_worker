@@ -188,8 +188,8 @@ private:
 };
 
 int main(int argc, char **argv) {
-  // CRITICAL: Disable FFMPEG internal buffering for zero-latency streaming
-  setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "fflags;nobuffer|flags;low_delay|probesize;32|analyzeduration;0", 1);
+  // CRITICAL: Disable FFMPEG internal buffering for zero-latency streaming without breaking synchronization
+  setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "flags;low_delay|probesize;32|analyzeduration;0", 1);
   
   rclcpp::init(argc, argv);
   auto node = std::make_shared<RealsenseUDPReceiver>();
