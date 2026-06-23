@@ -19,10 +19,10 @@ class RealsenseUDPReceiver : public rclcpp::Node {
 public:
   RealsenseUDPReceiver() : Node("realsense_udp_receiver") {
     // Ports
-    this->declare_parameter<int>("target_port_rgb", 8080);
-    this->declare_parameter<int>("target_port_depth", 8082);
-    this->declare_parameter<int>("target_port_ir", 8084);
-    this->declare_parameter<int>("target_port_metadata", 8089);
+    this->declare_parameter<int>("target_port_rgb", 9002);
+    this->declare_parameter<int>("target_port_depth", 9000);
+    this->declare_parameter<int>("target_port_ir", 9001);
+    this->declare_parameter<int>("target_port_metadata", 9009);
 
     // Camera identity for display namespaces
     this->declare_parameter<std::string>("camera_name", "Camera");
