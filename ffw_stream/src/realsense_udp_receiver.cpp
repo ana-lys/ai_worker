@@ -157,9 +157,9 @@ private:
               float base_g = 255.0f * (1.0f - x);
               float base_r = 0.0f;
               
-              // Sharp linear "spike" exactly at 0.14m (spread of 0.01m, strictly bounding the highlight between 0.13m and 0.15m)
-              float diff = x - 0.14f;
-              float c = 1.0f - std::abs(diff / 0.01f);
+              // ^4 highlight exactly at 0.135m (spread of 0.02m for a +/- 2cm full range)
+              float diff = x - 0.135f;
+              float c = 1.0f - std::pow(diff / 0.02f, 4.0f);
               if (c < 0.0f) c = 0.0f; // clamp to 0 outside the critical range
               
               // Blend base color with Bright Red (0, 0, 255 in BGR) based on criticality
