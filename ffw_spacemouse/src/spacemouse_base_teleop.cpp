@@ -249,10 +249,10 @@ private:
       double pan_cubed = pan * pan * pan;
       double pitch_cubed = pitch * pitch * pitch;
       current_head_pos_[0] =
-          std::clamp(current_head_pos_[0] + (pan_cubed * head_step),
+          std::clamp(current_head_pos_[0] + (pitch_cubed * head_step),
                      head_lower_limits_[0], head_upper_limits_[0]);
       current_head_pos_[1] =
-          std::clamp(current_head_pos_[1] + (pitch_cubed * head_step),
+          std::clamp(current_head_pos_[1] + (pan_cubed * head_step),
                      head_lower_limits_[1], head_upper_limits_[1]);
       was_moving_head_ = true;
     } else if (was_moving_head_) {
