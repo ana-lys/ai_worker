@@ -62,17 +62,11 @@ if (ZED_FOUND)
   target_link_libraries(zed_udp_streamer
     ${ZED_LIBRARIES}
     ${CUDA_LIBRARIES}
-    ${OpenCV_LIBS}
     pthread
   )
 
-  ament_target_dependencies(zed_udp_streamer
-    rclcpp
-    cv_bridge
-  )
-  
-  if(CMAKE_SYSTEM_NAME MATCHES "aarch64")
-    set_target_properties(zed_udp_streamer PROPERTIES LINK_FLAGS "-Wl,--unresolved-symbols=ignore-in-shared-libs")
+  if(EXISTS "/usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so")
+    target_link_libraries(zed_udp_streamer /usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so)
   endif()
 
   install(TARGETS zed_udp_streamer
