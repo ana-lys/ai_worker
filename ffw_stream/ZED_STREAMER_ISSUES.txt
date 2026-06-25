@@ -1,40 +1,63 @@
-# ZED UDP Streamer - Compilation & Linking Issues Log
+# Comprehensive Engineering Log: ZED UDP Streamer on Jetson Orin Nano
 
-## 1. The Two Systems & Hardware
-- **Host Machine**: NVIDIA Jetson Orin Nano (aarch64 architecture)
-  - Connected to the ZED M stereocamera.
-  - Runs the ZED SDK (which requires CUDA).
-  - Lacks a dedicated hardware video encoder (NVENC), meaning we must rely on software encoding (libx264) via the CPU.
-- **Client Machine**: Desktop/Server (x86_64 architecture)
-  - Not connected to the ZED camera.
-  - Used for viewing the stream or running remote teleoperation logic.
-  - Lacks the Jetson-specific Tegra multimedia libraries (`libnvargus`, `libnvjpeg`).
+## 1. System Architectures & Hardware Constraints
 
-## 2. What Works
-- The streamer logic itself works conceptually: we use `sl::Camera` to pull frames, convert them to raw bgra pixels, and pipe them directly into an `ffmpeg` subprocess.
-- The `ffmpeg` command works for the Orin Nano hardware: it uses `-c:v libx264` (CPU software encoder) which fully circumvents the missing hardware NVENC block.
-- The build works flawlessly on the Client Machine (x86_64) because it lacks the ZED SDK, meaning CMake silently ignores the `zed_udp_streamer` compilation step entirely.
-- The official `zed-ros2-wrapper` works on the Jetson because it compiles its core logic into a ROS Component (which is a shared `.so` library, not an executable).
+### 1.1 Host Machine (Robot Host)
+- **Hardware**: NVIDIA Jetson Orin Nano
+- **Architecture**: ARM64 (`aarch64`)
+- **Camera**: Stereolabs ZED M (Stereo camera)
+- **Key Hardware Limitation**: The Orin Nano SoC **does not have a hardware video encoder (NVENC)**. While higher-end Jetsons (Orin NX, AGX Orin) have dedicated NVENC blocks for zero-CPU H264/H265 encoding, the Nano relies entirely on the CPU for video encoding.
+- **Software Stack**: Runs NVIDIA JetPack (L4T), CUDA, and the Stereolabs ZED SDK. The ZED SDK relies heavily on CUDA for depth computation and tracking, and on Jetson's multimedia APIs (Argus) for ISP access.
 
-## 3. What Doesn't Work (The Blocker)
-- Compiling `zed_udp_streamer` as a standalone executable on the Jetson Orin Nano fails during the final linking phase (`ld`).
+### 1.2 Client Machine (Operator / Teleop Node)
+- **Hardware**: Standard Desktop/Server
+- **Architecture**: x86_64 (`amd64`)
+- **Key Characteristics**: Does not run JetPack, does not have Tegra libraries (`libnvargus`, `libnvjpeg`). It may or may not have the ZED SDK installed. It purely receives the UDP H264 stream and decodes it for display or processing.
 
-### The Linker Bug Explained
-1. The ZED SDK relies on an internal Jetson library called `libnvargus_socketclient.so` to communicate with the camera hardware.
-2. In NVIDIA JetPack 5, `libnvargus_socketclient.so` has a known packaging bug: it contains an unresolved symbol called `jpeg_set_hardware_acceleration_parameters_enc`. It assumes this symbol will be provided globally by the system's `libjpeg` or `libnvjpeg`.
-3. When CMake builds a **SHARED LIBRARY** (like Stereolabs does in `zed-ros2-wrapper`), the GNU linker is very relaxed. It ignores the dangling `libnvargus` symbol, assuming it will magically resolve at runtime. Thus, the official wrapper builds fine.
-4. When CMake builds an **EXECUTABLE BINARY** (like our `zed_udp_streamer`), the GNU linker becomes ruthlessly strict. It verifies every single dependency down the entire tree. When it hits the broken `libnvargus` library, it immediately throws a fatal error and refuses to generate the executable.
+## 2. Implementation Strategy & What Works
 
-### Failed Workarounds Attempted
-- Adding standard `jpeg` and `nvjpeg` libraries to the linker.
-- Hardcoding the absolute path to `/usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so`.
-- Appending the `-Wl,--unresolved-symbols=ignore-in-shared-libs` linker flag to force the executable linker to relax its rules (CMake often misapplies this for executables).
-- Linking standard ROS 2 libraries (`cv_bridge`, `OpenCV`) to try and replicate the official wrapper's exact linking environment.
+To achieve low-latency video streaming from the ZED M to the client without the overhead of ROS 2 topics (which struggle with high-bandwidth video over Wi-Fi), the strategy is:
+1. Capture raw frames from the ZED M using the C++ `sl::Camera` API.
+2. Extract the BGRA pixel buffer.
+3. Pipe this raw buffer directly into an `ffmpeg` subprocess.
+4. Because the Orin Nano lacks NVENC, `ffmpeg` uses `-c:v libx264 -preset ultrafast -tune zerolatency` to perform **software encoding** on the CPU.
+5. `ffmpeg` transmits the H264 stream over raw UDP.
 
-## 4. Next Steps / The Solution
-To successfully compile the ZED streamer on the Jetson without getting blocked by the NVIDIA JetPack bug, we must circumvent the strict executable linker entirely. We can do this by copying Stereolabs' architecture:
-1. We must split `zed_udp_streamer.cpp` into two parts.
-2. The core streaming logic must be compiled into a **SHARED LIBRARY** (`libzed_udp_streamer.so`). The relaxed linker will allow this to build despite the NVIDIA bug.
-3. We then create a tiny `main.cpp` wrapper executable that simply loads and executes the shared library at runtime. 
+**What works perfectly:**
+- The conceptual pipeline and the `ffmpeg` software encoding command are perfectly suited for the Orin Nano hardware.
+- The compilation step on the **Client Machine** works flawlessly. CMake detects that the Client lacks the ZED SDK (or simply skips the Jetson linking steps) and completes the build without issue.
+- The official `zed-ros2-wrapper` compiles and runs successfully on the Orin Nano.
 
-*Note: For now, compilation of `zed_udp_streamer` has been disabled in CMakeLists.txt to unblock the rest of the workspace.*
+## 3. The Blocker: The Jetson Linker Bug
+
+Despite the code being correct, compiling `zed_udp_streamer` as a standalone executable on the Orin Nano fails with:
+`/usr/bin/ld: /usr/lib/aarch64-linux-gnu/nvidia/libnvargus_socketclient.so: undefined reference to 'jpeg_set_hardware_acceleration_parameters_enc'`
+
+### 3.1 Deep Dive: The Undefined Reference
+The ZED SDK (`libsl_core.so`) dynamically links against `libnvargus_socketclient.so`, which is an NVIDIA JetPack system library used to interface with the camera ISP.
+In recent JetPack versions (JetPack 5+), NVIDIA shipped `libnvargus_socketclient.so` with a packaging error: it internally calls the function `jpeg_set_hardware_acceleration_parameters_enc`, but it fails to explicitly declare a dependency on the library that actually provides this function (NVIDIA's Tegra `libnvjpeg.so` or `libjpeg.so`).
+
+### 3.2 Executable vs. Shared Library Linking Rules
+Why does the official `zed-ros2-wrapper` compile, while our `zed_udp_streamer` fails? It comes down to how the GNU Linker (`ld`) treats different target types:
+
+1. **Building an Executable (Our Code)**: When CMake runs `add_executable`, the GNU linker is notoriously strict. It resolves the entire dependency tree. When it evaluates `libnvargus_socketclient.so` (pulled in by the ZED SDK) and notices the missing JPEG symbol, it immediately throws a fatal error to prevent the creation of a potentially broken binary.
+2. **Building a Shared Library (Official Wrapper)**: The official `zed-ros2-wrapper` compiles its core camera logic into a ROS Component via `add_library(zed_camera_component SHARED)`. When building a `.so` file, the GNU linker is relaxed. It allows "unresolved symbols," assuming that the parent application loading the library will eventually provide them at runtime.
+3. **Runtime Resolution**: In ROS 2, `rclcpp_components` dynamically loads the wrapper's `.so` file into memory. By the time it loads, the system environment already has the Tegra JPEG libraries loaded, so the missing symbol is magically resolved, and it works.
+
+### 3.3 Exhaustive List of Failed Workarounds
+We attempted to force the executable linker to succeed using several methods, all of which failed due to CMake/ld edge cases:
+- **Explicit Linking**: Attempted `target_link_libraries(nvjpeg)` and `target_link_libraries(jpeg)`. Failed because standard search paths found the generic Ubuntu `libjpeg` instead of the Tegra version.
+- **Absolute Paths**: Attempted `target_link_libraries(/usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so)`. Failed because `ld` still processed the transitive Argus dependencies in an order that triggered the error before the manual library could satisfy it.
+- **Linker Flags**: Attempted `-Wl,--allow-shlib-undefined` and `-Wl,--unresolved-symbols=ignore-in-shared-libs`. Failed because CMake executables often override or ignore these flags late in the build chain.
+- **Mimicking ROS Links**: Attempted to artificially link `cv_bridge` and `OpenCV` to mimic the wrapper. Failed because it didn't change the executable strictness.
+
+## 4. The Proposed Solution
+
+To bypass this hardware-specific packaging bug, we must stop fighting the executable linker and instead mimic the architecture of the `zed-ros2-wrapper`.
+
+**The Shared Library Architecture:**
+1. **Refactor Code**: Move the `main()` function out of `zed_udp_streamer.cpp`.
+2. **Build a Shared Library**: Compile the core UDP streaming logic into `libzed_udp_streamer.so` using `add_library(... SHARED)`. The relaxed shared-library linker will ignore the `libnvargus` bug and successfully build the object.
+3. **Build a Micro-Executable**: Create a new, tiny `main.cpp` that simply `#include`s and calls a "start_stream" function from our shared library. Because the micro-executable itself doesn't directly link the ZED SDK, it bypasses the strict dependency check.
+
+This approach guarantees a successful build on the Orin Nano while maintaining the zero-latency, non-ROS UDP transport we designed.
