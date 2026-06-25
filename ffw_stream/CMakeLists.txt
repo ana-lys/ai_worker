@@ -72,7 +72,7 @@ if (ZED_FOUND)
   )
   
   if(CMAKE_SYSTEM_NAME MATCHES "aarch64")
-    target_link_options(zed_udp_streamer PRIVATE "-Wl,--allow-shlib-undefined")
+    set_target_properties(zed_udp_streamer PROPERTIES LINK_FLAGS "-Wl,--unresolved-symbols=ignore-in-shared-libs")
   endif()
 
   install(TARGETS zed_udp_streamer
