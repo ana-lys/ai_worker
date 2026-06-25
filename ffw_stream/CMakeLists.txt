@@ -65,6 +65,10 @@ if (ZED_FOUND)
     pthread
   )
 
+  if(CMAKE_SYSTEM_NAME MATCHES "aarch64")
+    target_link_libraries(zed_udp_streamer nvjpeg)
+  endif()
+
   install(TARGETS zed_udp_streamer
     DESTINATION lib/${PROJECT_NAME})
 endif()
