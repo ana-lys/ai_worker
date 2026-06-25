@@ -34,7 +34,7 @@ target_link_libraries(realsense_udp_streamer
 install(TARGETS realsense_udp_streamer
   DESTINATION lib/${PROJECT_NAME})
 
-if (ZED_FOUND)
+if (FALSE AND ZED_FOUND)
   find_package(CUDA QUIET)
   
   if(CMAKE_SYSTEM_NAME MATCHES "aarch64")
