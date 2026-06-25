@@ -13,7 +13,7 @@ find_package(PkgConfig REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(ZED REQUIRED)
+find_package(ZED QUIET)
 
 add_executable(realsense_udp_streamer src/realsense_udp_streamer.cpp)
 target_include_directories(realsense_udp_streamer PUBLIC
@@ -34,23 +34,30 @@ target_link_libraries(realsense_udp_streamer
 install(TARGETS realsense_udp_streamer
   DESTINATION lib/${PROJECT_NAME})
 
-add_executable(zed_udp_streamer src/zed_udp_streamer.cpp)
-target_include_directories(zed_udp_streamer PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  ${ZED_INCLUDE_DIRS}
-  /usr/local/cuda/include
-)
-target_compile_features(zed_udp_streamer PUBLIC c_std_99 cxx_std_17)
+if (ZED_FOUND)
+  add_executable(zed_udp_streamer src/zed_udp_streamer.cpp)
+  target_include_directories(zed_udp_streamer PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    ${ZED_INCLUDE_DIRS}
+  )
+  if (EXISTS "/usr/local/cuda/include")
+    target_include_directories(zed_udp_streamer PUBLIC /usr/local/cuda/include)
+  endif()
+  
+  target_compile_features(zed_udp_streamer PUBLIC c_std_99 cxx_std_17)
 
-target_link_libraries(zed_udp_streamer
-  ${ZED_LIBRARIES}
-  pthread
-  /usr/lib/aarch64-linux-gnu/tegra/libjpeg.so
-)
+  target_link_libraries(zed_udp_streamer
+    ${ZED_LIBRARIES}
+    pthread
+  )
+  if (EXISTS "/usr/lib/aarch64-linux-gnu/tegra/libjpeg.so")
+    target_link_libraries(zed_udp_streamer /usr/lib/aarch64-linux-gnu/tegra/libjpeg.so)
+  endif()
 
-install(TARGETS zed_udp_streamer
-  DESTINATION lib/${PROJECT_NAME})
+  install(TARGETS zed_udp_streamer
+    DESTINATION lib/${PROJECT_NAME})
+endif()
 
 add_executable(realsense_udp_receiver src/realsense_udp_receiver.cpp)
 target_include_directories(realsense_udp_receiver PUBLIC
