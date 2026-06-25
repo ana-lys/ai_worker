@@ -69,7 +69,7 @@ public:
 
     mjv_defaultCamera(&cam_top_);
     cam_top_.distance = 2.0;
-    cam_top_.azimuth = 180.0; // View from the front
+    cam_top_.azimuth = 180.0;   // View from the front
     cam_top_.elevation = -15.0; // Straight on
     cam_top_.type = mjCAMERA_FREE;
     cam_top_.lookat[0] = 0.75;
@@ -99,19 +99,22 @@ public:
     for (int i = 1; i < m_->nbody; ++i) { // Skip world body
       int parent = m_->body_parentid[i];
       if (parent >= 0) {
-        if (scn_.ngeom >= scn_.maxgeom) break;
+        if (scn_.ngeom >= scn_.maxgeom)
+          break;
 
-        const mjtNum* p1 = d->xpos + 3 * parent;
-        const mjtNum* p2 = d->xpos + 3 * i;
+        const mjtNum *p1 = d->xpos + 3 * parent;
+        const mjtNum *p2 = d->xpos + 3 * i;
 
-        // Skip drawing if the two points are exactly identical to avoid zero-length geom errors
-        if (std::abs(p1[0]-p2[0]) < 1e-4 && std::abs(p1[1]-p2[1]) < 1e-4 && std::abs(p1[2]-p2[2]) < 1e-4) {
-            continue;
+        // Skip drawing if the two points are exactly identical to avoid
+        // zero-length geom errors
+        if (std::abs(p1[0] - p2[0]) < 1e-4 && std::abs(p1[1] - p2[1]) < 1e-4 &&
+            std::abs(p1[2] - p2[2]) < 1e-4) {
+          continue;
         }
 
         mjvGeom *g = &scn_.geoms[scn_.ngeom++];
         mjv_connector(g, mjGEOM_CAPSULE, 0.015, p1, p2); // 1.5cm thickness
-        
+
         // Vibrant Orange, mostly opaque
         g->rgba[0] = 1.0f;
         g->rgba[1] = 0.45f;
@@ -192,11 +195,15 @@ public:
       char text_r[256];
       Eigen::Vector3d rpy_l = extract_rpy(pose_l_.linear());
       Eigen::Vector3d rpy_r = extract_rpy(pose_r_.linear());
-      const mjtNum* pl = d->site_xpos + 3 * id_l;
-      const mjtNum* pr = d->site_xpos + 3 * id_r;
-      snprintf(text_l, sizeof(text_l), "LEFT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  %7.3f\nPitch: %7.3f\nYaw:   %7.3f", 
+      const mjtNum *pl = d->site_xpos + 3 * id_l;
+      const mjtNum *pr = d->site_xpos + 3 * id_r;
+      snprintf(text_l, sizeof(text_l),
+               "LEFT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  "
+               "%7.3f\nPitch: %7.3f\nYaw:   %7.3f",
                pl[0], pl[1], pl[2], rpy_l[0], rpy_l[1], rpy_l[2]);
-      snprintf(text_r, sizeof(text_r), "RIGHT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  %7.3f\nPitch: %7.3f\nYaw:   %7.3f", 
+      snprintf(text_r, sizeof(text_r),
+               "RIGHT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  "
+               "%7.3f\nPitch: %7.3f\nYaw:   %7.3f",
                pr[0], pr[1], pr[2], rpy_r[0], rpy_r[1], rpy_r[2]);
       mjr_overlay(mjFONT_BIG, mjGRID_TOPLEFT, vp_full, text_l, nullptr, &con_);
       mjr_overlay(mjFONT_BIG, mjGRID_TOPRIGHT, vp_full, text_r, nullptr, &con_);
@@ -264,11 +271,11 @@ public:
 
   bool enabled() const { return enabled_; }
 
-  static Eigen::Vector3d extract_rpy(const Eigen::Matrix3d& R) {
-      double pitch = std::asin(std::clamp(R(0, 2), -1.0, 1.0));
-      double yaw = std::atan2(-R(0, 1), R(0, 0));
-      double roll = std::atan2(-R(1, 2), R(2, 2));
-      return Eigen::Vector3d(roll, pitch, yaw);
+  static Eigen::Vector3d extract_rpy(const Eigen::Matrix3d &R) {
+    double pitch = std::asin(std::clamp(R(0, 2), -1.0, 1.0));
+    double yaw = std::atan2(-R(0, 1), R(0, 0));
+    double roll = std::atan2(-R(1, 2), R(2, 2));
+    return Eigen::Vector3d(roll, pitch, yaw);
   }
 
 private:
@@ -314,41 +321,52 @@ public:
     joy_sub_r_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/right/joy", 10, std::bind(&TeleopNode::joy_callback_r, this, _1));
 
-    // hardware_mode=true  (default): subscribe to real robot /joint_states for sync.
-    // hardware_mode=false (sim-only): drive MuJoCo internally only; publish nothing to ROS.
+    // hardware_mode=true  (default): subscribe to real robot /joint_states for
+    // sync. hardware_mode=false (sim-only): drive MuJoCo internally only;
+    // publish nothing to ROS.
     this->declare_parameter("hardware_mode", true);
     hardware_mode_ = this->get_parameter("hardware_mode").as_bool();
 
-    // If hardware_mode=false, base teleop is disabled, so there's no mode switch. Default to ARM.
+    // If hardware_mode=false, base teleop is disabled, so there's no mode
+    // switch. Default to ARM.
     current_mode_ = hardware_mode_ ? "BASE" : "ARM";
 
     mode_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
-            std::lock_guard<std::mutex> lock(pose_mutex_);
-            if (msg->data == "ARM" && current_mode_ == "BASE") {
-                hardware_sync_requested_ = true;
-            }
-            current_mode_ = msg->data;
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          if (msg->data == "ARM" && current_mode_ == "BASE") {
+            hardware_sync_requested_ = true;
+          }
+          current_mode_ = msg->data;
         });
 
-    // Always subscribe to real/Gazebo robot joint states for sync on mode switch.
+    // Always subscribe to real/Gazebo robot joint states for sync on mode
+    // switch.
     real_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-        "/joint_states", 10, [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-            std::lock_guard<std::mutex> lock(pose_mutex_);
-            latest_real_joints_ = *msg;
-            joint_msg_count_++;
+        "/joint_states", 10,
+        [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          latest_real_joints_ = *msg;
+          joint_msg_count_++;
         });
-    // When hardware_mode=false: no joint_states publisher — MuJoCo is internal only.
+    // When hardware_mode=false: no joint_states publisher — MuJoCo is internal
+    // only.
 
-    left_traj_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-        "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory", 10);
-    right_traj_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-        "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory", 10);
-    lift_traj_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-        "/leader/joystick_controller_right/joint_trajectory", 10);
+    left_traj_pub_ = this->create_publisher<
+        trajectory_msgs::msg::JointTrajectory>(
+        "/leader/joint_trajectory_command_broadcaster_left/joint_trajectory",
+        10);
+    right_traj_pub_ = this->create_publisher<
+        trajectory_msgs::msg::JointTrajectory>(
+        "/leader/joint_trajectory_command_broadcaster_right/joint_trajectory",
+        10);
+    lift_traj_pub_ =
+        this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+            "/leader/joystick_controller_right/joint_trajectory", 10);
 
     RCLCPP_INFO(this->get_logger(),
-                "SpaceMouse IK Teleop started! Hardware Mode: %s", hardware_mode_ ? "TRUE" : "FALSE");
+                "SpaceMouse IK Teleop started! Hardware Mode: %s",
+                hardware_mode_ ? "TRUE" : "FALSE");
   }
 
   void set_initial_poses(const Eigen::Isometry3d &l,
@@ -367,164 +385,190 @@ public:
   }
 
   void clip_target(const Eigen::Isometry3d &achieved_l,
-                   const Eigen::Isometry3d &achieved_r,
-                   double max_dist = 0.015, double max_angle = 0.2) {
+                   const Eigen::Isometry3d &achieved_r, double max_dist = 0.015,
+                   double max_angle = 0.2) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
 
     // Left arm clipping
     Eigen::Vector3d err_l = target_l_.translation() - achieved_l.translation();
     if (err_l.norm() > max_dist) {
-      target_l_.translation() = achieved_l.translation() + err_l.normalized() * max_dist;
+      target_l_.translation() =
+          achieved_l.translation() + err_l.normalized() * max_dist;
       accum_l_trans_ = target_l_.translation() - initial_l_.translation();
     }
-    Eigen::AngleAxisd err_rot_l(target_l_.linear() * achieved_l.linear().transpose());
+    Eigen::AngleAxisd err_rot_l(target_l_.linear() *
+                                achieved_l.linear().transpose());
     if (std::abs(err_rot_l.angle()) > max_angle) {
-      Eigen::AngleAxisd clamped_rot_l(max_angle * (err_rot_l.angle() > 0 ? 1 : -1), err_rot_l.axis());
-      target_l_.linear() = clamped_rot_l.toRotationMatrix() * achieved_l.linear();
+      Eigen::AngleAxisd clamped_rot_l(
+          max_angle * (err_rot_l.angle() > 0 ? 1 : -1), err_rot_l.axis());
+      target_l_.linear() =
+          clamped_rot_l.toRotationMatrix() * achieved_l.linear();
       accum_l_rot_ = target_l_.linear() * initial_l_.linear().transpose();
     }
 
     // Right arm clipping
     Eigen::Vector3d err_r = target_r_.translation() - achieved_r.translation();
     if (err_r.norm() > max_dist) {
-      target_r_.translation() = achieved_r.translation() + err_r.normalized() * max_dist;
+      target_r_.translation() =
+          achieved_r.translation() + err_r.normalized() * max_dist;
       accum_r_trans_ = target_r_.translation() - initial_r_.translation();
     }
-    Eigen::AngleAxisd err_rot_r(target_r_.linear() * achieved_r.linear().transpose());
+    Eigen::AngleAxisd err_rot_r(target_r_.linear() *
+                                achieved_r.linear().transpose());
     if (std::abs(err_rot_r.angle()) > max_angle) {
-      Eigen::AngleAxisd clamped_rot_r(max_angle * (err_rot_r.angle() > 0 ? 1 : -1), err_rot_r.axis());
-      target_r_.linear() = clamped_rot_r.toRotationMatrix() * achieved_r.linear();
+      Eigen::AngleAxisd clamped_rot_r(
+          max_angle * (err_rot_r.angle() > 0 ? 1 : -1), err_rot_r.axis());
+      target_r_.linear() =
+          clamped_rot_r.toRotationMatrix() * achieved_r.linear();
       accum_r_rot_ = target_r_.linear() * initial_r_.linear().transpose();
     }
   }
 
   void publish_joints(mjModel *m, mjData *d) {
     // Publish arm and lift trajectories continuously.
-    // In BASE mode, the goals are locked horizontally but can ascend/descend synchronously.
+    // In BASE mode, the goals are locked horizontally but can ascend/descend
+    // synchronously.
     publish_arm_trajectory(m, d, "l");
     publish_arm_trajectory(m, d, "r");
     publish_lift_trajectory(m, d);
   }
 
-  void publish_arm_trajectory(mjModel *m, mjData *d, const std::string& prefix) {
-      trajectory_msgs::msg::JointTrajectory traj;
-      traj.header.stamp = rclcpp::Time(0); // instant execution
-      
-      std::vector<std::string> joint_names = {
-          "arm_" + prefix + "_joint1", "arm_" + prefix + "_joint2", "arm_" + prefix + "_joint3",
-          "arm_" + prefix + "_joint4", "arm_" + prefix + "_joint5", "arm_" + prefix + "_joint6",
-          "arm_" + prefix + "_joint7", "gripper_" + prefix + "_joint1"
-      };
-      
-      trajectory_msgs::msg::JointTrajectoryPoint point;
-      point.time_from_start.sec = 0;
-      point.time_from_start.nanosec = 0;
-      
-      for (const auto& name : joint_names) {
-          traj.joint_names.push_back(name);
-          if (name == "gripper_l_joint1") {
-              point.positions.push_back(gripper_l_pos_);
-          } else if (name == "gripper_r_joint1") {
-              point.positions.push_back(gripper_r_pos_);
-          } else {
-              int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
-              if (jnt_id >= 0) {
-                  point.positions.push_back(d->qpos[m->jnt_qposadr[jnt_id]]);
-              } else {
-                  point.positions.push_back(0.0);
-              }
-          }
-          point.velocities.push_back(0.0);
-      }
-      
-      static std::vector<double> prev_positions_l;
-      static std::vector<double> prev_positions_r;
-      std::vector<double>& prev_positions = (prefix == "l") ? prev_positions_l : prev_positions_r;
-      
-      bool changed = false;
-      if (prev_positions.size() != point.positions.size()) {
-          changed = true;
+  void publish_arm_trajectory(mjModel *m, mjData *d,
+                              const std::string &prefix) {
+    trajectory_msgs::msg::JointTrajectory traj;
+    traj.header.stamp = rclcpp::Time(0); // instant execution
+
+    std::vector<std::string> joint_names = {
+        "arm_" + prefix + "_joint1", "arm_" + prefix + "_joint2",
+        "arm_" + prefix + "_joint3", "arm_" + prefix + "_joint4",
+        "arm_" + prefix + "_joint5", "arm_" + prefix + "_joint6",
+        "arm_" + prefix + "_joint7", "gripper_" + prefix + "_joint1"};
+
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.time_from_start.sec = 0;
+    point.time_from_start.nanosec = 0;
+
+    for (const auto &name : joint_names) {
+      traj.joint_names.push_back(name);
+      if (name == "gripper_l_joint1") {
+        point.positions.push_back(gripper_l_pos_);
+      } else if (name == "gripper_r_joint1") {
+        point.positions.push_back(gripper_r_pos_);
       } else {
-          for (size_t i = 0; i < point.positions.size(); ++i) {
-              if (std::abs(point.positions[i] - prev_positions[i]) > 1e-4) {
-                  changed = true;
-                  break;
-              }
-          }
+        int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
+        if (jnt_id >= 0) {
+          point.positions.push_back(d->qpos[m->jnt_qposadr[jnt_id]]);
+        } else {
+          point.positions.push_back(0.0);
+        }
       }
-      
-      if (!changed) return;
-      prev_positions = point.positions;
-      
-      traj.points.push_back(point);
-      if (prefix == "l") left_traj_pub_->publish(traj);
-      else right_traj_pub_->publish(traj);
+      point.velocities.push_back(0.0);
+    }
+
+    static std::vector<double> prev_positions_l;
+    static std::vector<double> prev_positions_r;
+    std::vector<double> &prev_positions =
+        (prefix == "l") ? prev_positions_l : prev_positions_r;
+
+    bool changed = false;
+    if (prev_positions.size() != point.positions.size()) {
+      changed = true;
+    } else {
+      for (size_t i = 0; i < point.positions.size(); ++i) {
+        if (std::abs(point.positions[i] - prev_positions[i]) > 1e-4) {
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    if (!changed)
+      return;
+    prev_positions = point.positions;
+
+    traj.points.push_back(point);
+    if (prefix == "l")
+      left_traj_pub_->publish(traj);
+    else
+      right_traj_pub_->publish(traj);
   }
 
   void publish_lift_trajectory(mjModel *m, mjData *d) {
-      trajectory_msgs::msg::JointTrajectory traj;
-      traj.header.stamp = rclcpp::Time(0); // instant execution
-      
-      traj.joint_names.push_back("lift_joint");
-      
-      trajectory_msgs::msg::JointTrajectoryPoint point;
-      point.time_from_start.sec = 0;
-      point.time_from_start.nanosec = 0;
-      
-      int jnt_id = mj_name2id(m, mjOBJ_JOINT, "lift_joint");
-      if (jnt_id >= 0) {
-          point.positions.push_back(d->qpos[m->jnt_qposadr[jnt_id]]);
-      } else {
-          point.positions.push_back(0.0);
-      }
-      point.velocities.push_back(0.0);
-      
-      traj.points.push_back(point);
-      if (lift_traj_pub_) {
-          lift_traj_pub_->publish(traj);
-      }
+    trajectory_msgs::msg::JointTrajectory traj;
+    traj.header.stamp = rclcpp::Time(0); // instant execution
+
+    traj.joint_names.push_back("lift_joint");
+
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.time_from_start.sec = 0;
+    point.time_from_start.nanosec = 0;
+
+    int jnt_id = mj_name2id(m, mjOBJ_JOINT, "lift_joint");
+    if (jnt_id >= 0) {
+      point.positions.push_back(d->qpos[m->jnt_qposadr[jnt_id]]);
+    } else {
+      point.positions.push_back(0.0);
+    }
+    point.velocities.push_back(0.0);
+
+    traj.points.push_back(point);
+    if (lift_traj_pub_) {
+      lift_traj_pub_->publish(traj);
+    }
   }
 
   void apply_hardware_sync(mjModel *m, mjData *d) {
-      std::lock_guard<std::mutex> lock(pose_mutex_);
-      if (!hardware_sync_requested_) return;
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (!hardware_sync_requested_)
+      return;
 
-      for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
-          std::string name = latest_real_joints_.name[i];
-          if (name == "gripper_l_joint1") gripper_l_pos_ = latest_real_joints_.position[i];
-          if (name == "gripper_r_joint1") gripper_r_pos_ = latest_real_joints_.position[i];
-          if (name.find("gripper") != std::string::npos) continue; // Skip grippers
-          
-          int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
-          if (jnt_id >= 0) {
-              d->qpos[m->jnt_qposadr[jnt_id]] = latest_real_joints_.position[i];
-          }
-      }
-      
-      mj_forward(m, d);
-      
-      int left_id = mj_name2id(m, mjOBJ_SITE, "left_gripper_site");
-      int right_id = mj_name2id(m, mjOBJ_SITE, "right_gripper_site");
-      
-      if (left_id >= 0) {
-          initial_l_.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
-          initial_l_.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * left_id).cast<double>();
-          target_l_ = initial_l_;
-          accum_l_trans_.setZero();
-          accum_l_rot_.setIdentity();
-      }
-      if (right_id >= 0) {
-          initial_r_.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
-          initial_r_.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * right_id).cast<double>();
-          target_r_ = initial_r_;
-          accum_r_trans_.setZero();
-          accum_r_rot_.setIdentity();
-      }
+    for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
+      std::string name = latest_real_joints_.name[i];
+      if (name == "gripper_l_joint1")
+        gripper_l_pos_ = latest_real_joints_.position[i];
+      if (name == "gripper_r_joint1")
+        gripper_r_pos_ = latest_real_joints_.position[i];
+      if (name.find("gripper") != std::string::npos)
+        continue; // Skip grippers
 
-      hardware_sync_requested_ = false;
-      RCLCPP_INFO(this->get_logger(), "Hardware sync complete! Snapped MuJoCo to real robot.");
+      int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
+      if (jnt_id >= 0) {
+        d->qpos[m->jnt_qposadr[jnt_id]] = latest_real_joints_.position[i];
+      }
+    }
+
+    mj_forward(m, d);
+
+    int left_id = mj_name2id(m, mjOBJ_SITE, "left_gripper_site");
+    int right_id = mj_name2id(m, mjOBJ_SITE, "right_gripper_site");
+
+    if (left_id >= 0) {
+      initial_l_.translation() =
+          Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
+      initial_l_.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              d->site_xmat + 9 * left_id)
+              .cast<double>();
+      target_l_ = initial_l_;
+      accum_l_trans_.setZero();
+      accum_l_rot_.setIdentity();
+    }
+    if (right_id >= 0) {
+      initial_r_.translation() =
+          Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+      initial_r_.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              d->site_xmat + 9 * right_id)
+              .cast<double>();
+      target_r_ = initial_r_;
+      accum_r_trans_.setZero();
+      accum_r_rot_.setIdentity();
+    }
+
+    hardware_sync_requested_ = false;
+    RCLCPP_INFO(this->get_logger(),
+                "Hardware sync complete! Snapped MuJoCo to real robot.");
   }
-
 
 private:
   void pose_callback_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -582,61 +626,89 @@ private:
   }
 
   void joy_callback_l(const sensor_msgs::msg::Joy::SharedPtr msg) {
-    if (msg->buttons.empty()) return;
-    left_btn0_ = (msg->buttons[0] == 1);
-    left_btn1_ = false;
+    if (msg->buttons.empty())
+      return;
+    double now = this->now().seconds();
+
+    bool new_btn0 = (msg->buttons[0] == 1);
+    if (new_btn0 && !left_btn0_)
+      left_btn0_press_time_ = now;
+    left_btn0_ = new_btn0;
+
+    bool new_btn1 = false;
     for (size_t i = 1; i < msg->buttons.size(); ++i) {
-        if (msg->buttons[i] == 1) left_btn1_ = true;
+      if (msg->buttons[i] == 1)
+        new_btn1 = true;
     }
+    if (new_btn1 && !left_btn1_)
+      left_btn1_press_time_ = now;
+    left_btn1_ = new_btn1;
 
     if (current_mode_ == "BASE" && msg->axes.size() > 2) {
-        // In BASE mode, left mouse Z axis controls synchronized lift of both IK targets
-        double z = msg->axes[2];
-        if (std::abs(z) > 0.01) {
-            std::lock_guard<std::mutex> lock(pose_mutex_);
-            // Speed: 0.005 per tick at 100Hz. Apply cubic scaling and 0.2 multiplier.
-            double z_cubed = z * z * z;
-            double z_delta = z_cubed * 0.005 * 0.2;
-            
-            accum_l_trans_.z() += z_delta;
-            accum_r_trans_.z() += z_delta;
-            
-            target_l_.translation() = initial_l_.translation() + accum_l_trans_;
-            target_r_.translation() = initial_r_.translation() + accum_r_trans_;
-        }
+      // In BASE mode, left mouse Z axis controls synchronized lift of both IK
+      // targets
+      double z = msg->axes[2];
+      if (std::abs(z) > 0.01) {
+        std::lock_guard<std::mutex> lock(pose_mutex_);
+        // Speed: 0.005 per tick at 100Hz. Apply cubic scaling and 0.2
+        // multiplier.
+        double z_cubed = z * z * z;
+        double z_delta = z_cubed * 0.005 * 0.2;
+
+        accum_l_trans_.z() += z_delta;
+        accum_r_trans_.z() += z_delta;
+
+        target_l_.translation() = initial_l_.translation() + accum_l_trans_;
+        target_r_.translation() = initial_r_.translation() + accum_r_trans_;
+      }
     }
   }
 
   void joy_callback_r(const sensor_msgs::msg::Joy::SharedPtr msg) {
-    if (msg->buttons.empty()) return;
-    right_btn0_ = (msg->buttons[0] == 1);
-    right_btn1_ = false;
+    if (msg->buttons.empty())
+      return;
+    double now = this->now().seconds();
+
+    bool new_btn0 = (msg->buttons[0] == 1);
+    if (new_btn0 && !right_btn0_)
+      right_btn0_press_time_ = now;
+    right_btn0_ = new_btn0;
+
+    bool new_btn1 = false;
     for (size_t i = 1; i < msg->buttons.size(); ++i) {
-        if (msg->buttons[i] == 1) right_btn1_ = true;
+      if (msg->buttons[i] == 1)
+        new_btn1 = true;
     }
+    if (new_btn1 && !right_btn1_)
+      right_btn1_press_time_ = now;
+    right_btn1_ = new_btn1;
   }
 
-  void clamp_target_angle(Eigen::Isometry3d& target, Eigen::Isometry3d& initial, Eigen::Matrix3d& accum) {
-      // 1. Find the absolute rotation from the World Identity frame to the target pose
-      // Since the reference is Identity, the relative rotation is just target.linear()
-      Eigen::Matrix3d abs_rot = target.linear();
-      
-      // 2. Convert to Angle-Axis to get the pure 3D rotation angle from World Identity
-      Eigen::AngleAxisd angle_axis(abs_rot);
-      double angle = angle_axis.angle();
-      
-      // Eigen AngleAxisd returns an angle in [0, pi]. 
-      // If the absolute angle from World Identity exceeds pi/2 (90 degrees), scale it back!
-      double limit = M_PI / 2.0;
-      if (angle > limit) {
-          Eigen::AngleAxisd clamped_abs_rot(limit, angle_axis.axis());
-          
-          // Reconstruct the target using the clamped absolute rotation
-          target.linear() = clamped_abs_rot.toRotationMatrix();
-          
-          // Update the accumulator so the teleop doesn't wind up while clamped
-          accum = target.linear() * initial.linear().transpose();
-      }
+  void clamp_target_angle(Eigen::Isometry3d &target, Eigen::Isometry3d &initial,
+                          Eigen::Matrix3d &accum) {
+    // 1. Find the absolute rotation from the World Identity frame to the target
+    // pose Since the reference is Identity, the relative rotation is just
+    // target.linear()
+    Eigen::Matrix3d abs_rot = target.linear();
+
+    // 2. Convert to Angle-Axis to get the pure 3D rotation angle from World
+    // Identity
+    Eigen::AngleAxisd angle_axis(abs_rot);
+    double angle = angle_axis.angle();
+
+    // Eigen AngleAxisd returns an angle in [0, pi].
+    // If the absolute angle from World Identity exceeds pi/2 (90 degrees),
+    // scale it back!
+    double limit = M_PI / 2.0;
+    if (angle > limit) {
+      Eigen::AngleAxisd clamped_abs_rot(limit, angle_axis.axis());
+
+      // Reconstruct the target using the clamped absolute rotation
+      target.linear() = clamped_abs_rot.toRotationMatrix();
+
+      // Update the accumulator so the teleop doesn't wind up while clamped
+      accum = target.linear() * initial.linear().transpose();
+    }
   }
 
   Eigen::Isometry3d initial_l_ = Eigen::Isometry3d::Identity();
@@ -659,7 +731,12 @@ private:
 
   bool left_btn0_ = false, left_btn1_ = false;
   bool right_btn0_ = false, right_btn1_ = false;
-  
+
+  double left_btn0_press_time_ = 0.0;
+  double left_btn1_press_time_ = 0.0;
+  double right_btn0_press_time_ = 0.0;
+  double right_btn1_press_time_ = 0.0;
+
   double gripper_l_pos_ = 1.1;
   double gripper_r_pos_ = 1.1;
 
@@ -669,9 +746,12 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_r_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr real_joint_sub_;
-  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr left_traj_pub_;
-  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr right_traj_pub_;
-  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr lift_traj_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+      left_traj_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+      right_traj_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+      lift_traj_pub_;
 
   bool hardware_mode_ = true;
   std::atomic<bool> hardware_sync_requested_{false};
@@ -683,31 +763,47 @@ public:
   bool is_hardware_mode() const { return hardware_mode_; }
   bool is_sync_requested() const { return hardware_sync_requested_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
-  
+
   int get_and_reset_joint_msg_count() {
-      std::lock_guard<std::mutex> lock(pose_mutex_);
-      int count = joint_msg_count_;
-      joint_msg_count_ = 0;
-      return count;
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    int count = joint_msg_count_;
+    joint_msg_count_ = 0;
+    return count;
   }
 
   std::string get_current_mode() const { return current_mode_; }
   void update_grippers(mjModel *m, mjData *d) {
-      if (current_mode_ != "ARM") return;
-      
-      if (left_btn0_) gripper_l_pos_ += 0.002; // close
-      if (left_btn1_) gripper_l_pos_ -= 0.002; // open
-      gripper_l_pos_ = std::clamp(gripper_l_pos_, 0.0, 1.2);
+    if (current_mode_ != "ARM")
+      return;
 
-      if (right_btn0_) gripper_r_pos_ += 0.002; // close
-      if (right_btn1_) gripper_r_pos_ -= 0.002; // open
-      gripper_r_pos_ = std::clamp(gripper_r_pos_, 0.0, 1.2);
+    double now = this->now().seconds();
+    auto get_step = [now](bool is_pressed, double press_time) {
+      if (!is_pressed)
+        return 0.0;
+      double hold_time = now - press_time;
+      if (hold_time <= 0.0)
+        return 0.002;
+      // increase up to x3.0 after 2 seconds
+      double mult = 1.0 + (hold_time / 2.0) * 2.0;
+      return 0.002 * std::min(mult, 3.0);
+    };
 
-      static int log_counter = 0;
-      if ((left_btn0_ || left_btn1_ || right_btn0_ || right_btn1_) && log_counter++ % 50 == 0) {
-          RCLCPP_INFO(this->get_logger(), "Grippers -> L: %.2f (btns: %d, %d) | R: %.2f (btns: %d, %d)",
-                      gripper_l_pos_, left_btn0_, left_btn1_, gripper_r_pos_, right_btn0_, right_btn1_);
-      }
+    gripper_l_pos_ += get_step(left_btn0_, left_btn0_press_time_); // close
+    gripper_l_pos_ -= get_step(left_btn1_, left_btn1_press_time_); // open
+    gripper_l_pos_ = std::clamp(gripper_l_pos_, 0.0, 1.2);
+
+    gripper_r_pos_ += get_step(right_btn0_, right_btn0_press_time_); // close
+    gripper_r_pos_ -= get_step(right_btn1_, right_btn1_press_time_); // open
+    gripper_r_pos_ = std::clamp(gripper_r_pos_, 0.0, 1.2);
+
+    static int log_counter = 0;
+    if ((left_btn0_ || left_btn1_ || right_btn0_ || right_btn1_) &&
+        log_counter++ % 50 == 0) {
+      RCLCPP_INFO(this->get_logger(),
+                  "Grippers -> L: %.2f (btns: %d, %d) | R: %.2f (btns: %d, %d)",
+                  gripper_l_pos_, left_btn0_, left_btn1_, gripper_r_pos_,
+                  right_btn0_, right_btn1_);
+    }
   }
 };
 
@@ -731,11 +827,12 @@ int main(int argc, char **argv) {
   // Make the robot body extremely transparent so the skeleton is visible
   for (int i = 0; i < m->ngeom; ++i) {
     if (m->geom_bodyid[i] > 0) { // > 0 means it's not the static world body
-      float alpha = 0.15f; // 15% opacity for normal arm links
+      float alpha = 0.15f;       // 15% opacity for normal arm links
       const char *body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[i]);
       if (body_name) {
         std::string name(body_name);
-        // Lower opacity almost completely for head, neck/torso equivalents to avoid blocking the view
+        // Lower opacity almost completely for head, neck/torso equivalents to
+        // avoid blocking the view
         if (name.find("head") != std::string::npos ||
             name.find("arm_base_link") != std::string::npos ||
             name.find("pole") != std::string::npos ||
@@ -805,43 +902,52 @@ int main(int argc, char **argv) {
   std::thread ros_thread([&node]() { rclcpp::spin(node); });
 
   if (node->is_hardware_mode()) {
-      RCLCPP_INFO(node->get_logger(), "Waiting up to 30s for stable /joint_states (>=95Hz for 1s)...");
-      auto wait_start = std::chrono::steady_clock::now();
-      auto window_start = wait_start;
-      node->get_and_reset_joint_msg_count();
-      bool stable = false;
+    RCLCPP_INFO(
+        node->get_logger(),
+        "Waiting up to 30s for stable /joint_states (>=95Hz for 1s)...");
+    auto wait_start = std::chrono::steady_clock::now();
+    auto window_start = wait_start;
+    node->get_and_reset_joint_msg_count();
+    bool stable = false;
 
-      while (rclcpp::ok() && !stable && viewer.enabled()) {
-          auto now = std::chrono::steady_clock::now();
-          if (std::chrono::duration_cast<std::chrono::seconds>(now - wait_start).count() > 30) {
-              RCLCPP_WARN(node->get_logger(), "Timeout waiting for stable /joint_states! Starting anyway.");
-              break;
-          }
-          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - window_start).count() >= 1000) {
-              int count = node->get_and_reset_joint_msg_count();
-              RCLCPP_INFO(node->get_logger(), "/joint_states rate: %d Hz", count);
-              if (count >= 95) {
-                  RCLCPP_INFO(node->get_logger(), "Stable /joint_states achieved! Performing initial sync...");
-                  stable = true;
-                  node->request_hardware_sync();
-              }
-              window_start = now;
-          }
-          
-          // Render the viewer so the OS doesn't kill the unresponsive window
-          viewer.render(d);
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    while (rclcpp::ok() && !stable && viewer.enabled()) {
+      auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration_cast<std::chrono::seconds>(now - wait_start)
+              .count() > 30) {
+        RCLCPP_WARN(
+            node->get_logger(),
+            "Timeout waiting for stable /joint_states! Starting anyway.");
+        break;
       }
-      
-      // Wait for sync to actually complete
-      while (rclcpp::ok() && node->is_sync_requested() && viewer.enabled()) {
-          node->apply_hardware_sync(m, d);
-          viewer.render(d);
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(now -
+                                                                window_start)
+              .count() >= 1000) {
+        int count = node->get_and_reset_joint_msg_count();
+        RCLCPP_INFO(node->get_logger(), "/joint_states rate: %d Hz", count);
+        if (count >= 95) {
+          RCLCPP_INFO(
+              node->get_logger(),
+              "Stable /joint_states achieved! Performing initial sync...");
+          stable = true;
+          node->request_hardware_sync();
+        }
+        window_start = now;
       }
-      
-      // Update targets to reflect the synced state
-      node->get_targets(init_l, init_r);
+
+      // Render the viewer so the OS doesn't kill the unresponsive window
+      viewer.render(d);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Wait for sync to actually complete
+    while (rclcpp::ok() && node->is_sync_requested() && viewer.enabled()) {
+      node->apply_hardware_sync(m, d);
+      viewer.render(d);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Update targets to reflect the synced state
+    node->get_targets(init_l, init_r);
   }
 
   // Main interaction loop
@@ -871,7 +977,7 @@ int main(int argc, char **argv) {
     if (++step_counter % 20 == 0 || res.stalled) {
       // Reduced verbosity
     }
-    
+
     node->update_grippers(m, d);
 
     // Process any hardware sync requests before mj_forward
@@ -884,15 +990,23 @@ int main(int argc, char **argv) {
     Eigen::Isometry3d achieved_l = Eigen::Isometry3d::Identity();
     Eigen::Isometry3d achieved_r = Eigen::Isometry3d::Identity();
     if (left_id >= 0) {
-      achieved_l.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
-      achieved_l.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * left_id).cast<double>();
+      achieved_l.translation() =
+          Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
+      achieved_l.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              d->site_xmat + 9 * left_id)
+              .cast<double>();
     }
     if (right_id >= 0) {
-      achieved_r.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
-      achieved_r.linear() = Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(d->site_xmat + 9 * right_id).cast<double>();
+      achieved_r.translation() =
+          Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+      achieved_r.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              d->site_xmat + 9 * right_id)
+              .cast<double>();
     }
     node->clip_target(achieved_l, achieved_r);
-    
+
     // Update target variables so the viewer spheres reflect the clipped target
     node->get_targets(current_target_l, current_target_r);
 

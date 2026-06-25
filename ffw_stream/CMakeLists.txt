@@ -108,7 +108,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
     )
     target_compile_features(zed_udp_streamer PUBLIC c_std_99 cxx_std_17)
     target_link_libraries(zed_udp_streamer
-      zed_udp_streamer_core  # only our .so
+      ${CMAKE_DL_LIBS}
       pthread
     )
 

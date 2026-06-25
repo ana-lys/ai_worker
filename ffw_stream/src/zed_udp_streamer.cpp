@@ -42,7 +42,7 @@ FILE *open_ffmpeg_sender(const std::string &ip, int port, int width, int height,
   return popen(cmd.str().c_str(), "w");
 }
 
-int start_stream(int argc, char **argv) {
+extern "C" int start_stream(int argc, char **argv) {
   if (argc < 3) {
     std::cerr << "Usage: " << argv[0] << " <dest_ip> <base_port> [fps=30]"
               << std::endl;
