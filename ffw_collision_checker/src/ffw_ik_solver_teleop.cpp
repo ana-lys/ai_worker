@@ -594,8 +594,9 @@ private:
         double z = msg->axes[2];
         if (std::abs(z) > 0.01) {
             std::lock_guard<std::mutex> lock(pose_mutex_);
-            // Speed: 0.005 per tick at 100Hz = 0.5 m/s max velocity
-            double z_delta = z * 0.005;
+            // Speed: 0.005 per tick at 100Hz. Apply cubic scaling and 0.2 multiplier.
+            double z_cubed = z * z * z;
+            double z_delta = z_cubed * 0.005 * 0.2;
             
             accum_l_trans_.z() += z_delta;
             accum_r_trans_.z() += z_delta;
