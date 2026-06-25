@@ -51,8 +51,10 @@ if (ZED_FOUND)
     ${ZED_LIBRARIES}
     pthread
   )
-  if (EXISTS "/usr/lib/aarch64-linux-gnu/tegra/libjpeg.so")
-    target_link_libraries(zed_udp_streamer /usr/lib/aarch64-linux-gnu/tegra/libjpeg.so)
+  
+  find_library(NVJPEG_LIB nvjpeg)
+  if (NVJPEG_LIB)
+    target_link_libraries(zed_udp_streamer ${NVJPEG_LIB})
   endif()
 
   install(TARGETS zed_udp_streamer
