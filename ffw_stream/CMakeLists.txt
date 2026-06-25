@@ -46,7 +46,7 @@ target_compile_features(zed_udp_streamer PUBLIC c_std_99 cxx_std_17)
 target_link_libraries(zed_udp_streamer
   ${ZED_LIBRARIES}
   pthread
-  jpeg
+  /usr/lib/aarch64-linux-gnu/tegra/libjpeg.so
 )
 
 install(TARGETS zed_udp_streamer
