@@ -35,12 +35,24 @@ install(TARGETS realsense_udp_streamer
   DESTINATION lib/${PROJECT_NAME})
 
 if (ZED_FOUND)
+  find_package(CUDA QUIET)
+  
+  if(CMAKE_SYSTEM_NAME MATCHES "aarch64")
+      set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
+  endif()
+
+  link_directories(${ZED_LIBRARY_DIR})
+  link_directories(${CUDA_LIBRARY_DIRS})
+
   add_executable(zed_udp_streamer src/zed_udp_streamer.cpp)
   target_include_directories(zed_udp_streamer PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     ${ZED_INCLUDE_DIRS}
+    ${CUDA_INCLUDE_DIRS}
   )
+  
+  # Fallback for older SDK versions that don't populate CUDA_INCLUDE_DIRS
   if (EXISTS "/usr/local/cuda/include")
     target_include_directories(zed_udp_streamer PUBLIC /usr/local/cuda/include)
   endif()
@@ -49,13 +61,9 @@ if (ZED_FOUND)
 
   target_link_libraries(zed_udp_streamer
     ${ZED_LIBRARIES}
+    ${CUDA_LIBRARIES}
     pthread
   )
-  
-  find_library(NVJPEG_LIB nvjpeg)
-  if (NVJPEG_LIB)
-    target_link_libraries(zed_udp_streamer ${NVJPEG_LIB})
-  endif()
 
   install(TARGETS zed_udp_streamer
     DESTINATION lib/${PROJECT_NAME})
