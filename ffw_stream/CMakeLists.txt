@@ -39,6 +39,7 @@ target_include_directories(zed_udp_streamer PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${ZED_INCLUDE_DIRS}
+  /usr/local/cuda/include
 )
 target_compile_features(zed_udp_streamer PUBLIC c_std_99 cxx_std_17)
 
