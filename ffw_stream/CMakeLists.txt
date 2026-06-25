@@ -62,11 +62,17 @@ if (ZED_FOUND)
   target_link_libraries(zed_udp_streamer
     ${ZED_LIBRARIES}
     ${CUDA_LIBRARIES}
+    ${OpenCV_LIBS}
     pthread
   )
 
+  ament_target_dependencies(zed_udp_streamer
+    rclcpp
+    cv_bridge
+  )
+  
   if(CMAKE_SYSTEM_NAME MATCHES "aarch64")
-    target_link_libraries(zed_udp_streamer nvjpeg)
+    target_link_options(zed_udp_streamer PRIVATE "-Wl,--allow-shlib-undefined")
   endif()
 
   install(TARGETS zed_udp_streamer
