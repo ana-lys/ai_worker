@@ -13,6 +13,7 @@ find_package(PkgConfig REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(ZED REQUIRED)
 
 add_executable(realsense_udp_streamer src/realsense_udp_streamer.cpp)
 target_include_directories(realsense_udp_streamer PUBLIC
@@ -31,6 +32,21 @@ target_link_libraries(realsense_udp_streamer
 )
 
 install(TARGETS realsense_udp_streamer
+  DESTINATION lib/${PROJECT_NAME})
+
+add_executable(zed_udp_streamer src/zed_udp_streamer.cpp)
+target_include_directories(zed_udp_streamer PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_compile_features(zed_udp_streamer PUBLIC c_std_99 cxx_std_17)
+
+target_link_libraries(zed_udp_streamer
+  ${ZED_LIBRARIES}
+  pthread
+)
+
+install(TARGETS zed_udp_streamer
   DESTINATION lib/${PROJECT_NAME})
 
 add_executable(realsense_udp_receiver src/realsense_udp_receiver.cpp)
