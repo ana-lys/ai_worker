@@ -41,6 +41,9 @@ public:
     } else {
       RCLCPP_INFO(this->get_logger(), "Running in HEADLESS mode (No OpenCV Windows)");
     }
+
+    int zed_port = base_port + 100;
+    threads_.emplace_back(&RealsenseUDPReceiver::zedStreamLoop, this, zed_port);
   }
 
   ~RealsenseUDPReceiver() {
@@ -102,14 +105,60 @@ private:
           latest_images_[feed_name] = gray.clone();
         }
 
-        // Calculate FPS
+        // Calculate FPS (60-second average)
         frames_received_[feed_name]++;
         auto now = std::chrono::steady_clock::now();
-        if (frames_received_[feed_name] == 30) {
-          double elapsed = std::chrono::duration<double>(now - fps_timers_[feed_name]).count();
-          double fps_val = (elapsed > 0.0) ? (30.0 / elapsed) : 0.0;
-          RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-            "[%s] FPS: %.1f", feed_name.c_str(), fps_val);
+        double elapsed = std::chrono::duration<double>(now - fps_timers_[feed_name]).count();
+        if (elapsed >= 60.0) {
+          double fps_val = (elapsed > 0.0) ? (frames_received_[feed_name] / elapsed) : 0.0;
+          if (fps_val < 28.0) {
+            RCLCPP_WARN(this->get_logger(), "[%s] Frame drop detected! Average FPS: %.1f", feed_name.c_str(), fps_val);
+          }
+          frames_received_[feed_name] = 0;
+          fps_timers_[feed_name] = now;
+        }
+      }
+    }
+  }
+
+  void zedStreamLoop(int port) {
+    std::string pipeline = "udpsrc port=" + std::to_string(port) + 
+      " caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+      "rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
+    
+    std::string feed_name = "ZED";
+    RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
+
+    while (running_ && rclcpp::ok()) {
+      cv::VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
+      if (!cap.isOpened()) {
+        RCLCPP_WARN(this->get_logger(), "[%s] Failed to open UDP stream, retrying in 2s...", feed_name.c_str());
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        continue;
+      }
+
+      RCLCPP_INFO(this->get_logger(), "[%s] Successfully connected", feed_name.c_str());
+
+      cv::Mat frame;
+      while (running_ && rclcpp::ok()) {
+        if (!cap.read(frame) || frame.empty()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+          continue;
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(img_mutex_);
+          latest_images_[feed_name] = frame.clone();
+        }
+        
+        frames_received_[feed_name]++;
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - fps_timers_[feed_name]).count();
+        if (elapsed >= 60.0) {
+          double fps_val = (elapsed > 0.0) ? (frames_received_[feed_name] / elapsed) : 0.0;
+          if (fps_val < 28.0) {
+            RCLCPP_WARN(this->get_logger(), "[%s] Frame drop detected! Average FPS: %.1f", feed_name.c_str(), fps_val);
+          }
           frames_received_[feed_name] = 0;
           fps_timers_[feed_name] = now;
         }
@@ -203,7 +252,29 @@ private:
         for (size_t i = 1; i < camera_grids.size(); ++i) {
           cv::hconcat(final_grid, camera_grids[i], final_grid);
         }
-        cv::imshow(window_name, final_grid);
+
+        // Fetch ZED image
+        cv::Mat zed_frame;
+        {
+          std::lock_guard<std::mutex> lock(img_mutex_);
+          if (latest_images_.count("ZED")) zed_frame = latest_images_["ZED"].clone();
+        }
+
+        if (!zed_frame.empty() && final_grid.rows > 0) {
+          // Scale final_grid height to match ZED's height
+          double scale = (double)zed_frame.rows / final_grid.rows;
+          int new_width = std::round(final_grid.cols * scale);
+          cv::Mat final_grid_scaled;
+          cv::resize(final_grid, final_grid_scaled, cv::Size(new_width, zed_frame.rows));
+          
+          cv::putText(zed_frame, "ZED Feed", cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
+          
+          cv::Mat dashboard;
+          cv::hconcat(zed_frame, final_grid_scaled, dashboard);
+          cv::imshow(window_name, dashboard);
+        } else {
+          cv::imshow(window_name, final_grid);
+        }
       }
 
       int key = cv::waitKey(15);
