@@ -1,3 +1,5 @@
+import os
+from ament_index_python.packages import get_package_libexec_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
@@ -22,10 +24,13 @@ def generate_launch_description():
         description='Frames per second'
     )
 
+    # Resolve absolute path to the executable
+    zed_exec = os.path.join(get_package_libexec_directory('ffw_stream'), 'zed_udp_streamer')
+
     # zed_udp_streamer is a pure C++ executable (not a ROS 2 node)
     streamer_cmd = ExecuteProcess(
         cmd=[
-            'zed_udp_streamer',
+            zed_exec,
             LaunchConfiguration('dest_ip'),
             LaunchConfiguration('base_port'),
             LaunchConfiguration('fps')
