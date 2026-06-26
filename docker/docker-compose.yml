@@ -2,6 +2,7 @@ services:
   ai_worker:
     container_name: ai_worker
     image: robotis/ai-worker:1.1.20
+    runtime: nvidia
     tty: true
     restart: always
     cap_add:
