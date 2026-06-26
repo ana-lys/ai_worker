@@ -67,6 +67,17 @@ start_container() {
     # Run docker-compose
     docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
 
+    # Inject host SSH keys into the container
+    echo "Copying host SSH keys into container..."
+    docker exec -u root "$CONTAINER_NAME" bash -c "mkdir -p /root/.ssh && chmod 700 /root/.ssh"
+    if [ -f "$HOME/.ssh/authorized_keys" ]; then
+        docker cp "$HOME/.ssh/authorized_keys" "$CONTAINER_NAME:/root/.ssh/authorized_keys"
+    fi
+    if [ -f "$HOME/.ssh/ffw_container.pub" ]; then
+        cat "$HOME/.ssh/ffw_container.pub" | docker exec -i -u root "$CONTAINER_NAME" bash -c "cat >> /root/.ssh/authorized_keys"
+    fi
+    docker exec -u root "$CONTAINER_NAME" bash -c "chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true"
+
     # Install SSH and inject it into the container's supervisor (s6) so it survives reboots!
     echo "Installing SSH Server into container runtime..."
     docker exec -u root "$CONTAINER_NAME" bash -c '
@@ -75,8 +86,6 @@ start_container() {
             mkdir -p /run/sshd
             sed -i "s/^#Port 22/Port 9999/" /etc/ssh/sshd_config
             grep -q "^Port 9999" /etc/ssh/sshd_config || echo "Port 9999" >> /etc/ssh/sshd_config
-            sed -i "s/^#StrictModes yes/StrictModes no/" /etc/ssh/sshd_config
-            grep -q "^StrictModes no" /etc/ssh/sshd_config || echo "StrictModes no" >> /etc/ssh/sshd_config
             grep -q "^PubkeyAcceptedAlgorithms" /etc/ssh/sshd_config || echo "PubkeyAcceptedAlgorithms +ssh-rsa" >> /etc/ssh/sshd_config
             
             # Setup s6 service so it survives host reboots

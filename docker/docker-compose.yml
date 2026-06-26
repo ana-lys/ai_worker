@@ -22,7 +22,6 @@ services:
       - /usr/local/zed/settings/:/usr/local/zed/settings/
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /tmp/.docker.xauth:/tmp/.docker.xauth:rw
-      - ~/.ssh:/root/.ssh:rw
       - ./workspace:/workspace
       - ../:/root/ros2_ws/src/ai_worker/
       - /var/run/robotis/agent_sockets/ai_worker:/var/run/agent
