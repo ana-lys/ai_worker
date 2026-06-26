@@ -92,6 +92,15 @@ start_container() {
             /usr/sbin/sshd
         fi
     '
+
+    # Install ROS dependencies for mounted source workspace
+    echo "Resolving ROS2 dependencies for the workspace..."
+    docker exec -u root "$CONTAINER_NAME" bash -c '
+        cd /root/ros2_ws
+        apt-get update
+        rosdep update
+        rosdep install -i --from-path src --rosdistro jazzy --skip-keys="librealsense2" -y
+    '
 }
 
 # Function to enter the container
