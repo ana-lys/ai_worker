@@ -13,24 +13,14 @@ def generate_launch_description():
     base_port_arg = DeclareLaunchArgument('base_port', default_value='9000')
     fps_arg = DeclareLaunchArgument('fps', default_value='30')
 
-    left_config = os.path.join(pkg_dir, 'config', 'camera_left_config.yaml')
-    right_config = os.path.join(pkg_dir, 'config', 'camera_right_config.yaml')
-
-    # Left RealSense (Ports: base_port, base_port+1)
-    left_streamer = Node(
-        package='ffw_stream',
-        executable='realsense_udp_streamer',
-        name='camera_left_streamer',
-        parameters=[left_config],
-        output='screen'
-    )
-
-    # Right RealSense (Ports: base_port+2, base_port+3)
-    right_streamer = Node(
-        package='ffw_stream',
-        executable='realsense_udp_streamer',
-        name='camera_right_streamer',
-        parameters=[right_config],
+    # RealSense Streamer (Handles all RealSense cameras automatically)
+    rs_exec = os.path.join(get_package_prefix('ffw_stream'), 'lib', 'ffw_stream', 'realsense_udp_streamer')
+    realsense_streamer = ExecuteProcess(
+        cmd=[
+            rs_exec,
+            LaunchConfiguration('dest_ip'),
+            LaunchConfiguration('base_port')
+        ],
         output='screen'
     )
 
@@ -55,7 +45,6 @@ def generate_launch_description():
         dest_ip_arg,
         base_port_arg,
         fps_arg,
-        left_streamer,
-        right_streamer,
+        realsense_streamer,
         zed_streamer
     ])
