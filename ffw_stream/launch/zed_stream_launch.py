@@ -30,6 +30,8 @@ def generate_launch_description():
     # zed_udp_streamer is a pure C++ executable (not a ROS 2 node)
     streamer_cmd = ExecuteProcess(
         cmd=[
+            'bash', '-c',
+            'LD_PRELOAD=/usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so "$0" "$1" "$2" "$3"',
             zed_exec,
             LaunchConfiguration('dest_ip'),
             LaunchConfiguration('base_port'),
