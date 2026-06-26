@@ -75,6 +75,8 @@ start_container() {
             mkdir -p /run/sshd
             sed -i "s/^#Port 22/Port 9999/" /etc/ssh/sshd_config
             grep -q "^Port 9999" /etc/ssh/sshd_config || echo "Port 9999" >> /etc/ssh/sshd_config
+            sed -i "s/^#StrictModes yes/StrictModes no/" /etc/ssh/sshd_config
+            grep -q "^StrictModes no" /etc/ssh/sshd_config || echo "StrictModes no" >> /etc/ssh/sshd_config
             
             # Setup s6 service so it survives host reboots
             mkdir -p /etc/s6-overlay/s6-rc.d/sshd
