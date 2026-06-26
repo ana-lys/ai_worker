@@ -31,7 +31,11 @@ def generate_launch_description():
     streamer_cmd = ExecuteProcess(
         cmd=[
             'bash', '-c',
-            'LD_PRELOAD=/usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so "$0" "$1" "$2" "$3"',
+            'NVJPEG=$(find /usr/lib/aarch64-linux-gnu -name libnvjpeg.so | head -n 1); '
+            'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/nvidia -name "libjpeg.so*" | head -n 1); fi; '
+            'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/tegra -name "libjpeg.so*" | head -n 1); fi; '
+            'echo "[ZED] Preloading proprietary NVIDIA JPEG library: $NVJPEG"; '
+            'export LD_PRELOAD=$NVJPEG; "$0" "$1" "$2" "$3"',
             zed_exec,
             LaunchConfiguration('dest_ip'),
             LaunchConfiguration('base_port'),
