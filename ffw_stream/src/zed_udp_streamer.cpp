@@ -44,7 +44,7 @@ FILE *open_ffmpeg_sender(const std::string &ip, int port, int width, int height,
 
 extern "C" int start_stream(int argc, char **argv) {
   if (argc < 3) {
-    std::cerr << "Usage: " << argv[0] << " <dest_ip> <base_port> [fps=30]"
+    std::cerr << "Usage: " << argv[0] << " <dest_ip> <base_port> [fps=30] [res=720|1080]"
               << std::endl;
     return 1;
   }
@@ -59,11 +59,21 @@ extern "C" int start_stream(int argc, char **argv) {
   if (fps <= 0)
     fps = 30;
 
+  int res = 720;
+  if (argc > 4)
+    res = std::atoi(argv[4]);
+
   std::signal(SIGINT, on_sigint);
 
   sl::Camera zed;
   sl::InitParameters init_params;
-  init_params.camera_resolution = sl::RESOLUTION::HD720; // 720p requested
+  
+  if (res == 1080) {
+    init_params.camera_resolution = sl::RESOLUTION::HD1080;
+  } else {
+    init_params.camera_resolution = sl::RESOLUTION::HD720;
+  }
+  
   init_params.camera_fps = fps;
   // Minimize depth processing to save resources on the host since we only want
   // the left camera
@@ -76,8 +86,8 @@ extern "C" int start_stream(int argc, char **argv) {
     return 1;
   }
 
-  int width = 1280; // 720p width
-  int height = 720; // 720p height
+  int width = (res == 1080) ? 1920 : 1280;
+  int height = (res == 1080) ? 1080 : 720;
 
   log("Opened ZED Camera: " + std::to_string(width) + "x" +
       std::to_string(height) + " @ " + std::to_string(fps) + " fps");
