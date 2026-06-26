@@ -66,6 +66,10 @@ start_container() {
 
     # Run docker-compose
     docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
+
+    # Install and configure SSH server inside the container
+    echo "Installing and configuring SSH server inside container..."
+    docker exec -u root "$CONTAINER_NAME" bash -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && sed -i 's/^#Port 22/Port 9999/' /etc/ssh/sshd_config && (grep -q '^Port 9999' /etc/ssh/sshd_config || echo 'Port 9999' >> /etc/ssh/sshd_config) && pkill sshd || true && /usr/sbin/sshd"
 }
 
 # Function to enter the container
