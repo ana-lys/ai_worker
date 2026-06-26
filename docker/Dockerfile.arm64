@@ -121,12 +121,7 @@ RUN apt-get update && apt-get install -y \
     vim \
     nano \
     python3-pip \
-    openssh-server \
     && rm -rf /var/lib/apt/lists/*
-
-# Configure SSH for Port 9999 and prepare Privilege Separation directory
-RUN mkdir -p /run/sshd && \
-    if grep -q "^#Port 22" /etc/ssh/sshd_config; then sed -i 's/^#Port 22/Port 9999/' /etc/ssh/sshd_config; else echo "Port 9999" >> /etc/ssh/sshd_config; fi
 
 ENV COLCON_WS=/root/ros2_ws
 WORKDIR ${COLCON_WS}
@@ -183,12 +178,6 @@ RUN pip install --no-cache-dir --ignore-installed -r /opt/talos_system_manager/r
 # Agent service (longrun)
 COPY docker/s6-agent /etc/s6-overlay/s6-rc.d/s6-agent
 
-# SSHD service (longrun)
-RUN mkdir -p /etc/s6-overlay/s6-rc.d/sshd && \
-    echo "longrun" > /etc/s6-overlay/s6-rc.d/sshd/type && \
-    printf "#!/command/execlineb -P\n/usr/sbin/sshd -D -e\n" > /etc/s6-overlay/s6-rc.d/sshd/run && \
-    chmod +x /etc/s6-overlay/s6-rc.d/sshd/run
-
 # Define ROS2 services
 ARG ROS2_SERVICES="ffw_bg2_follower_ai ffw_lg2_leader_ai ffw_sg2_follower_ai"
 
@@ -216,8 +205,7 @@ RUN chmod +x /usr/local/lib/s6-services/ros2_service_run.sh /usr/local/lib/s6-se
 # Add services to the user bundle so they start at container boot
 # Note: ROS2 services are NOT in the user bundle - they must be started manually
 RUN mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
-    touch /etc/s6-overlay/s6-rc.d/user/contents.d/s6-agent && \
-    touch /etc/s6-overlay/s6-rc.d/user/contents.d/sshd
+    touch /etc/s6-overlay/s6-rc.d/user/contents.d/s6-agent
 
 # Set s6-overlay as entrypoint
 ENTRYPOINT ["/init"]

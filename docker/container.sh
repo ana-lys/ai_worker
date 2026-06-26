@@ -66,6 +66,30 @@ start_container() {
 
     # Run docker-compose
     docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
+
+    # Install SSH and inject it into the container's supervisor (s6) so it survives reboots!
+    echo "Installing SSH Server into container runtime..."
+    docker exec -u root "$CONTAINER_NAME" bash -c '
+        if [ ! -f /etc/s6-overlay/s6-rc.d/sshd/run ]; then
+            apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
+            mkdir -p /run/sshd
+            sed -i "s/^#Port 22/Port 9999/" /etc/ssh/sshd_config
+            grep -q "^Port 9999" /etc/ssh/sshd_config || echo "Port 9999" >> /etc/ssh/sshd_config
+            
+            # Setup s6 service so it survives host reboots
+            mkdir -p /etc/s6-overlay/s6-rc.d/sshd
+            echo "longrun" > /etc/s6-overlay/s6-rc.d/sshd/type
+            printf "#!/command/execlineb -P\n/usr/sbin/sshd -D -e\n" > /etc/s6-overlay/s6-rc.d/sshd/run
+            chmod +x /etc/s6-overlay/s6-rc.d/sshd/run
+            touch /etc/s6-overlay/s6-rc.d/user/contents.d/sshd
+            
+            /usr/sbin/sshd
+        else
+            # If already installed but not running
+            pkill sshd || true
+            /usr/sbin/sshd
+        fi
+    '
 }
 
 # Function to enter the container
