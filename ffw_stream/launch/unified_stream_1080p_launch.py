@@ -5,6 +5,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
     pkg_dir = get_package_share_directory('ffw_stream')
@@ -24,22 +26,11 @@ def generate_launch_description():
         output='screen'
     )
 
-    # ZED Streamer (Port: base_port+100)
-    zed_exec = os.path.join(get_package_prefix('ffw_stream'), 'lib', 'ffw_stream', 'zed_udp_streamer')
-    zed_streamer = ExecuteProcess(
-        cmd=[
-            'bash', '-c',
-            'NVJPEG=$(find /usr/lib/aarch64-linux-gnu -name libnvjpeg.so | head -n 1); '
-            'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/nvidia -name "libjpeg.so*" | head -n 1); fi; '
-            'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/tegra -name "libjpeg.so*" | head -n 1); fi; '
-            'export LD_PRELOAD=$NVJPEG; "$0" "$1" "$2" "$3" "$4"',
-            zed_exec,
-            LaunchConfiguration('dest_ip'),
-            LaunchConfiguration('base_port'),
-            LaunchConfiguration('fps'),
-            '1080'
-        ],
-        output='screen'
+    # ZED Streamer (using the official ffw_zed ROS 2 wrapper)
+    zed_launch_dir = get_package_share_directory('ffw_zed')
+    zed_streamer = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(zed_launch_dir, 'launch', 'zed_camera.launch.py')),
+        launch_arguments={'camera_model': 'zedm'}.items()
     )
 
     return LaunchDescription([
