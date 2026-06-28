@@ -6125,7 +6125,7 @@ void ZedCamera::threadFunc_zedGrab()
       "-i - -c:v libx264 -preset ultrafast -tune zerolatency "
       "-b:v 8M -minrate 8M -maxrate 8M -bufsize 8M "
       "-x264opts keyint=30:min-keyint=30:slice-max-size=1200 -f mpegts "
-      "udp://192.168.1.185:5000?pkt_size=1316";
+      "udp://192.168.0.241:9100?pkt_size=1316";
 
   static FILE *ffw_stream_pipe = popen(ffmpeg_cmd.c_str(), "w");
 
