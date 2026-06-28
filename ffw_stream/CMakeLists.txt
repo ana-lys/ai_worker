@@ -114,6 +114,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
       pthread
     )
 
+    add_custom_command(TARGET zed_udp_streamer POST_BUILD
+      COMMAND sudo setcap cap_sys_nice+eip $<TARGET_FILE:zed_udp_streamer> || true
+      COMMENT "Granting cap_sys_nice for SCHED_FIFO"
+    )
+
     install(TARGETS zed_udp_streamer DESTINATION lib/${PROJECT_NAME})
     install(TARGETS zed_udp_streamer_core DESTINATION lib)
 
