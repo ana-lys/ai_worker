@@ -6135,7 +6135,8 @@ void ZedCamera::threadFunc_zedGrab()
       "ffmpeg -hide_banner -loglevel error -y -f rawvideo -vcodec rawvideo -pix_fmt bgra "
       "-s " + std::to_string(ffw_width) + "x" + std::to_string(ffw_height) + " -r 30 "
       "-i - -c:v libx264 -preset ultrafast -tune zerolatency "
-      "-x264opts slice-max-size=1200 -g 30 -pix_fmt yuv420p "
+      "-b:v 8M -maxrate 8M -bufsize 8M "
+      "-x264opts keyint=30:min-keyint=30:slice-max-size=1200 -g 30 -pix_fmt yuv420p "
       "-f rtp rtp://" + stream_ip + ":" + std::to_string(stream_port) + "?pkt_size=1316";
 
   static FILE *ffw_stream_pipe = popen(ffmpeg_cmd.c_str(), "w");
@@ -6571,18 +6572,16 @@ void ZedCamera::threadFunc_zedGrab()
       // <---- Check recording status
       // ----> Retrieve Image/Depth data if someone has subscribed to
       // ---- FFMPEG PIPELINE GRAB ----
-      static int ffw_write_idx = 0;
-      int ffw_slot = ffw_write_idx % 3;
-      mZed->retrieveImage(ffw_frame_pool[ffw_slot], sl::VIEW::LEFT, sl::MEM::CPU);
-      {
-          std::unique_lock<std::mutex> lock(ffw_mtx);
-          if (ffw_q.size() >= 2) ffw_q.pop();
+      if (ffw_running) {
+        int ffw_slot = mFrameCount % 3;
+        mZed->retrieveMeasure(ffw_frame_pool[ffw_slot], sl::MEASURE::IMAGE);
+        {
+          std::lock_guard<std::mutex> lock(ffw_mtx);
           ffw_q.push(ffw_slot);
+        }
+        ffw_cv.notify_one();
       }
-      ffw_cv.notify_one();
-      ffw_write_idx++;
       // ------------------------------
-      // <---- Retrieve Image/Depth data if someone has subscribed to
 
       // ---- DELETED ROS PUBLISHERS (Depth, PC, Positional Tracking, ObjDet) ----
 
