@@ -6574,7 +6574,7 @@ void ZedCamera::threadFunc_zedGrab()
       // ---- FFMPEG PIPELINE GRAB ----
       if (ffw_running) {
         int ffw_slot = mFrameCount % 3;
-        mZed->retrieveMeasure(ffw_frame_pool[ffw_slot], sl::MEASURE::IMAGE);
+        mZed->retrieveImage(ffw_frame_pool[ffw_slot], sl::VIEW::LEFT, sl::MEM::CPU);
         {
           std::lock_guard<std::mutex> lock(ffw_mtx);
           ffw_q.push(ffw_slot);
