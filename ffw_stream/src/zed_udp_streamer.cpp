@@ -10,16 +10,51 @@
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
+#include <condition_variable>
+#include <queue>
 #include <sl/Camera.hpp>
 #include <opencv2/opencv.hpp>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <chrono>
+#include <pthread.h>
 
 #include "zed_udp_streamer.hpp"
 
 std::mutex cout_mutex;
-std::atomic<bool> g_running{true};
+std::atomic<bool> g_running(true);
+
+struct FrameBuffer {
+    std::vector<uint8_t> data;
+    int64_t timestamp_ms;
+};
+
+class FrameQueue {
+    std::queue<FrameBuffer> q;
+    std::mutex mtx;
+    std::condition_variable cv;
+    static constexpr size_t MAX_DEPTH = 2; // drop policy
+
+public:
+    void push(FrameBuffer&& frame) {
+        std::unique_lock<std::mutex> lock(mtx);
+        if (q.size() >= MAX_DEPTH) {
+            q.pop(); // drop oldest to avoid blocking grab thread
+        }
+        q.push(std::move(frame));
+        cv.notify_one();
+    }
+
+    FrameBuffer pop() {
+        std::unique_lock<std::mutex> lock(mtx);
+        cv.wait(lock, [this] { return !q.empty() || !g_running; });
+        if (!g_running && q.empty()) return {};
+        auto frame = std::move(q.front());
+        q.pop();
+        return frame;
+    }
+};
 
 void log(const std::string &msg) {
   std::lock_guard<std::mutex> lock(cout_mutex);
@@ -77,8 +112,6 @@ extern "C" int start_stream(int argc, char **argv) {
   }
   
   init_params.camera_fps = fps;
-  // Minimize depth processing to save resources on the host since we only want
-  // the left camera
   init_params.depth_mode = sl::DEPTH_MODE::NONE;
 
   sl::ERROR_CODE err = zed.open(init_params);
@@ -104,41 +137,71 @@ extern "C" int start_stream(int argc, char **argv) {
     return 1;
   }
 
-  sl::Mat image_left;
-  int frame_count = 0;
+  log("Starting threads...");
+  
+  FrameQueue queue;
+  
+  // Thread B: Pipe thread (can block freely)
+  std::thread pipe_thread([&]() {
+    log("Pipe thread started.");
+    while (g_running) {
+      auto frame = queue.pop();
+      if (!g_running && frame.data.empty()) break;
+      
+      size_t expected_size = width * height * 4;
+      if (frame.data.size() != expected_size) continue;
+      
+      size_t written = fwrite(frame.data.data(), 1, expected_size, stream_pipe);
+      if (written != expected_size) {
+        log("Short write to ffmpeg pipe, stopping");
+        g_running = false;
+        break;
+      }
+      fflush(stream_pipe);
+    }
+    log("Pipe thread exiting.");
+  });
 
-  log("Starting video streaming loop...");
+  // Thread A: Grab thread (high priority)
+  int frame_count = 0;
+  
+  // Set SCHED_FIFO if possible
+  struct sched_param sp;
+  sp.sched_priority = 80;
+  if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp)) {
+      log("Warning: Failed to set SCHED_FIFO for grab thread. Ensure you have permissions.");
+  } else {
+      log("Grab thread running with SCHED_FIFO priority.");
+  }
+
+  sl::Mat image_left;
   while (g_running) {
     if (zed.grab() == sl::ERROR_CODE::SUCCESS) {
       zed.retrieveImage(image_left, sl::VIEW::LEFT);
       
-      // Wrap the sl::Mat memory in an OpenCV cv::Mat so we can draw text directly onto the buffer
       cv::Mat cv_frame(height, width, CV_8UC4, image_left.getPtr<sl::uchar1>(), image_left.getStepBytes());
-      
       std::string text = "FRAME " + std::to_string(frame_count);
-      // Draw at the very top
       cv::putText(cv_frame, text, cv::Point(50, 100), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 255, 0, 255), 5);
-      // Draw at the very bottom
       cv::putText(cv_frame, text, cv::Point(50, height - 100), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 0, 255, 255), 5);
 
+      FrameBuffer buf;
       size_t expected_size = width * height * 4;
-      size_t written = fwrite(image_left.getPtr<sl::uchar1>(), 1, expected_size, stream_pipe);
-      if (written != expected_size) {
-        log("Short write to ffmpeg pipe, stopping");
-        break;
-      }
-      fflush(stream_pipe);
+      buf.data.assign(image_left.getPtr<sl::uchar1>(), image_left.getPtr<sl::uchar1>() + expected_size);
+      
+      queue.push(std::move(buf));
+      
       frame_count++;
-
       if (frame_count % 150 == 0) {
-        log("ZED streamed " + std::to_string(frame_count) + " frames");
+        log("ZED grabbed " + std::to_string(frame_count) + " frames");
       }
     } else {
-      // Small sleep if grab fails to prevent CPU spinning, though grab()
-      // usually blocks
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
+
+  // Wake up pipe thread to exit
+  queue.push({}); 
+  if (pipe_thread.joinable()) pipe_thread.join();
 
   log("Stopping streamer...");
   zed.close();
