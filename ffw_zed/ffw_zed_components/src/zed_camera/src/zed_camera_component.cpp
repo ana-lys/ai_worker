@@ -5004,26 +5004,27 @@ void ZedCamera::initThreads()
   startHeartbeatTimer();
 
   // ----> Start CMOS Temperatures thread
-  if (!mSimMode && !sl_tools::isZED(mCamRealModel) &&
-    !sl_tools::isZEDM(mCamRealModel))
-  {
-    startTempPubTimer();
-  }
-  // <---- Start CMOS Temperatures thread
+  // FFW: Disable all overhead threads (temp, sensors, pointcloud)
+  // if (!mSimMode && !sl_tools::isZED(mCamRealModel) &&
+  //   !sl_tools::isZEDM(mCamRealModel))
+  // {
+  //   startTempPubTimer();
+  // }
+  // // <---- Start CMOS Temperatures thread
 
-  // ----> Start Sensors thread if not sync
-  if (!mSensCameraSync && !sl_tools::isZED(mCamRealModel)) {
-    mSensThread = std::thread(&ZedCamera::threadFunc_pubSensorsData, this);
-  }
-  // <---- Start Sensors thread if not sync
+  // // ----> Start Sensors thread if not sync
+  // if (!mSensCameraSync && !sl_tools::isZED(mCamRealModel)) {
+  //   mSensThread = std::thread(&ZedCamera::threadFunc_pubSensorsData, this);
+  // }
+  // // <---- Start Sensors thread if not sync
 
-  // ----> Start Pointcloud thread
-  if (!mDepthDisabled) {
-    mPcDataReady = false;
-    // DEBUG_STREAM_PC( "on_activate -> mPcDataReady FALSE")
-    mPcThread = std::thread(&ZedCamera::threadFunc_pointcloudElab, this);
-  }
-  // <---- Start Pointcloud thread
+  // // ----> Start Pointcloud thread
+  // if (!mDepthDisabled) {
+  //   mPcDataReady = false;
+  //   // DEBUG_STREAM_PC( "on_activate -> mPcDataReady FALSE")
+  //   mPcThread = std::thread(&ZedCamera::threadFunc_pointcloudElab, this);
+  // }
+  // // <---- Start Pointcloud thread
 
   // Start grab thread
   mGrabThread = std::thread(&ZedCamera::threadFunc_zedGrab, this);
