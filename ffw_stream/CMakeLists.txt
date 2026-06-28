@@ -73,6 +73,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
       $<INSTALL_INTERFACE:include>
       ${ZED_INCLUDE_DIRS}
       ${CUDA_INCLUDE_DIRS}
+      ${OpenCV_INCLUDE_DIRS}
     )
     if(EXISTS "/usr/local/cuda/include")
       target_include_directories(zed_udp_streamer_core PUBLIC /usr/local/cuda/include)
@@ -83,6 +84,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
     target_link_libraries(zed_udp_streamer_core
       ${ZED_LIBRARIES}
       ${CUDA_LIBRARIES}
+      ${OpenCV_LIBS}
       pthread
     )
 

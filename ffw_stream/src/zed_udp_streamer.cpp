@@ -11,6 +11,7 @@
 #include <iostream>
 #include <mutex>
 #include <sl/Camera.hpp>
+#include <opencv2/opencv.hpp>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -104,26 +105,32 @@ extern "C" int start_stream(int argc, char **argv) {
   }
 
   sl::Mat image_left;
-  sl::RuntimeParameters runtime_parameters;
-  uint64_t frame_count = 0;
+  int frame_count = 0;
 
+  log("Starting video streaming loop...");
   while (g_running) {
-    if (zed.grab(runtime_parameters) == sl::ERROR_CODE::SUCCESS) {
+    if (zed.grab() == sl::ERROR_CODE::SUCCESS) {
       zed.retrieveImage(image_left, sl::VIEW::LEFT);
+      
+      // Wrap the sl::Mat memory in an OpenCV cv::Mat so we can draw text directly onto the buffer
+      cv::Mat cv_frame(height, width, CV_8UC4, image_left.getPtr<sl::uchar1>(), image_left.getStepBytes());
+      
+      std::string text = "FRAME " + std::to_string(frame_count);
+      // Draw at the very top
+      cv::putText(cv_frame, text, cv::Point(50, 100), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 255, 0, 255), 5);
+      // Draw at the very bottom
+      cv::putText(cv_frame, text, cv::Point(50, height - 100), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 0, 255, 255), 5);
 
-      // The ZED SDK returns BGRA format by default (4 channels, 8-bit per
-      // channel)
       size_t expected_size = width * height * 4;
-      size_t written = fwrite(image_left.getPtr<sl::uchar1>(), 1, expected_size,
-                              stream_pipe);
-      fflush(stream_pipe);
-
+      size_t written = fwrite(image_left.getPtr<sl::uchar1>(), 1, expected_size, stream_pipe);
       if (written != expected_size) {
         log("Short write to ffmpeg pipe, stopping");
         break;
       }
+      fflush(stream_pipe);
+      frame_count++;
 
-      if (++frame_count % 150 == 0) {
+      if (frame_count % 150 == 0) {
         log("ZED streamed " + std::to_string(frame_count) + " frames");
       }
     } else {
