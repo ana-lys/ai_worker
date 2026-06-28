@@ -64,6 +64,11 @@ def generate_launch_description():
             default_value='ffw_sg2_follower',
             description='Type of ros2_control',
         ),
+        # --- NEW ARGUMENTS FOR UDP STREAMER ---
+        DeclareLaunchArgument('dest_ip', default_value='192.168.0.241',
+                              description='Destination IP for UDP Streamer'),
+        DeclareLaunchArgument('base_port', default_value='9000',
+                              description='Base UDP port for UDP Streamer'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -78,6 +83,8 @@ def generate_launch_description():
     use_head_eef_tracker = LaunchConfiguration('use_head_eef_tracker')
     init_position_file = LaunchConfiguration('init_position_file')
     ros2_control_type = LaunchConfiguration('ros2_control_type')
+    dest_ip = LaunchConfiguration('dest_ip')
+    base_port = LaunchConfiguration('base_port')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -293,8 +300,8 @@ def generate_launch_description():
     stream_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_stream'), 'launch'])
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([stream_launch_dir,
-                                                            'stream_launch.py'])),
-        launch_arguments={'target_ip': '192.168.0.241'}.items(),
+                                                            'unified_stream_1080p_launch.py'])),
+        launch_arguments={'dest_ip': dest_ip, 'base_port': base_port}.items(),
         condition=IfCondition(launch_cameras)
     )
 

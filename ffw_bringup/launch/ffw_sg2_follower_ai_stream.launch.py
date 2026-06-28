@@ -290,12 +290,11 @@ def generate_launch_description():
     bringup_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_bringup'), 'launch'])
 
     # --- CHANGED: UDP Streamer instead of ROS2 camera node ---
-    camera_launch = Node(
-        package='ffw_stream',
-        executable='realsense_udp_streamer',
-        name='realsense_udp_streamer',
-        arguments=[dest_ip, base_port],
-        output='screen',
+    stream_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_stream'), 'launch'])
+    camera_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([stream_launch_dir,
+                                                            'unified_stream_1080p_launch.py'])),
+        launch_arguments={'dest_ip': dest_ip, 'base_port': base_port}.items(),
         condition=IfCondition(launch_cameras)
     )
 
