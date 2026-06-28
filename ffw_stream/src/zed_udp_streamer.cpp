@@ -35,6 +35,7 @@ FILE *open_ffmpeg_sender(const std::string &ip, int port, int width, int height,
       << " -framerate " << fps << " -i - ";
 
   cmd << "-c:v libx264 -preset ultrafast -tune zerolatency "
+      << "-x264opts slice-max-size=1200 "
       << "-g " << fps << " -pix_fmt yuv420p ";
 
   cmd << "-f rtp rtp://" << ip << ":" << port << "?pkt_size=1316";
