@@ -6120,12 +6120,23 @@ void ZedCamera::threadFunc_zedGrab()
       m.alloc(ffw_width, ffw_height, sl::MAT_TYPE::U8_C4, sl::MEM::CPU);
   }
 
+  // FFW: Read IP and port from ROS parameters
+  std::string stream_ip = "192.168.0.241";
+  int stream_port = 9100;
+  try {
+      stream_ip = this->declare_parameter("stream_ip", "192.168.0.241");
+      stream_port = this->declare_parameter("stream_port", 9100);
+  } catch (const rclcpp::exceptions::ParameterAlreadyDeclaredException & e) {
+      stream_ip = this->get_parameter("stream_ip").as_string();
+      stream_port = this->get_parameter("stream_port").as_int();
+  }
+
   std::string ffmpeg_cmd = 
       "ffmpeg -hide_banner -loglevel error -y -f rawvideo -vcodec rawvideo -pix_fmt bgra "
       "-s " + std::to_string(ffw_width) + "x" + std::to_string(ffw_height) + " -r 30 "
       "-i - -c:v libx264 -preset ultrafast -tune zerolatency "
       "-x264opts slice-max-size=1200 -g 30 -pix_fmt yuv420p "
-      "-f rtp rtp://192.168.0.241:9100?pkt_size=1316";
+      "-f rtp rtp://" + stream_ip + ":" + std::to_string(stream_port) + "?pkt_size=1316";
 
   static FILE *ffw_stream_pipe = popen(ffmpeg_cmd.c_str(), "w");
 

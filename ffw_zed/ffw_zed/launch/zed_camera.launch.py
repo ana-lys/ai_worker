@@ -261,7 +261,9 @@ def launch_setup(context, *args, **kwargs):
                 'pos_tracking.publish_tf': publish_tf,
                 'pos_tracking.publish_map_tf': publish_map_tf,
                 'sensors.publish_imu_tf': publish_imu_tf,
-                'gnss_fusion.gnss_fusion_enabled': enable_gnss
+                'gnss_fusion.gnss_fusion_enabled': enable_gnss,
+                'stream_ip': LaunchConfiguration('stream_ip'),
+                'stream_port': LaunchConfiguration('stream_port')
             }
     )
 
@@ -407,9 +409,13 @@ def generate_launch_description():
                 default_value='',
                 description='The connection address of the input streaming server.'),
             DeclareLaunchArgument(
+                'stream_ip',
+                default_value='192.168.0.241',
+                description='The destination IP for the FFMPEG RTP stream.'),
+            DeclareLaunchArgument(
                 'stream_port',
-                default_value='30000',
-                description='The connection port of the input streaming server.'),
+                default_value='9100',
+                description='The destination port for the FFMPEG RTP stream.'),
             DeclareLaunchArgument(
                 'custom_baseline',
                 default_value='0.0',

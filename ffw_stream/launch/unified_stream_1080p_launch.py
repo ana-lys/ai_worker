@@ -30,7 +30,11 @@ def generate_launch_description():
     zed_launch_dir = get_package_share_directory('ffw_zed')
     zed_streamer = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(zed_launch_dir, 'launch', 'zed_camera.launch.py')),
-        launch_arguments={'camera_model': 'zedm'}.items()
+        launch_arguments={
+            'camera_model': 'zedm',
+            'stream_ip': LaunchConfiguration('dest_ip'),
+            'stream_port': '9100'
+        }.items()
     )
 
     return LaunchDescription([
