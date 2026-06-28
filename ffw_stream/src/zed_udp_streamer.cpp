@@ -55,6 +55,13 @@ void signalHandler(int signum) {
   std::cout << "\nInterrupt signal (" << signum << ") received.\n";
 }
 
+std::mutex cout_mutex;
+
+void log(const std::string &msg) {
+  std::lock_guard<std::mutex> lock(cout_mutex);
+  std::cout << msg << std::endl;
+}
+
 void on_sigint(int) { g_running = false; }
 
 FILE *open_ffmpeg_sender(const std::string &ip, int port, int width, int height,
