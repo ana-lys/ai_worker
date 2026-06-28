@@ -1,0 +1,57 @@
+# UPSTREAM MERGE NOTES
+Date: 2026-06-26
+Branch: radio_teleop_moveit
+Upstream: https://github.com/ROBOTIS-GIT/ai_worker.git (jazzy branch)
+
+## Overview
+We fetched the upstream `ROBOTIS-GIT/ai_worker` and discovered that they have made significant changes to their Docker infrastructure and robot models. Our local `radio_teleop_moveit` branch has highly specialized custom features (SSH key injection, UDP low-latency streaming, custom spacemouse mappers) that will conflict with upstream's refactor. 
+
+Since the robot is currently down and testing is impossible, this merge is deferred. Below is the detailed analysis to guide the future merge.
+
+## 1. What Upstream Changed (The Diffs)
+
+### A. New Hardware Models
+- **SH5 and BH5:** Upstream added complete support for the SH5 and BH5 follower robots, including URDFs, meshes, and ros2_control xacros (`ffw_bh5_follower.urdf.xacro`, `ffw_sh5_follower.urdf.xacro`).
+- **HX5-D20 Hands:** Added full 3D models and URDFs for left and right `hx5_d20` robotic hands.
+- **LIDAR:** Added `dual_laser_merger` integration for the SH5.
+
+### B. Docker & Infrastructure Refactor
+- **Image Bump:** Container image versions were bumped from `1.1.20` up to `1.3.2`.
+- **novnc-server Removal:** Upstream completely removed `novnc-server` support from `container.sh` and `docker-compose.yml`.
+- **s6-services Refactor:** Internal service managers were renamed (e.g., `talos` is now `cyclo_manager`).
+- **Dockerfile Cleanup:** Changed base images to `v3`, removed `PYTHONPATH` workarounds, and removed old RMW (rmw-fastrtps) installations to streamline apt.
+
+### C. Launch File Consolidation
+- Replaced individual pack launch files (like `ffw_bg2_pack.launch.py`) with a single unified `ffw_pack.launch.py`.
+
+### D. Controller Updates
+- Fixed a 3-turn limitation bug in the `ffw_swerve_drive_controller`.
+- Added pack position YAML files for all robot types.
+
+---
+
+## 2. Expected Conflicts & Adaptation Plan
+
+When merging `upstream/jazzy` into our branch, be prepared to resolve the following critical conflicts:
+
+### `docker/container.sh`
+- **Upstream:** Removed `novnc` support and reorganized the aliases.
+- **Our Branch:** Added dynamic SSH key injection via `docker cp`, removed `StrictModes` issues, and injected `rosdep install` into the container startup sequence.
+- **Resolution Strategy:** Accept upstream's structural changes but manually re-insert our SSH logic and `rosdep install` block into the `start` command section.
+
+### `docker/docker-compose.yml`
+- **Upstream:** Bumped image tags to `1.3.2`.
+- **Our Branch:** Added `runtime: nvidia` to expose the hardware GStreamer encoders (`nvv4l2h264enc`) for the Jetson AGX Orin.
+- **Resolution Strategy:** Update the image tag to `1.3.2` but ensure `runtime: nvidia` is preserved in the config.
+
+### Custom Launch Files
+- **Conflict:** Any of our custom `ffw_stream` or `ffw_spacemouse` launch files that reference the old `ffw_bg2_pack.launch.py` will break because upstream deleted it.
+- **Resolution Strategy:** Update our custom launch files to point to upstream's new unified `ffw_pack.launch.py`.
+
+---
+
+## 3. Pre-Merge Checklist
+1. Ensure the robot is online and safe to test.
+2. Commit all local working changes.
+3. Pull the new Docker image (`docker pull robotis/ai-worker:1.3.2`) as it is a large download.
+4. Merge `upstream/jazzy` and carefully resolve the `container.sh` conflicts to ensure SSH access isn't lost.

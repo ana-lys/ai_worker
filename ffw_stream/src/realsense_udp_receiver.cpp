@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <ctime>
+#include <cstdlib>
 
 class RealsenseUDPReceiver : public rclcpp::Node {
 public:
@@ -140,11 +142,66 @@ private:
       RCLCPP_INFO(this->get_logger(), "[%s] Successfully connected", feed_name.c_str());
 
       cv::Mat frame;
+      cv::Mat prev_frame;
+      int glitch_counter = 0;
+      std::string record_dir;
+
+      auto t = std::time(nullptr);
+      auto tm = *std::localtime(&t);
+      char buf[64];
+      std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
+      
+      const char* home_dir = getenv("HOME");
+      if (home_dir) {
+        record_dir = std::string(home_dir) + "/record/glitches/" + buf + "/";
+        std::string cmd = "mkdir -p " + record_dir;
+        system(cmd.c_str());
+        RCLCPP_INFO(this->get_logger(), "[ZED] Glitch detector active. Saving to: %s", record_dir.c_str());
+      }
+
       while (running_ && rclcpp::ok()) {
         if (!cap.read(frame) || frame.empty()) {
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
           continue;
         }
+
+        // --- GLITCH DETECTOR LOGIC ---
+        if (!prev_frame.empty() && !record_dir.empty()) {
+          cv::Mat gray_curr, gray_prev, diff;
+          // Downsample for speed and noise reduction
+          cv::resize(frame, gray_curr, cv::Size(640, 360));
+          cv::resize(prev_frame, gray_prev, cv::Size(640, 360));
+          
+          cv::cvtColor(gray_curr, gray_curr, cv::COLOR_BGR2GRAY);
+          cv::cvtColor(gray_prev, gray_prev, cv::COLOR_BGR2GRAY);
+          
+          cv::GaussianBlur(gray_curr, gray_curr, cv::Size(5, 5), 0);
+          cv::GaussianBlur(gray_prev, gray_prev, cv::Size(5, 5), 0);
+          
+          cv::absdiff(gray_curr, gray_prev, diff);
+          cv::Scalar mean_val = cv::mean(diff);
+          double mad = mean_val.val[0];
+          
+          if (mad > 30.0) {
+             RCLCPP_WARN(this->get_logger(), "[ZED] GLITCH DETECTED! MAD = %.2f. Saving images...", mad);
+             char fn_buf[128];
+             
+             sprintf(fn_buf, "glitch_%04d_A_prev.jpg", glitch_counter);
+             cv::imwrite(record_dir + fn_buf, prev_frame);
+             
+             sprintf(fn_buf, "glitch_%04d_B_post.jpg", glitch_counter);
+             cv::imwrite(record_dir + fn_buf, frame);
+             
+             cv::Mat diff_color;
+             cv::applyColorMap(diff, diff_color, cv::COLORMAP_JET);
+             sprintf(fn_buf, "glitch_%04d_D_diff.jpg", glitch_counter);
+             cv::imwrite(record_dir + fn_buf, diff_color);
+             
+             glitch_counter++;
+          }
+        }
+        prev_frame = frame.clone();
+        // -----------------------------
 
         {
           std::lock_guard<std::mutex> lock(img_mutex_);
