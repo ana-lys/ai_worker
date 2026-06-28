@@ -143,6 +143,7 @@ private:
 
       cv::Mat frame;
       cv::Mat prev_frame;
+      cv::Mat prev_gray; // ADDED for optimization
       int glitch_counter = 0;
       std::string record_dir;
 
@@ -165,42 +166,42 @@ private:
           continue;
         }
 
-        // --- GLITCH DETECTOR LOGIC ---
-        if (!prev_frame.empty() && !record_dir.empty()) {
-          cv::Mat gray_curr, gray_prev, diff;
-          // Downsample for speed and noise reduction
-          cv::resize(frame, gray_curr, cv::Size(640, 360));
-          cv::resize(prev_frame, gray_prev, cv::Size(640, 360));
-          
+        // --- ULTRA FAST GLITCH DETECTOR LOGIC ---
+        if (!record_dir.empty()) {
+          cv::Mat gray_curr;
+          // Downsample massively for speed (160x90)
+          cv::resize(frame, gray_curr, cv::Size(160, 90));
           cv::cvtColor(gray_curr, gray_curr, cv::COLOR_BGR2GRAY);
-          cv::cvtColor(gray_prev, gray_prev, cv::COLOR_BGR2GRAY);
           
-          cv::GaussianBlur(gray_curr, gray_curr, cv::Size(5, 5), 0);
-          cv::GaussianBlur(gray_prev, gray_prev, cv::Size(5, 5), 0);
-          
-          cv::absdiff(gray_curr, gray_prev, diff);
-          cv::Scalar mean_val = cv::mean(diff);
-          double mad = mean_val.val[0];
-          
-          if (mad > 30.0) {
-             RCLCPP_WARN(this->get_logger(), "[ZED] GLITCH DETECTED! MAD = %.2f. Saving images...", mad);
-             char fn_buf[128];
-             
-             sprintf(fn_buf, "glitch_%04d_A_prev.jpg", glitch_counter);
-             cv::imwrite(record_dir + fn_buf, prev_frame);
-             
-             sprintf(fn_buf, "glitch_%04d_B_post.jpg", glitch_counter);
-             cv::imwrite(record_dir + fn_buf, frame);
-             
-             cv::Mat diff_color;
-             cv::applyColorMap(diff, diff_color, cv::COLORMAP_JET);
-             sprintf(fn_buf, "glitch_%04d_D_diff.jpg", glitch_counter);
-             cv::imwrite(record_dir + fn_buf, diff_color);
-             
-             glitch_counter++;
+          if (!prev_gray.empty()) {
+            cv::Mat diff;
+            cv::absdiff(gray_curr, prev_gray, diff);
+            double mad = cv::mean(diff)[0];
+            
+            // Lowered threshold to 20.0 since we removed blur
+            if (mad > 20.0) {
+               RCLCPP_WARN(this->get_logger(), "[ZED] GLITCH DETECTED! MAD = %.2f. Saving images...", mad);
+               char fn_buf[128];
+               
+               sprintf(fn_buf, "glitch_%04d_A_prev.jpg", glitch_counter);
+               cv::imwrite(record_dir + fn_buf, prev_frame);
+               
+               sprintf(fn_buf, "glitch_%04d_B_post.jpg", glitch_counter);
+               cv::imwrite(record_dir + fn_buf, frame);
+               
+               cv::Mat diff_color;
+               cv::applyColorMap(diff, diff_color, cv::COLORMAP_JET);
+               // Scale up diff map for easier viewing
+               cv::resize(diff_color, diff_color, cv::Size(1280, 720), 0, 0, cv::INTER_NEAREST);
+               sprintf(fn_buf, "glitch_%04d_D_diff.jpg", glitch_counter);
+               cv::imwrite(record_dir + fn_buf, diff_color);
+               
+               glitch_counter++;
+            }
           }
+          prev_gray = gray_curr.clone();
+          prev_frame = frame.clone();
         }
-        prev_frame = frame.clone();
         // -----------------------------
 
         {
