@@ -51,7 +51,23 @@ When the glitch happens, the image *behind* the text is visibly torn and swapped
    - Under heavy Jetson CPU/USB load, the hardware drops a sync packet. The V4L2 driver grabs the Right Eye first, then the Left Eye, stitching them backward. 
    - It hands this perfectly left-to-right swapped frame to our C++ program.
 
+### Why is the Hardware Tearing? (Capture Pipeline Analysis)
+We analyzed the official `zed-ros2-wrapper` source code to understand why it doesn't suffer from this USB tearing issue. 
+The difference lies entirely in **thread synchronization and blocking I/O**.
+
+**How the official wrapper works:**
+1. It uses a dedicated, highly elevated OS thread (`SCHED_FIFO` or `SCHED_RR` policy) specifically for `zed.grab()`.
+2. After grabbing, it extracts the `sl::Mat` and instantly converts it to a ROS 2 `sensor_msgs/Image`.
+3. It publishes the message using DDS, which operates asynchronously via internal queues. The `grab` thread never blocks waiting for the network.
+
+**How our custom streamer works:**
+1. We run `zed.grab()` on standard `SCHED_OTHER` thread priority.
+2. We call `retrieveImage()`, and then we immediately push 8.2 Megabytes of raw data into a Linux `popen` pipe (`fwrite`) to feed `ffmpeg`.
+3. **The Fatal Flaw**: `fwrite` is a blocking call! If `ffmpeg` falls behind on encoding, the pipe buffer fills up, and `fwrite` halts the execution of our C++ loop.
+4. Because our loop is frozen waiting for `ffmpeg`, we stop calling `zed.grab()`. The internal ZED SDK USB polling threads get starved, the V4L2 driver buffers overflow, and the hardware drops a sync packet—resulting in the perfect Left/Right torn frame!
+
 ### Proposed Workarounds:
-Since this is a deeply rooted hardware/driver bug in the ZED SDK / Jetson USB stack, we have two options:
+Since this is a deeply rooted issue caused by combining high-speed USB polling with blocking I/O, we have three options:
 1. **Algorithmic Fixer**: Write a 1ms OpenCV scanner that dynamically finds the vertical tear line and un-swaps the memory buffer before it is piped to `ffmpeg`.
-2. **Use Official ROS 2 Wrapper**: Evaluate if the official `zed-ros2-wrapper` manages to avoid this driver tearing through better internal thread synchronization or SDK configuration.
+2. **Decouple the Capture Thread**: Rewrite our C++ sender to use a thread-safe Producer-Consumer queue. Thread A runs `zed.grab()` at exactly 30fps and pushes frames to a queue. Thread B pops frames and runs the slow, blocking `fwrite` pipe. If `ffmpeg` is slow, we drop frames in software, rather than letting the hardware tear.
+3. **Use Official ROS 2 Wrapper**: Evaluate if the Jetson can handle standard ROS-native video compression overhead instead of using our `ffmpeg` pipeline.
