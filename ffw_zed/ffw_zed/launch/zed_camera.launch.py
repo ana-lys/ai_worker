@@ -275,7 +275,7 @@ def launch_setup(context, *args, **kwargs):
         camera_model_val=='zedxm' or
         camera_model_val=='virtual'):
         ffw_zed_component = ComposableNode(
-            package='zed_components',
+            package='ffw_zed_components',
             namespace=namespace_val,
             plugin='stereolabs::ZedCamera',
             name=node_name_val,
@@ -284,7 +284,7 @@ def launch_setup(context, *args, **kwargs):
         )
     else: # 'zedxonegs' or 'zedxone4k')
         ffw_zed_component = ComposableNode(
-            package='zed_components',
+            package='ffw_zed_components',
             namespace=namespace_val,
             plugin='stereolabs::ZedCameraOne',
             name=node_name_val,

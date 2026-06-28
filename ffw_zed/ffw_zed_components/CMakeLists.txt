@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(zed_components)
+project(ffw_zed_components)
 
 ################################################
 ## Generate symbols for IDE indexer (VSCode)

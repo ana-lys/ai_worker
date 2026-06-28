@@ -3,7 +3,7 @@
 <package format="3">
     <name>ffw_zed</name>
     <version>4.1.1</version>
-    <description>ffw_zed loading zed_components in a single process</description>
+    <description>ffw_zed loading ffw_zed_components in a single process</description>
     <maintainer email="support@stereolabs.com">STEREOLABS</maintainer>
     <license>Apache License 2.0</license>
     <url type="website">https://www.stereolabs.com/</url>
@@ -11,11 +11,11 @@
     <url type="bugtracker">https://github.com/stereolabs/zed-ros2-wrapper/issues</url>
     <buildtool_depend>ament_cmake</buildtool_depend>
     <build_depend>ament_cmake_auto</build_depend>
-    <build_depend>zed_components</build_depend>
+    <build_depend>ffw_zed_components</build_depend>
     <build_depend>rclcpp</build_depend>
     <build_depend>rclcpp_components</build_depend>
     <build_depend>rcutils</build_depend>
-    <exec_depend>zed_components</exec_depend>
+    <exec_depend>ffw_zed_components</exec_depend>
     <exec_depend>launch_ros</exec_depend>
     <exec_depend>rclcpp</exec_depend>
     <exec_depend>rclcpp_components</exec_depend>
