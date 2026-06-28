@@ -7,58 +7,22 @@
 #include <atomic>
 #include <csignal>
 #include <cstdio>
-#include <cstdlib>
 #include <iostream>
 #include <mutex>
-#include <condition_variable>
-#include <queue>
 #include <sl/Camera.hpp>
 #include <opencv2/opencv.hpp>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <chrono>
-#include <pthread.h>
 
 #include "zed_udp_streamer.hpp"
 
-std::mutex cout_mutex;
 std::atomic<bool> g_running(true);
 
-struct FrameBuffer {
-    std::vector<uint8_t> data;
-    int64_t timestamp_ms;
-};
-
-class FrameQueue {
-    std::queue<FrameBuffer> q;
-    std::mutex mtx;
-    std::condition_variable cv;
-    static constexpr size_t MAX_DEPTH = 2; // drop policy
-
-public:
-    void push(FrameBuffer&& frame) {
-        std::unique_lock<std::mutex> lock(mtx);
-        if (q.size() >= MAX_DEPTH) {
-            q.pop(); // drop oldest to avoid blocking grab thread
-        }
-        q.push(std::move(frame));
-        cv.notify_one();
-    }
-
-    FrameBuffer pop() {
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [this] { return !q.empty() || !g_running; });
-        if (!g_running && q.empty()) return {};
-        auto frame = std::move(q.front());
-        q.pop();
-        return frame;
-    }
-};
-
-void log(const std::string &msg) {
-  std::lock_guard<std::mutex> lock(cout_mutex);
-  std::cout << msg << std::endl;
+void signalHandler(int signum) {
+  g_running = false;
+  std::cout << "\nInterrupt signal (" << signum << ") received.\n";
 }
 
 void on_sigint(int) { g_running = false; }
@@ -137,71 +101,76 @@ extern "C" int start_stream(int argc, char **argv) {
     return 1;
   }
 
-  log("Starting threads...");
+  log("Starting single-thread video streaming loop with Algorithmic Fixer...");
   
-  FrameQueue queue;
-  
-  // Thread B: Pipe thread (can block freely)
-  std::thread pipe_thread([&]() {
-    log("Pipe thread started.");
-    while (g_running) {
-      auto frame = queue.pop();
-      if (!g_running && frame.data.empty()) break;
-      
-      size_t expected_size = width * height * 4;
-      if (frame.data.size() != expected_size) continue;
-      
-      size_t written = fwrite(frame.data.data(), 1, expected_size, stream_pipe);
-      if (written != expected_size) {
-        log("Short write to ffmpeg pipe, stopping");
-        g_running = false;
-        break;
-      }
-      fflush(stream_pipe);
-    }
-    log("Pipe thread exiting.");
-  });
-
-  // Thread A: Grab thread (high priority)
   int frame_count = 0;
-  
-  // Set SCHED_FIFO if possible
-  struct sched_param sp;
-  sp.sched_priority = 80;
-  if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp)) {
-      log("Warning: Failed to set SCHED_FIFO for grab thread. Ensure you have permissions.");
-  } else {
-      log("Grab thread running with SCHED_FIFO priority.");
-  }
-
   sl::Mat image_left;
+  
   while (g_running) {
     if (zed.grab() == sl::ERROR_CODE::SUCCESS) {
       zed.retrieveImage(image_left, sl::VIEW::LEFT);
       
       cv::Mat cv_frame(height, width, CV_8UC4, image_left.getPtr<sl::uchar1>(), image_left.getStepBytes());
-      std::string text = "FRAME " + std::to_string(frame_count);
-      cv::putText(cv_frame, text, cv::Point(50, 100), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 255, 0, 255), 5);
-      cv::putText(cv_frame, text, cv::Point(50, height - 100), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 0, 255, 255), 5);
-
-      FrameBuffer buf;
-      size_t expected_size = width * height * 4;
-      buf.data.assign(image_left.getPtr<sl::uchar1>(), image_left.getPtr<sl::uchar1>() + expected_size);
       
-      queue.push(std::move(buf));
+      // Draw diagnostic text LEFT and RIGHT
+      std::string l_text = "LEFT " + std::to_string(frame_count);
+      std::string r_text = "RIGHT " + std::to_string(frame_count);
+      cv::putText(cv_frame, l_text, cv::Point(50, height / 2), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 255, 0, 255), 5);
+      cv::putText(cv_frame, r_text, cv::Point(width - 400, height / 2), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 0, 255, 255), 5);
+
+      // Algorithmic Vertical Tear Detector
+      // Downsample heavily for 1ms fast detection
+      cv::Mat small;
+      cv::resize(cv_frame, small, cv::Size(128, 64)); 
+      cv::cvtColor(small, small, cv::COLOR_BGRA2GRAY);
+
+      int best_x = -1;
+      double max_diff = 0;
+      
+      // Only search the middle 50% of the image to avoid borders
+      for(int x = small.cols/4; x < 3*small.cols/4; ++x) {
+          cv::Mat diff;
+          cv::absdiff(small.col(x), small.col(x-1), diff);
+          double d = cv::mean(diff)[0];
+          if (d > max_diff) {
+              max_diff = d;
+              best_x = x;
+          }
+      }
+
+      uint8_t* pipe_data = image_left.getPtr<sl::uchar1>();
+      cv::Mat fixed_frame;
+
+      // Threshold for unnatural vertical discontinuity
+      if (max_diff > 35.0) {
+          int real_x = (best_x * width) / small.cols;
+          
+          log("Hardware Tear Detected at X=" + std::to_string(real_x) + " (Severity: " + std::to_string(max_diff) + "). Un-swapping memory!");
+
+          // Fix the swap
+          fixed_frame = cv::Mat(cv_frame.size(), cv_frame.type());
+          cv_frame.colRange(real_x, width).copyTo(fixed_frame.colRange(0, width - real_x));
+          cv_frame.colRange(0, real_x).copyTo(fixed_frame.colRange(width - real_x, width));
+          
+          pipe_data = fixed_frame.data;
+      }
+
+      size_t expected_size = width * height * 4;
+      size_t written = fwrite(pipe_data, 1, expected_size, stream_pipe);
+      if (written != expected_size) {
+        log("Short write to ffmpeg pipe, stopping");
+        break;
+      }
+      fflush(stream_pipe);
       
       frame_count++;
       if (frame_count % 150 == 0) {
-        log("ZED grabbed " + std::to_string(frame_count) + " frames");
+        log("ZED streamed " + std::to_string(frame_count) + " frames");
       }
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
-
-  // Wake up pipe thread to exit
-  queue.push({}); 
-  if (pipe_thread.joinable()) pipe_thread.join();
 
   log("Stopping streamer...");
   zed.close();
