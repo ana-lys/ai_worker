@@ -157,51 +157,9 @@ extern "C" int start_stream(int argc, char **argv) {
       int slot = queue.pop();
       if (slot == -1) break; // exit signaled
       
-      cv::Mat cv_frame(height, width, CV_8UC4, frame_pool[slot].getPtr<sl::uchar1>(), frame_pool[slot].getStepBytes());
-      
-      // Draw diagnostic text LEFT and RIGHT
-      static int display_count = 0;
-      std::string l_text = "LEFT " + std::to_string(display_count);
-      std::string r_text = "RIGHT " + std::to_string(display_count);
-      cv::putText(cv_frame, l_text, cv::Point(50, height / 2), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 255, 0, 255), 5);
-      cv::putText(cv_frame, r_text, cv::Point(width - 400, height / 2), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 0, 255, 255), 5);
-      display_count++;
-
-      // Algorithmic Vertical Tear Detector
-      cv::Mat small;
-      cv::resize(cv_frame, small, cv::Size(128, 64)); 
-      cv::cvtColor(small, small, cv::COLOR_BGRA2GRAY);
-
-      int best_x = -1;
-      double max_diff = 0;
-      
-      // Search middle 50%
-      for(int x = small.cols/4; x < 3*small.cols/4; ++x) {
-          cv::Mat diff;
-          cv::absdiff(small.col(x), small.col(x-1), diff);
-          double d = cv::mean(diff)[0];
-          if (d > max_diff) {
-              max_diff = d;
-              best_x = x;
-          }
-      }
-
       uint8_t* pipe_data = frame_pool[slot].getPtr<sl::uchar1>();
-      cv::Mat fixed_frame;
-
-      // Threshold for unnatural vertical discontinuity
-      if (max_diff > 35.0) {
-          int real_x = (best_x * width) / small.cols;
-          log("Hardware Tear Detected at X=" + std::to_string(real_x) + " (Severity: " + std::to_string(max_diff) + "). Un-swapping memory!");
-
-          // Fix the swap
-          fixed_frame = cv::Mat(cv_frame.size(), cv_frame.type());
-          cv_frame.colRange(real_x, width).copyTo(fixed_frame.colRange(0, width - real_x));
-          cv_frame.colRange(0, real_x).copyTo(fixed_frame.colRange(width - real_x, width));
-          pipe_data = fixed_frame.data;
-      }
-
       size_t written = fwrite(pipe_data, 1, expected_size, stream_pipe);
+      
       if (written != expected_size) {
         log("Short write to ffmpeg pipe, stopping");
         g_running = false;
