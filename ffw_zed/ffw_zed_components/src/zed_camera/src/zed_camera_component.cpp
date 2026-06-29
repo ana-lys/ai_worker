@@ -6135,9 +6135,9 @@ void ZedCamera::threadFunc_zedGrab()
       "ffmpeg -hide_banner -loglevel error -y -f rawvideo -vcodec rawvideo -pix_fmt bgra "
       "-s " + std::to_string(ffw_width) + "x" + std::to_string(ffw_height) + " -r 30 "
       "-i - -c:v libx264 -preset ultrafast -tune zerolatency "
-      "-b:v 8M -maxrate 8M -bufsize 8M "
-      "-x264opts keyint=30:min-keyint=30:slice-max-size=1200 -g 30 -pix_fmt yuv420p "
-      "-f rtp rtp://" + stream_ip + ":" + std::to_string(stream_port) + "?pkt_size=1316";
+      "-b:v 8M -minrate 8M -maxrate 8M -bufsize 8M "
+      "-x264opts keyint=30:min-keyint=30:slice-max-size=1200 -f mpegts "
+      "udp://" + stream_ip + ":" + std::to_string(stream_port) + "?pkt_size=1316";
 
   static FILE *ffw_stream_pipe = popen(ffmpeg_cmd.c_str(), "w");
 
@@ -6154,67 +6154,7 @@ void ZedCamera::threadFunc_zedGrab()
           ffw_q.pop();
       }
       
-      uint8_t* raw_data = ffw_frame_pool[slot].getPtr<sl::uchar1>();
-      
-      // FFW: Algorithmic Vertical Tear Detector
-      int bins = 128;
-      int rows = 64;
-      int col_step = ffw_width / bins;
-      int row_step = ffw_height / rows;
-      
-      int best_bin = -1;
-      double max_diff = 0.0;
-      
-      for (int b = bins/4; b < 3*bins/4; b++) {
-          double diff_sum = 0.0;
-          for (int r = 0; r < rows; r++) {
-              int y = r * row_step + row_step/2;
-              
-              int lum_b = 0;
-              for(int i=0; i<col_step; i++) {
-                  int x = b * col_step + i;
-                  int idx = (y * ffw_width + x) * 4;
-                  lum_b += (raw_data[idx] + raw_data[idx+1] + raw_data[idx+2]) / 3;
-              }
-              lum_b /= col_step;
-              
-              int lum_prev = 0;
-              for(int i=0; i<col_step; i++) {
-                  int x = (b - 1) * col_step + i;
-                  int idx = (y * ffw_width + x) * 4;
-                  lum_prev += (raw_data[idx] + raw_data[idx+1] + raw_data[idx+2]) / 3;
-              }
-              lum_prev /= col_step;
-              
-              diff_sum += std::abs(lum_b - lum_prev);
-          }
-          double avg_diff = diff_sum / rows;
-          if (avg_diff > max_diff) {
-              max_diff = avg_diff;
-              best_bin = b;
-          }
-      }
-      
-      uint8_t* pipe_data = raw_data;
-      std::vector<uint8_t> fixed_buffer;
-      
-      if (max_diff > 35.0) {
-          int best_x = best_bin * col_step;
-          // RCLCPP_WARN(get_logger(), "Hardware Tear Detected at X=%d (Severity: %f). Un-swapping memory!", best_x, max_diff);
-          fixed_buffer.resize(expected_size);
-          
-          for (int y = 0; y < ffw_height; y++) {
-              int src_row = y * ffw_width * 4;
-              int left_bytes = (ffw_width - best_x) * 4;
-              int right_bytes = best_x * 4;
-              
-              std::memcpy(&fixed_buffer[src_row], &raw_data[src_row + right_bytes], left_bytes);
-              std::memcpy(&fixed_buffer[src_row + left_bytes], &raw_data[src_row], right_bytes);
-          }
-          pipe_data = fixed_buffer.data();
-      }
-      
-      size_t written = fwrite(pipe_data, 1, expected_size, ffw_stream_pipe);
+      size_t written = fwrite(ffw_frame_pool[slot].getPtr<sl::uchar1>(), 1, expected_size, ffw_stream_pipe);
       if (written != expected_size) {
         RCLCPP_ERROR(get_logger(), "Short write to ffmpeg pipe, stopping");
         ffw_running = false;
@@ -6637,6 +6577,7 @@ void ZedCamera::threadFunc_zedGrab()
         mZed->retrieveImage(ffw_frame_pool[ffw_slot], sl::VIEW::LEFT, sl::MEM::CPU);
         {
           std::lock_guard<std::mutex> lock(ffw_mtx);
+          if (ffw_q.size() >= 2) ffw_q.pop(); // Drop frames if ffmpeg falls behind!
           ffw_q.push(ffw_slot);
         }
         ffw_cv.notify_one();
