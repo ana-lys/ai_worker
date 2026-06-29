@@ -125,8 +125,8 @@ private:
 
   void zedStreamLoop(int port) {
     std::string pipeline = "udpsrc port=" + std::to_string(port) + 
-      " buffer-size=2147483647 ! "
-      "tsdemux ! h264parse ! decodebin ! videoconvert ! appsink drop=true sync=false";
+      " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+      "rtpjitterbuffer latency=10 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
     
     std::string feed_name = "ZED";
     RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());

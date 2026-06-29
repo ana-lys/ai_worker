@@ -6135,9 +6135,8 @@ void ZedCamera::threadFunc_zedGrab()
       "ffmpeg -hide_banner -loglevel error -y -f rawvideo -vcodec rawvideo -pix_fmt bgra "
       "-s " + std::to_string(ffw_width) + "x" + std::to_string(ffw_height) + " -r 30 "
       "-i - -c:v libx264 -preset ultrafast -tune zerolatency "
-      "-b:v 8M -minrate 8M -maxrate 8M -bufsize 8M "
-      "-x264opts keyint=30:min-keyint=30:slice-max-size=1200 -f mpegts "
-      "udp://" + stream_ip + ":" + std::to_string(stream_port) + "?pkt_size=1316";
+      "-x264opts slice-max-size=1200 -g 30 -pix_fmt yuv420p "
+      "-f rtp rtp://" + stream_ip + ":" + std::to_string(stream_port) + "?pkt_size=1316";
 
   static FILE *ffw_stream_pipe = popen(ffmpeg_cmd.c_str(), "w");
 
