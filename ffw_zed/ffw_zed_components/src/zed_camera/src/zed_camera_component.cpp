@@ -6111,7 +6111,7 @@ void ZedCamera::threadFunc_zedGrab()
   static std::mutex ffw_mtx;
   static std::condition_variable ffw_cv;
   static bool ffw_running = true;
-  static std::array<sl::Mat, 3> ffw_frame_pool;
+  static std::array<sl::Mat, 30> ffw_frame_pool;
 
   int ffw_width = mZed->getCameraInformation().camera_configuration.resolution.width;
   int ffw_height = mZed->getCameraInformation().camera_configuration.resolution.height;
@@ -6572,7 +6572,7 @@ void ZedCamera::threadFunc_zedGrab()
       // ----> Retrieve Image/Depth data if someone has subscribed to
       // ---- FFMPEG PIPELINE GRAB ----
       if (ffw_running) {
-        int ffw_slot = mFrameCount % 3;
+        int ffw_slot = mFrameCount % 30;
         mZed->retrieveImage(ffw_frame_pool[ffw_slot], sl::VIEW::LEFT, sl::MEM::CPU);
         {
           std::lock_guard<std::mutex> lock(ffw_mtx);
