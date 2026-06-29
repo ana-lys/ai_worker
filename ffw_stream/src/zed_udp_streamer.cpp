@@ -122,7 +122,7 @@ extern "C" int start_stream(int argc, char **argv) {
     return 1;
   }
 
-  int width = (res == 1080) ? 1920 : 1280;
+  int width = (res == 1080) ? 3840 : 2560; // Side-by-side doubles the width
   int height = (res == 1080) ? 1080 : 720;
 
   log("Opened ZED Camera: " + std::to_string(width) + "x" +
@@ -159,13 +159,12 @@ extern "C" int start_stream(int argc, char **argv) {
       
       cv::Mat cv_frame(height, width, CV_8UC4, frame_pool[slot].getPtr<sl::uchar1>(), frame_pool[slot].getStepBytes());
       
-      // Draw diagnostic text LEFT and RIGHT
-      // Since Thread B handles this, it doesn't slow down Thread A's grab loop!
+      // Draw diagnostic text LEFT and RIGHT on the correct halves
       static int display_count = 0;
       std::string l_text = "LEFT " + std::to_string(display_count);
       std::string r_text = "RIGHT " + std::to_string(display_count);
       cv::putText(cv_frame, l_text, cv::Point(50, height / 2), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 255, 0, 255), 5);
-      cv::putText(cv_frame, r_text, cv::Point(width - 400, height / 2), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 0, 255, 255), 5);
+      cv::putText(cv_frame, r_text, cv::Point((width / 2) + 50, height / 2), cv::FONT_HERSHEY_SIMPLEX, 3.0, cv::Scalar(0, 0, 255, 255), 5);
       display_count++;
 
       // Algorithmic Vertical Tear Detector
@@ -235,7 +234,7 @@ extern "C" int start_stream(int argc, char **argv) {
     if (zed.grab() == sl::ERROR_CODE::SUCCESS) {
       int slot = write_idx.load() % POOL_SIZE;
       
-      zed.retrieveImage(frame_pool[slot], sl::VIEW::LEFT, sl::MEM::CPU);
+      zed.retrieveImage(frame_pool[slot], sl::VIEW::SIDE_BY_SIDE, sl::MEM::CPU);
       
       queue.push(slot);
       write_idx++;
