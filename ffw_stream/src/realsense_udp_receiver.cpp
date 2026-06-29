@@ -145,6 +145,7 @@ private:
       cv::Mat prev_frame;
       cv::Mat prev_gray; // ADDED for optimization
       int glitch_counter = 0;
+      int total_rejected = 0;
       std::string record_dir;
 
       auto t = std::time(nullptr);
@@ -180,7 +181,8 @@ private:
             
             // Lowered threshold to 20.0 since we removed blur
             if (mad > 20.0) {
-               RCLCPP_WARN(this->get_logger(), "[ZED] GLITCH DETECTED! MAD = %.2f. Saving images...", mad);
+               total_rejected++;
+               RCLCPP_WARN(this->get_logger(), "[%s] GLITCH REJECTED! MAD = %.2f. Total rejected: %d", feed_name.c_str(), mad, total_rejected);
                char fn_buf[128];
                
                sprintf(fn_buf, "glitch_%04d_A_prev.jpg", glitch_counter);
@@ -191,12 +193,14 @@ private:
                
                cv::Mat diff_color;
                cv::applyColorMap(diff, diff_color, cv::COLORMAP_JET);
-               // Scale up diff map for easier viewing
                cv::resize(diff_color, diff_color, cv::Size(1280, 720), 0, 0, cv::INTER_NEAREST);
                sprintf(fn_buf, "glitch_%04d_D_diff.jpg", glitch_counter);
                cv::imwrite(record_dir + fn_buf, diff_color);
                
                glitch_counter++;
+               
+               // REJECT the frame by skipping it
+               continue;
             }
           }
           prev_gray = gray_curr.clone();
