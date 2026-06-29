@@ -222,13 +222,24 @@ def launch_setup(context, *args, **kwargs):
         else:
             container_exec='component_container_isolated'
         
+        # Find libnvjpeg.so for hardware acceleration
+        nvjpeg_paths = glob.glob('/usr/lib/aarch64-linux-gnu/tegra/libnvjpeg.so*')
+        if not nvjpeg_paths:
+            nvjpeg_paths = glob.glob('/usr/lib/aarch64-linux-gnu/libnvjpeg.so*')
+        
+        env_vars = {}
+        if nvjpeg_paths:
+            env_vars['LD_PRELOAD'] = nvjpeg_paths[0]
+            print(f"[ZED] Found NVJPEG hardware acceleration library: {nvjpeg_paths[0]}")
+
         zed_container = ComposableNodeContainer(
-                name=container_name_val,
-                namespace=namespace_val,
-                package='rclcpp_components',
-                executable=container_exec,
-                arguments=['--use_multi_threaded_executor','--ros-args', '--log-level', 'info'],
-                output='screen',
+            name=container_name_val,
+            namespace=namespace_val,
+            package='rclcpp_components',
+            executable=container_exec,
+            arguments=['--use_multi_threaded_executor','--ros-args', '--log-level', 'info'],
+            env=env_vars,
+            output='screen',
         )
         return_array.append(zed_container)
 
