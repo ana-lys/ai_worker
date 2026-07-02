@@ -333,9 +333,12 @@ private:
           
           cv::Mat dashboard;
           cv::hconcat(zed_frame, final_grid_scaled, dashboard);
+          cv::resize(dashboard, dashboard, cv::Size(), 0.5, 0.5);
           cv::imshow(window_name, dashboard);
         } else {
-          cv::imshow(window_name, final_grid);
+          cv::Mat dashboard;
+          cv::resize(final_grid, dashboard, cv::Size(), 0.5, 0.5);
+          cv::imshow(window_name, dashboard);
         }
       }
 
