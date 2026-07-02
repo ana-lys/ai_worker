@@ -77,6 +77,93 @@ FILE *open_ffmpeg_sender(const std::string &ip, int port, int width, int height,
   return popen(cmd.str().c_str(), "w");
 }
 
+FILE *open_ffmpeg_sender_rgb(const std::string &ip, int port, int width, int height,
+                             int fps) {
+  std::ostringstream cmd;
+  cmd << "ffmpeg -hide_banner -loglevel error "
+      << "-f rawvideo -pixel_format rgb24 -video_size " << width << "x" << height
+      << " -framerate " << fps << " -i - ";
+
+  cmd << "-c:v libx264 -preset ultrafast -tune zerolatency "
+      << "-x264opts slice-max-size=1200 "
+      << "-g " << fps << " -pix_fmt yuv420p ";
+
+  cmd << "-f rtp rtp://" << ip << ":" << port << "?pkt_size=1316";
+  log("  ffmpeg rgb cmd: " + cmd.str());
+  return popen(cmd.str().c_str(), "w");
+}
+
+void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, int port,
+                       int width, int height, int fps) {
+  std::ostringstream hdr;
+  hdr << "\n=== CAM (RGB ZED-Replacement) " << serial << " : rgb->udp:" << port
+      << "  codec=h264 ===";
+  log(hdr.str());
+
+  FILE *rgb_pipe = open_ffmpeg_sender_rgb(dest_ip, port, width, height, fps);
+
+  if (!rgb_pipe) {
+    log("CAM RGB " + serial + " : failed to start ffmpeg sender process");
+    return;
+  }
+
+  try {
+    rs2::pipeline pipe;
+    rs2::config cfg;
+    cfg.enable_device(serial);
+    cfg.enable_stream(RS2_STREAM_COLOR, width, height, RS2_FORMAT_RGB8, fps);
+
+    pipe.start(cfg);
+
+    uint64_t frame_count = 0;
+    size_t expected_size = width * height * 3;
+    std::vector<uint8_t> rgb_buf(expected_size);
+
+    while (g_running) {
+      rs2::frameset frames;
+      try {
+        frames = pipe.wait_for_frames(5000);
+      } catch (const rs2::error &e) {
+        log("CAM RGB wait_for_frames error: " + std::string(e.what()));
+        continue;
+      }
+
+      rs2::video_frame color = frames.get_color_frame();
+      if (!color) continue;
+
+      const uint8_t *raw = reinterpret_cast<const uint8_t *>(color.get_data());
+      int stride = color.get_stride_in_bytes();
+      
+      // If stride matches expected exactly, write directly. Otherwise copy row by row.
+      if (stride == width * 3) {
+        size_t written = fwrite(raw, 1, expected_size, rgb_pipe);
+        if (written != expected_size) break;
+      } else {
+        for (int y = 0; y < height; ++y) {
+          std::memcpy(rgb_buf.data() + y * width * 3, raw + y * stride, width * 3);
+        }
+        size_t written = fwrite(rgb_buf.data(), 1, expected_size, rgb_pipe);
+        if (written != expected_size) break;
+      }
+      
+      fflush(rgb_pipe);
+
+      if (++frame_count % 150 == 0) {
+        log("CAM RGB streamed " + std::to_string(frame_count) + " frames");
+      }
+    }
+
+    pipe.stop();
+  } catch (const rs2::error &e) {
+    log("CAM RGB FAILED (rs2::error): " + std::string(e.what()));
+  } catch (const std::exception &e) {
+    log("CAM RGB EXCEPTION: " + std::string(e.what()));
+  }
+
+  pclose(rgb_pipe);
+  log("=== CAM RGB " + serial + " : stopped ===");
+}
+
 void stream_camera(const std::string &serial, int index,
                    const std::string &dest_ip, int depth_port, int ir_port,
                    int width, int height, int fps, float max_depth_m) {
@@ -245,12 +332,20 @@ int main(int argc, char **argv) {
       std::to_string(fps) + "  max_depth=" + std::to_string(max_depth_m) + "m");
 
   std::vector<std::thread> threads;
+  int cam_idx = 0;
   for (size_t i = 0; i < serials.size(); ++i) {
-    int depth_port = base_port + static_cast<int>(i) * 2;
-    int ir_port = depth_port + 1;
-    threads.emplace_back(stream_camera, serials[i], static_cast<int>(i),
-                         dest_ip, depth_port, ir_port, width, height, fps,
-                         max_depth_m);
+    if (serials[i] == "941322072865") {
+      // The D435i replacing the ZED: Stream 1080p RGB to the ZED's port
+      int rgb_port = base_port + 100;
+      threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port, 1920, 1080, 30);
+    } else {
+      int depth_port = base_port + cam_idx * 2;
+      int ir_port = depth_port + 1;
+      threads.emplace_back(stream_camera, serials[i], cam_idx,
+                           dest_ip, depth_port, ir_port, width, height, fps,
+                           max_depth_m);
+      cam_idx++;
+    }
   }
 
   for (auto &t : threads)

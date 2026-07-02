@@ -329,7 +329,7 @@ private:
           cv::Mat final_grid_scaled;
           cv::resize(final_grid, final_grid_scaled, cv::Size(new_width, zed_frame.rows));
           
-          cv::putText(zed_frame, "ZED Feed", cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
+          cv::putText(zed_frame, "Primary RGB Feed", cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
           
           cv::Mat dashboard;
           cv::hconcat(zed_frame, final_grid_scaled, dashboard);

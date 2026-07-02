@@ -26,21 +26,9 @@ def generate_launch_description():
         output='screen'
     )
 
-    # ZED Streamer (using the native pure C++ streamer)
-    zed_stream_dir = get_package_share_directory('ffw_stream')
-    zed_streamer = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(zed_stream_dir, 'launch', 'zed_stream_1080p_launch.py')),
-        launch_arguments={
-            'dest_ip': LaunchConfiguration('dest_ip'),
-            'base_port': '9000',
-            'fps': LaunchConfiguration('fps')
-        }.items()
-    )
-
     return LaunchDescription([
         dest_ip_arg,
         base_port_arg,
         fps_arg,
-        realsense_streamer,
-        zed_streamer
+        realsense_streamer
     ])
