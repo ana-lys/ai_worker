@@ -48,9 +48,21 @@
 #include <sstream>
 #include <thread>
 #include <vector>
+#include <iomanip>
+
+#include <condition_variable>
+#include <map>
 
 std::mutex cout_mutex;
 std::atomic<bool> g_running{true};
+
+// Metronome sync variables
+std::mutex sync_mutex;
+std::condition_variable sync_cv;
+uint64_t current_tick = 0;
+
+// FPS tracking
+std::map<std::string, std::atomic<int>> frames_streamed;
 
 void log(const std::string &msg) {
   std::lock_guard<std::mutex> lock(cout_mutex);
@@ -115,42 +127,50 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
 
     pipe.start(cfg);
 
-    uint64_t frame_count = 0;
+    uint64_t local_tick = 0;
+    
+    // Fallback buffers
     size_t expected_size = width * height * 3;
-    std::vector<uint8_t> rgb_buf(expected_size);
+    std::vector<uint8_t> rgb_buf(expected_size, 0);
+    std::string cam_name = "RGB";
 
     while (g_running) {
+      // Wait for next metronome tick
+      {
+        std::unique_lock<std::mutex> lk(sync_mutex);
+        sync_cv.wait(lk, [&]{ return !g_running || current_tick > local_tick; });
+        if (!g_running) break;
+        local_tick = current_tick;
+      }
+
       rs2::frameset frames;
+      bool has_new_frame = false;
       try {
-        frames = pipe.wait_for_frames(5000);
-      } catch (const rs2::error &e) {
-        log("CAM RGB wait_for_frames error: " + std::string(e.what()));
-        continue;
-      }
+        has_new_frame = pipe.poll_for_frames(&frames);
+      } catch (...) {}
 
-      rs2::video_frame color = frames.get_color_frame();
-      if (!color) continue;
-
-      const uint8_t *raw = reinterpret_cast<const uint8_t *>(color.get_data());
-      int stride = color.get_stride_in_bytes();
-      
-      // If stride matches expected exactly, write directly. Otherwise copy row by row.
-      if (stride == width * 3) {
-        size_t written = fwrite(raw, 1, expected_size, rgb_pipe);
-        if (written != expected_size) break;
-      } else {
-        for (int y = 0; y < height; ++y) {
-          std::memcpy(rgb_buf.data() + y * width * 3, raw + y * stride, width * 3);
+      if (has_new_frame) {
+        rs2::video_frame color = frames.get_color_frame();
+        if (color) {
+          const uint8_t *raw = reinterpret_cast<const uint8_t *>(color.get_data());
+          int stride = color.get_stride_in_bytes();
+          
+          if (stride == width * 3) {
+            std::memcpy(rgb_buf.data(), raw, expected_size);
+          } else {
+            for (int y = 0; y < height; ++y) {
+              std::memcpy(rgb_buf.data() + y * width * 3, raw + y * stride, width * 3);
+            }
+          }
         }
-        size_t written = fwrite(rgb_buf.data(), 1, expected_size, rgb_pipe);
-        if (written != expected_size) break;
       }
       
+      // Send the frame (either the new one or the silently reused last one)
+      size_t written = fwrite(rgb_buf.data(), 1, expected_size, rgb_pipe);
       fflush(rgb_pipe);
+      if (written != expected_size) break;
 
-      if (++frame_count % 150 == 0) {
-        log("CAM RGB streamed " + std::to_string(frame_count) + " frames");
-      }
+      frames_streamed[cam_name]++;
     }
 
     pipe.stop();
@@ -204,50 +224,53 @@ void stream_camera(const std::string &serial, int index,
     log("CAM" + std::to_string(index) +
         " depth_scale=" + std::to_string(depth_scale) + " m/unit");
 
-    std::vector<uint8_t> depth8(width * height);
-    std::vector<uint8_t> ir8(width * height);
+    std::vector<uint8_t> depth8(width * height, 0);
+    std::vector<uint8_t> ir8(width * height, 0);
 
-    uint64_t frame_count = 0;
+    uint64_t local_tick = 0;
+    std::string cam_name = "CAM" + std::to_string(index);
 
     while (g_running) {
+      // Wait for metronome tick
+      {
+        std::unique_lock<std::mutex> lk(sync_mutex);
+        sync_cv.wait(lk, [&]{ return !g_running || current_tick > local_tick; });
+        if (!g_running) break;
+        local_tick = current_tick;
+      }
+
       rs2::frameset frames;
+      bool has_new_frame = false;
       try {
-        frames = pipe.wait_for_frames(5000);
-      } catch (const rs2::error &e) {
-        log("CAM" + std::to_string(index) +
-            " wait_for_frames error: " + e.what());
-        continue;
-      }
+        has_new_frame = pipe.poll_for_frames(&frames);
+      } catch (...) {}
 
-      rs2::depth_frame depth = frames.get_depth_frame();
-      rs2::video_frame ir = frames.get_infrared_frame(1);
+      if (has_new_frame) {
+        rs2::depth_frame depth = frames.get_depth_frame();
+        rs2::video_frame ir = frames.get_infrared_frame(1);
 
-      if (!depth || !ir)
-        continue;
-
-      // ---- Depth: clamp to [0, max_depth_m], scale to 8-bit ----
-      const uint16_t *draw =
-          reinterpret_cast<const uint16_t *>(depth.get_data());
-      int dstride = depth.get_stride_in_bytes() / 2; // uint16 units per row
-      for (int y = 0; y < height; ++y) {
-        const uint16_t *row = draw + y * dstride;
-        uint8_t *out_row = depth8.data() + y * width;
-        for (int x = 0; x < width; ++x) {
-          float meters = row[x] * depth_scale;
-          if (meters > max_depth_m)
-            meters = max_depth_m;
-          if (meters < 0.0f)
-            meters = 0.0f;
-          out_row[x] =
-              static_cast<uint8_t>((meters / max_depth_m) * 255.0f + 0.5f);
+        if (depth) {
+          const uint16_t *draw = reinterpret_cast<const uint16_t *>(depth.get_data());
+          int dstride = depth.get_stride_in_bytes() / 2; // uint16 units per row
+          for (int y = 0; y < height; ++y) {
+            const uint16_t *row = draw + y * dstride;
+            uint8_t *out_row = depth8.data() + y * width;
+            for (int x = 0; x < width; ++x) {
+              float meters = row[x] * depth_scale;
+              if (meters > max_depth_m) meters = max_depth_m;
+              if (meters < 0.0f) meters = 0.0f;
+              out_row[x] = static_cast<uint8_t>((meters / max_depth_m) * 255.0f + 0.5f);
+            }
+          }
         }
-      }
 
-      // ---- IR: already 8-bit, just respect stride ----
-      const uint8_t *iraw = reinterpret_cast<const uint8_t *>(ir.get_data());
-      int istride = ir.get_stride_in_bytes();
-      for (int y = 0; y < height; ++y) {
-        std::memcpy(ir8.data() + y * width, iraw + y * istride, width);
+        if (ir) {
+          const uint8_t *iraw = reinterpret_cast<const uint8_t *>(ir.get_data());
+          int istride = ir.get_stride_in_bytes();
+          for (int y = 0; y < height; ++y) {
+            std::memcpy(ir8.data() + y * width, iraw + y * istride, width);
+          }
+        }
       }
 
       size_t dwritten = fwrite(depth8.data(), 1, depth8.size(), depth_pipe);
@@ -256,15 +279,11 @@ void stream_camera(const std::string &serial, int index,
       fflush(ir_pipe);
 
       if (dwritten != depth8.size() || iwritten != ir8.size()) {
-        log("CAM" + std::to_string(index) +
-            " : short write to ffmpeg pipe, stopping");
+        log(cam_name + " : short write to ffmpeg pipe, stopping");
         break;
       }
 
-      if (++frame_count % 150 == 0) {
-        log("CAM" + std::to_string(index) + " streamed " +
-            std::to_string(frame_count) + " frames");
-      }
+      frames_streamed[cam_name]++;
     }
 
     pipe.stop();
@@ -348,8 +367,46 @@ int main(int argc, char **argv) {
     }
   }
 
-  for (auto &t : threads)
-    t.join();
+  for (auto &t : threads) {
+    t.detach();
+  }
+
+  // Metronome Loop
+  auto last_print_time = std::chrono::steady_clock::now();
+  std::map<std::string, int> last_frame_counts;
+  const int target_fps = 30;
+  const auto frame_duration = std::chrono::nanoseconds(1000000000 / target_fps);
+  
+  auto next_tick_time = std::chrono::steady_clock::now() + frame_duration;
+
+  while (g_running) {
+    std::this_thread::sleep_until(next_tick_time);
+    next_tick_time += frame_duration;
+
+    // Broadcast tick
+    {
+      std::lock_guard<std::mutex> lk(sync_mutex);
+      current_tick++;
+    }
+    sync_cv.notify_all();
+
+    // Print FPS every 5 seconds
+    auto now = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(now - last_print_time).count();
+    if (elapsed >= 5.0) {
+      std::ostringstream ss;
+      ss << "[Stream FPS] ";
+      for (const auto& [cam, count] : frames_streamed) {
+        int current = count.load();
+        int delta = current - last_frame_counts[cam];
+        last_frame_counts[cam] = current;
+        double fps_val = delta / elapsed;
+        ss << cam << ": " << std::fixed << std::setprecision(1) << fps_val << " | ";
+      }
+      log(ss.str());
+      last_print_time = now;
+    }
+  }
 
   log("\n=== Done ===");
   return 0;
