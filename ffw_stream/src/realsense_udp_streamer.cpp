@@ -50,6 +50,10 @@
 #include <vector>
 #include <iomanip>
 
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
 #include <condition_variable>
 #include <map>
 
@@ -358,9 +362,17 @@ int main(int argc, char **argv) {
     t.detach();
   }
 
-  // Monitor Loop
+  // Monitor Loop Setup
   auto last_print_time = std::chrono::steady_clock::now();
   std::map<std::string, int> last_frame_counts;
+
+  // Telemetry UDP Socket
+  int telemetry_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  struct sockaddr_in telemetry_addr;
+  memset(&telemetry_addr, 0, sizeof(telemetry_addr));
+  telemetry_addr.sin_family = AF_INET;
+  telemetry_addr.sin_port = htons(base_port + 200);
+  inet_pton(AF_INET, dest_ip.c_str(), &telemetry_addr.sin_addr);
 
   while (g_running) {
     std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -369,7 +381,7 @@ int main(int argc, char **argv) {
     double elapsed = std::chrono::duration<double>(now - last_print_time).count();
     
     std::ostringstream ss;
-    ss << "[Stream Stats] FPS -> ";
+    ss << "FPS -> ";
     for (const auto& [cam, count] : frames_captured) {
       int current = count.load();
       int delta = current - last_frame_counts[cam];
@@ -377,7 +389,6 @@ int main(int argc, char **argv) {
       double fps_val = delta / elapsed;
       ss << cam << ": " << std::fixed << std::setprecision(1) << fps_val << " | ";
     }
-    log(ss.str());
 
     {
       std::lock_guard<std::mutex> lck(timestamp_mutex);
@@ -389,11 +400,21 @@ int main(int argc, char **argv) {
           if (max_t < 0 || kv.second > max_t) max_t = kv.second;
         }
         double worst_delay = max_t - min_t;
-        log("[Stream Stats] Worst phase delay between latest frames: " + std::to_string(worst_delay) + " ms");
+        ss << "Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay << " ms";
       }
     }
     
+    std::string telemetry_msg = ss.str();
+    if (telemetry_sock >= 0) {
+      sendto(telemetry_sock, telemetry_msg.c_str(), telemetry_msg.length(), 0,
+             (struct sockaddr*)&telemetry_addr, sizeof(telemetry_addr));
+    }
+    
     last_print_time = now;
+  }
+
+  if (telemetry_sock >= 0) {
+    close(telemetry_sock);
   }
 
   log("\n=== Done ===");
