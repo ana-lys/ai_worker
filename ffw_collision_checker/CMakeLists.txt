@@ -82,6 +82,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenGL REQUIRED)
@@ -187,6 +188,7 @@ ament_target_dependencies(ffw_ik_solver_teleop
     geometry_msgs
     trajectory_msgs
     std_msgs
+    std_srvs
     ament_index_cpp
 )
 target_link_libraries(ffw_ik_solver_teleop
@@ -264,6 +266,7 @@ install(PROGRAMS
     explore/plot_pareto_voxels.py
     explore/plot_pareto.py
     explore/process_workspace.py
+    scripts/ik_cli.py
     DESTINATION lib/${PROJECT_NAME}
 )
 

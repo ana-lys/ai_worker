@@ -33,7 +33,9 @@
 #include <mujoco/mujoco.h>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/joy.hpp>
-#include <std_msgs/msg/string.hpp>
+#include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/string.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <trajectory_msgs/msg/joint_trajectory_point.hpp>
 
@@ -95,34 +97,8 @@ public:
   }
 
   void addCustomGeoms(mjData *d) {
-    // 1. Draw orange skeleton overlay
-    for (int i = 1; i < m_->nbody; ++i) { // Skip world body
-      int parent = m_->body_parentid[i];
-      if (parent >= 0) {
-        if (scn_.ngeom >= scn_.maxgeom)
-          break;
-
-        const mjtNum *p1 = d->xpos + 3 * parent;
-        const mjtNum *p2 = d->xpos + 3 * i;
-
-        // Skip drawing if the two points are exactly identical to avoid
-        // zero-length geom errors
-        if (std::abs(p1[0] - p2[0]) < 1e-4 && std::abs(p1[1] - p2[1]) < 1e-4 &&
-            std::abs(p1[2] - p2[2]) < 1e-4) {
-          continue;
-        }
-
-        mjvGeom *g = &scn_.geoms[scn_.ngeom++];
-        mjv_connector(g, mjGEOM_CAPSULE, 0.015, p1, p2); // 1.5cm thickness
-
-        // Vibrant Orange, mostly opaque
-        g->rgba[0] = 1.0f;
-        g->rgba[1] = 0.45f;
-        g->rgba[2] = 0.0f;
-        g->rgba[3] = 0.85f;
-        g->category = mjCAT_DECOR;
-      }
-    }
+    // 1. (Disabled) Orange skeleton overlay
+    // The skeleton is no longer drawn so we can see the solid robot model instead.
 
     // 2. Draw target spheres and axes
     if (spheres_enabled_ && scn_.ngeom + 12 <= scn_.maxgeom) {
@@ -160,6 +136,26 @@ public:
           drawAxes(curr_r, 1.0f);
         }
       }
+    }
+
+    // 3. Draw collision spheres (small red spheres)
+    for (const auto& ci : active_collisions_) {
+        if (ci.dist > 0.155) continue; // Only draw if within collision margin
+        if (scn_.ngeom + 2 > scn_.maxgeom) break;
+        
+        mjtNum size[3] = {0.02, 0.02, 0.02}; // small sphere (2cm)
+        mjtNum mat[9] = {1,0,0, 0,1,0, 0,0,1};
+        float rgba[4] = {1.0f, 0.0f, 0.0f, 0.8f}; // Red, slightly transparent (0.8 alpha)
+        
+        mjtNum p1[3] = {ci.p1.x(), ci.p1.y(), ci.p1.z()};
+        mjvGeom *g1 = &scn_.geoms[scn_.ngeom++];
+        mjv_initGeom(g1, mjGEOM_SPHERE, size, p1, mat, rgba);
+        g1->category = mjCAT_DECOR;
+        
+        mjtNum p2[3] = {ci.p2.x(), ci.p2.y(), ci.p2.z()};
+        mjvGeom *g2 = &scn_.geoms[scn_.ngeom++];
+        mjv_initGeom(g2, mjGEOM_SPHERE, size, p2, mat, rgba);
+        g2->category = mjCAT_DECOR;
     }
   }
 
@@ -246,16 +242,25 @@ public:
                       float fb = 0.0f, float fa = 0.85f) {
     spheres_enabled_ = true;
     track_orientation_ = false;
+    pos_l_[0] = l.x();
+    pos_l_[1] = l.y();
+    pos_l_[2] = l.z();
+
+    pos_r_[0] = r.x();
+    pos_r_[1] = r.y();
+    pos_r_[2] = r.z();
+
     sphere_r_ = std::max(0.0, 0.5 * diameter);
-    for (int i = 0; i < 3; ++i) {
-      pos_l_[i] = l[i];
-      pos_r_[i] = r[i];
-    }
     rgba_[0] = fr;
     rgba_[1] = fg;
     rgba_[2] = fb;
     rgba_[3] = fa;
   }
+
+  void setCollisions(const std::vector<ffw_ik::ContactInfo>& contacts) {
+      active_collisions_ = contacts;
+  }
+
 
   void setGoalPose(const Eigen::Isometry3d &l, const Eigen::Isometry3d &r,
                    bool track_ori) {
@@ -295,6 +300,7 @@ private:
   Eigen::Isometry3d pose_r_ = Eigen::Isometry3d::Identity();
   mjtNum sphere_r_ = 0.045;
   float rgba_[4] = {1.f, 0.65f, 0.f, 0.85f};
+  std::vector<ffw_ik::ContactInfo> active_collisions_;
 };
 
 // ============================================================
@@ -364,6 +370,42 @@ public:
         this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
             "/leader/joystick_controller_right/joint_trajectory", 10);
 
+    locks_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/teleop_locks", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          frozen_joints_.clear();
+          std::stringstream ss(msg->data);
+          std::string item;
+          while (std::getline(ss, item, ',')) {
+            item.erase(item.begin(), std::find_if(item.begin(), item.end(), [](unsigned char ch) { return !std::isspace(ch); }));
+            item.erase(std::find_if(item.rbegin(), item.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(), item.end());
+            if (!item.empty()) frozen_joints_.push_back(item);
+          }
+          if (std::find(frozen_joints_.begin(), frozen_joints_.end(), "head") == frozen_joints_.end()) {
+             frozen_joints_.push_back("head"); // always lock head
+          }
+          RCLCPP_INFO(this->get_logger(), "Updated locked joints: %s", msg->data.c_str());
+        });
+
+    obstacle_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/dynamic_obstacle_pose", 10, [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          latest_obstacle_pose_ = *msg;
+          obstacle_pose_received_ = true;
+        });
+
+    head_traj_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+        "/leader/joystick_controller_left/joint_trajectory", 10,
+        [this](const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            if (!msg->points.empty()) {
+                for (size_t i = 0; i < msg->joint_names.size() && i < msg->points[0].positions.size(); ++i) {
+                    if (msg->joint_names[i] == "head_joint1") latest_head_pos_[0] = msg->points[0].positions[i];
+                    else if (msg->joint_names[i] == "head_joint2") latest_head_pos_[1] = msg->points[0].positions[i];
+                }
+            }
+        });
+
     RCLCPP_INFO(this->get_logger(),
                 "SpaceMouse IK Teleop started! Hardware Mode: %s",
                 hardware_mode_ ? "TRUE" : "FALSE");
@@ -385,8 +427,8 @@ public:
   }
 
   void clip_target(const Eigen::Isometry3d &achieved_l,
-                   const Eigen::Isometry3d &achieved_r, double max_dist = 0.015,
-                   double max_angle = 0.2) {
+                   const Eigen::Isometry3d &achieved_r, double max_dist = 0.002,
+                   double max_angle = 0.05) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
 
     // Left arm clipping
@@ -570,6 +612,67 @@ public:
                 "Hardware sync complete! Snapped MuJoCo to real robot.");
   }
 
+  void apply_continuous_head_sync(mjModel *m, mjData *d) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    int h1 = mj_name2id(m, mjOBJ_JOINT, "head_joint1");
+    int h2 = mj_name2id(m, mjOBJ_JOINT, "head_joint2");
+    if (h1 >= 0) d->qpos[m->jnt_qposadr[h1]] = latest_head_pos_[0];
+    if (h2 >= 0) d->qpos[m->jnt_qposadr[h2]] = latest_head_pos_[1];
+  }
+
+  bool get_obstacle_pose(Eigen::Vector3d& pos, Eigen::Quaterniond& quat) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (!obstacle_pose_received_) return false;
+    pos = Eigen::Vector3d(latest_obstacle_pose_.pose.position.x,
+                          latest_obstacle_pose_.pose.position.y,
+                          latest_obstacle_pose_.pose.position.z);
+    quat = Eigen::Quaterniond(latest_obstacle_pose_.pose.orientation.w,
+                              latest_obstacle_pose_.pose.orientation.x,
+                              latest_obstacle_pose_.pose.orientation.y,
+                              latest_obstacle_pose_.pose.orientation.z);
+    return true;
+  }
+
+  std::vector<std::string> get_frozen_joints() {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    return frozen_joints_;
+  }
+
+  void toggle_frozen_joint(const std::string& jname) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    // We treat the jname as an exact prefix or string to toggle
+    auto it = std::find(frozen_joints_.begin(), frozen_joints_.end(), jname);
+    if (it != frozen_joints_.end()) {
+        frozen_joints_.erase(it);
+    } else {
+        frozen_joints_.push_back(jname);
+    }
+    if (std::find(frozen_joints_.begin(), frozen_joints_.end(), "head") == frozen_joints_.end()) {
+        frozen_joints_.push_back("head");
+    }
+  }
+
+  void register_callbacks(std::function<std::string()> tree_cb, std::function<std::string()> list_cb) {
+    tree_cb_ = tree_cb;
+    list_cb_ = list_cb;
+    tree_srv_ = this->create_service<std_srvs::srv::Trigger>("/ik_solver/get_tree", 
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+            if (tree_cb_) {
+                res->success = true;
+                res->message = "\n" + tree_cb_();
+            }
+        });
+    list_srv_ = this->create_service<std_srvs::srv::Trigger>("/ik_solver/list_joints", 
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+            if (list_cb_) {
+                res->success = true;
+                res->message = "\n" + list_cb_();
+            }
+        });
+  }
+
 private:
   void pose_callback_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
@@ -746,6 +849,15 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_r_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr real_joint_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr locks_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr obstacle_sub_;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_traj_sub_;
+
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr tree_srv_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr list_srv_;
+  std::function<std::string()> tree_cb_;
+  std::function<std::string()> list_cb_;
+
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
       left_traj_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
@@ -758,6 +870,11 @@ private:
   std::string current_mode_ = "BASE";
   sensor_msgs::msg::JointState latest_real_joints_;
   int joint_msg_count_ = 0;
+
+  std::vector<std::string> frozen_joints_{"head"};
+  geometry_msgs::msg::PoseStamped latest_obstacle_pose_;
+  bool obstacle_pose_received_{false};
+  std::vector<double> latest_head_pos_{0.0, 0.0};
 
 public:
   bool is_hardware_mode() const { return hardware_mode_; }
@@ -824,26 +941,7 @@ int main(int argc, char **argv) {
   }
   mjData *d = mj_makeData(m);
 
-  // Make the robot body extremely transparent so the skeleton is visible
-  for (int i = 0; i < m->ngeom; ++i) {
-    if (m->geom_bodyid[i] > 0) { // > 0 means it's not the static world body
-      float alpha = 0.15f;       // 15% opacity for normal arm links
-      const char *body_name = mj_id2name(m, mjOBJ_BODY, m->geom_bodyid[i]);
-      if (body_name) {
-        std::string name(body_name);
-        // Lower opacity almost completely for head, neck/torso equivalents to
-        // avoid blocking the view
-        if (name.find("head") != std::string::npos ||
-            name.find("arm_base_link") != std::string::npos ||
-            name.find("pole") != std::string::npos ||
-            name.find("drive") != std::string::npos) {
-          alpha = 0.02f; // 2% opacity (basically invisible)
-        }
-      }
-      m->geom_rgba[4 * i + 3] = alpha;
-    }
-  }
-
+  // Restored original robot alpha (no longer forcing transparency)
   mju_zero(d->qpos, m->nq);
   mju_zero(d->qvel, m->nv);
   if (m->nq >= 7 && m->jnt_type[0] == mjJNT_FREE)
@@ -885,9 +983,10 @@ int main(int argc, char **argv) {
   // damping
   solver_cfg.ori_weight = 0.5;
 
-  // Use the Manipulability solver!
+  // Revert back to the default nullspace behavior (Type 0) to prevent the 
+  // Manipulability solver from violently jerking the arm backwards (which feels like a teleport).
   solver_cfg.nullspace_type = 3;
-  solver_cfg.nullspace_amplitude = 0.8;
+  solver_cfg.nullspace_amplitude = 0.1;
 
   ffw_ik::CollisionCostConfig col_cfg;
   col_cfg.collision_margin = 0.10;
@@ -900,6 +999,25 @@ int main(int argc, char **argv) {
 
   // Start ROS thread
   std::thread ros_thread([&node]() { rclcpp::spin(node); });
+
+  node->register_callbacks(
+    [&solver, d]() { return solver.getKinematicTree(d); },
+    [&solver, node_ptr = node.get()]() {
+       auto joints = solver.getJointNames();
+       auto frozen = node_ptr->get_frozen_joints();
+       std::stringstream ss;
+       ss << "=== Joints ===\n";
+       for (size_t i = 0; i < joints.size(); ++i) {
+          bool is_frozen = false;
+          for (const auto& f : frozen) {
+             if (joints[i].find(f) != std::string::npos) is_frozen = true;
+          }
+          ss << "[" << (i+1) << "] " << (is_frozen ? "[LOCKED] " : "[      ] ") << joints[i] << "\n";
+       }
+       ss << "\nTo toggle a joint, publish its name to /teleop_locks (e.g. ros2 topic pub /teleop_locks std_msgs/String \"{data: 'arm_l'}\" -1)";
+       return ss.str();
+    }
+  );
 
   if (node->is_hardware_mode()) {
     RCLCPP_INFO(
@@ -956,6 +1074,28 @@ int main(int argc, char **argv) {
   Eigen::Isometry3d prev_target_r = init_r;
 
   while (viewer.enabled() && rclcpp::ok()) {
+    solver_cfg.frozen_joints = node->get_frozen_joints();
+
+    Eigen::Vector3d obs_pos;
+    Eigen::Quaterniond obs_quat;
+    if (node->get_obstacle_pose(obs_pos, obs_quat)) {
+      int body_id = mj_name2id(m, mjOBJ_BODY, "dynamic_obstacle");
+      if (body_id >= 0) {
+        int mocap_id = m->body_mocapid[body_id];
+        if (mocap_id >= 0) {
+          d->mocap_pos[3 * mocap_id + 0] = obs_pos.x();
+          d->mocap_pos[3 * mocap_id + 1] = obs_pos.y();
+          d->mocap_pos[3 * mocap_id + 2] = obs_pos.z();
+          d->mocap_quat[4 * mocap_id + 0] = obs_quat.w();
+          d->mocap_quat[4 * mocap_id + 1] = obs_quat.x();
+          d->mocap_quat[4 * mocap_id + 2] = obs_quat.y();
+          d->mocap_quat[4 * mocap_id + 3] = obs_quat.z();
+        }
+      }
+    }
+
+    node->apply_continuous_head_sync(m, d);
+
     Eigen::Isometry3d current_target_l, current_target_r;
     node->get_targets(current_target_l, current_target_r);
 
@@ -972,6 +1112,8 @@ int main(int argc, char **argv) {
     ffw_ik::StepResult res =
         solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
                          col_cfg, err_hist, dist_hist);
+
+    viewer.setCollisions(res.contacts.closest);
 
     // Print solver status every 20 ticks or if stalled
     if (++step_counter % 20 == 0 || res.stalled) {

@@ -59,7 +59,15 @@ def generate_launch_description():
     
     sdl_left, sdl_right = get_left_right_sdl_ids()
 
+    sim_only_arg = DeclareLaunchArgument(
+        'sim_only', default_value='false',
+        description='Run in simulation-only mode (no hardware /joint_states)'
+    )
+
+    from launch.substitutions import PythonExpression
+
     return LaunchDescription([
+        sim_only_arg,
         # LEFT ARM MAPPER
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -89,7 +97,8 @@ def generate_launch_description():
             name='ffw_ik_solver_teleop',
             output='screen',
             parameters=[
-                {'rate_hz': 50.0}
+                {'rate_hz': 50.0},
+                {'hardware_mode': PythonExpression(["'", LaunchConfiguration('sim_only'), "' != 'true'"])}
             ]
         )
     ])

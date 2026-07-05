@@ -68,6 +68,9 @@ public:
     this->declare_parameter(
         "head_topic", "/leader/joystick_controller_left/joint_trajectory");
     this->declare_parameter("joint_state_topic", "/joint_states");
+    this->declare_parameter("hardware_mode", true);
+
+    hardware_mode_ = this->get_parameter("hardware_mode").as_bool();
 
     // ── Joint limits
     // ──────────────────────────────────────────────────────────
@@ -257,9 +260,11 @@ private:
       was_moving_head_ = true;
     } else if (was_moving_head_) {
       // Dead stop: snap target to actual physical position to instantly zero
-      // out tracking error
-      current_head_pos_[0] = latest_phys_head_[0];
-      current_head_pos_[1] = latest_phys_head_[1];
+      // out tracking error (only in hardware mode where physical states exist)
+      if (hardware_mode_) {
+        current_head_pos_[0] = latest_phys_head_[0];
+        current_head_pos_[1] = latest_phys_head_[1];
+      }
       was_moving_head_ = false;
     }
 
@@ -309,10 +314,13 @@ private:
   double last_left_arm_precision_toggle_{0.0};
   int joint_state_count_{0};
   int failsafe_check_cycles_{0};
+  bool hardware_mode_{true};
 
   // ── Failsafe
   // ─────────────────────────────────────────────────────────────────
   void failsafe_check() {
+    if (!hardware_mode_) return; // No failsafe in pure simulation
+
     if (failsafe_check_cycles_ == 0 && joint_state_count_ == 0) {
       // Suspend failsafe until the first /joint_states message is received.
       // This allows the system to take its time booting up without crashing.

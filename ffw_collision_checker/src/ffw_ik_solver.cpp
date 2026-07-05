@@ -605,12 +605,36 @@ StepResult IKSolver::solveStep(
         C_ext_.block(nv_ + n_within, 0, 1, nv_) = Jdist.transpose();
         C_ext_(nv_ + n_within, nv_ + n_within) = 1.0; // Add slack variable
         
-        lb_ext_(nv_ + n_within) = -col.cbf_alpha * (ci.dist - col.collision_margin);
+        // Calculate the theoretical repulsion
+        double repulsion = -col.cbf_alpha * (ci.dist - col.collision_margin);
+        // Cap the repulsion at 0.0. 
+        // This transforms the CBF from a "violent bouncy spring" into a "solid wall".
+        // It will prevent velocity TOWARD the collision, but will NEVER force the arm to move AWAY.
+        lb_ext_(nv_ + n_within) = std::min(repulsion, 0.0);
+        
         ++n_within;
     }
 
     // QP solve
     qp_->settings.verbose = cfg.qp_verbose;
+
+    // -- CBF DEBUG LOGGING --
+    for (int i = 0; i < n_within; ++i) {
+        double required_bound = lb_ext_(nv_ + i);
+        if (required_bound > 0.05) {
+            double max_jdist = 0;
+            int max_jdist_idx = -1;
+            for (int j = 0; j < nv_; ++j) {
+                if (std::abs(C_ext_(nv_ + i, j)) > std::abs(max_jdist)) {
+                    max_jdist = C_ext_(nv_ + i, j);
+                    max_jdist_idx = j;
+                }
+            }
+            std::printf("[IK DEBUG] MASSIVE CBF ACTIVE: constraint %d, bound=%.3f\n", i, required_bound);
+            std::printf("   -> Max Jdist is %.3f on jid=%d\n", max_jdist, max_jdist_idx);
+        }
+    }
+    // -----------------------
     qp_->settings.initial_guess = proxsuite::proxqp::InitialGuessStatus::COLD_START_WITH_PREVIOUS_RESULT;
 
     // Use a flag to track if we've initialized this specific qp_ instance
@@ -621,6 +645,41 @@ StepResult IKSolver::solveStep(
         qp_->update(H_ext_, g_ext_, std::nullopt, std::nullopt, C_ext_, lb_ext_, ub_ext_);
     }
     qp_->solve();
+
+    // -- DEBUG LOGGING --
+    if (qp_->results.info.status != proxsuite::proxqp::QPSolverOutput::PROXQP_SOLVED) {
+        std::printf("[IK DEBUG] QP Solver failed! Status: %d\n", (int)qp_->results.info.status);
+        for(int i = 0; i < nv_; ++i) {
+            if (lb_ext_(i) > ub_ext_(i) + 1e-6) {
+                std::printf("[IK DEBUG] -> INFEASIBLE JOINT LIMIT: id=%d, min_v=%.3f, max_v=%.3f\n", 
+                            i, lb_ext_(i), ub_ext_(i));
+            }
+        }
+    } else {
+        double max_v = 0;
+        int max_j = -1;
+        for(int i = 0; i < nv_; ++i) {
+            if (std::abs(qp_->results.x(i)) > max_v) {
+                max_v = std::abs(qp_->results.x(i));
+                max_j = i;
+            }
+        }
+        // If joint moves more than 0.1 rad in a single step (approx 5.7 degrees)
+        if (max_v * cfg.step_size > 0.1) {
+            int jnt_id = m_->dof_jntid[max_j];
+            const char* jname = mj_id2name(m_, mjOBJ_JOINT, jnt_id);
+            double q_curr = d->qpos[m_->jnt_qposadr[jnt_id]];
+            double q_min = m_->jnt_limited[jnt_id] ? m_->jnt_range[jnt_id * 2] : -999.0;
+            double q_max = m_->jnt_limited[jnt_id] ? m_->jnt_range[jnt_id * 2 + 1] : 999.0;
+            
+            std::printf("[IK DEBUG] HUGE JUMP: jid=%d (%s), v=%.3f\n", 
+                        max_j, jname ? jname : "unknown", max_v);
+            std::printf("   -> q_curr: %.3f (limits: [%.3f, %.3f])\n", q_curr, q_min, q_max);
+            std::printf("   -> QP Bounds: lb=%.3f, ub=%.3f\n", lb_ext_(max_j), ub_ext_(max_j));
+            std::printf("   -> QP Grad: g=%.3f, H_diag=%.3f\n", g_ext_(max_j), H_ext_(max_j, max_j));
+        }
+    }
+    // -------------------
 
     // Extract only the joint velocities (head of x) and integrate
     mj_integratePos(m_, d->qpos, qp_->results.x.head(nv_).data(), cfg.step_size);
@@ -642,6 +701,47 @@ void IKSolver::printStep(int step, const StepResult& r) const {
         r.objective_collision,
         r.contacts.total_contacts,
         std::isfinite(r.min_dist) ? r.min_dist : -1.0);
+}
+
+// ============================================================
+// Kinematic queries
+// ============================================================
+
+std::string IKSolver::getKinematicTree(mjData *d) const {
+    std::stringstream ss;
+    ss << "=== MuJoCo Kinematic Tree ===\n";
+    for (int i = 1; i < m_->nbody; ++i) { // skip worldbody (0)
+        const char* name = mj_id2name(m_, mjOBJ_BODY, i);
+        if (!name) continue;
+        
+        Eigen::Vector3d pos = Eigen::Vector3d::Map(d->xpos + 3 * i);
+        Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>> rot(d->xmat + 9 * i);
+        
+        // Convert to euler for readability
+        double pitch = std::asin(std::clamp(rot(0, 2), -1.0, 1.0));
+        double yaw = std::atan2(-rot(0, 1), rot(0, 0));
+        double roll = std::atan2(-rot(1, 2), rot(2, 2));
+
+        ss << "Body [" << i << "]: " << name << "\n";
+        ss << "  Pos (XYZ): " << pos.x() << ", " << pos.y() << ", " << pos.z() << "\n";
+        ss << "  Rot (RPY): " << roll << ", " << pitch << ", " << yaw << "\n";
+    }
+    return ss.str();
+}
+
+std::vector<std::string> IKSolver::getJointNames() const {
+    std::vector<std::string> names;
+    for (int i = 0; i < nv_; ++i) {
+        int jid = m_->dof_jntid[i];
+        const char* jname = mj_id2name(m_, mjOBJ_JOINT, jid);
+        if (jname) {
+            std::string name_str(jname);
+            if (std::find(names.begin(), names.end(), name_str) == names.end()) {
+                names.push_back(name_str);
+            }
+        }
+    }
+    return names;
 }
 
 // ============================================================

@@ -183,6 +183,10 @@ public:
   // Pretty-print one step to stdout
   void printStep(int step, const StepResult &r) const;
 
+  // Kinematic queries (baked into core class)
+  std::string getKinematicTree(mjData *d) const;
+  std::vector<std::string> getJointNames() const;
+
 private:
   mjModel *m_;
   int nv_;

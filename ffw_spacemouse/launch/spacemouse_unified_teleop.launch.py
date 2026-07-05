@@ -42,7 +42,6 @@ def generate_launch_description():
 
     # Base Teleop Node
     base_teleop_node = Node(
-        condition=IfCondition(LaunchConfiguration('hardware_mode')),
         package='ffw_spacemouse',
         executable='spacemouse_base_teleop',
         name='spacemouse_base_teleop',
@@ -66,6 +65,7 @@ def generate_launch_description():
             'invert_z': False,
             'invert_pitch': False,
             'invert_head_pan': False,
+            'hardware_mode': LaunchConfiguration('hardware_mode')
         }]
     )
 
