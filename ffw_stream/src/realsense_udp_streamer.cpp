@@ -65,9 +65,9 @@ uint64_t current_tick = 0;
 std::map<std::string, std::atomic<int>> frames_streamed;
 std::map<std::string, std::atomic<int>> frames_captured;
 
-std::mutex first_frame_mutex;
-std::map<std::string, double> first_frame_timestamps;
-bool initial_delta_printed = false;
+std::mutex timestamp_mutex;
+std::map<std::string, double> latest_timestamps;
+bool phase_delta_printed = false;
 
 void log(const std::string &msg) {
   std::lock_guard<std::mutex> lock(cout_mutex);
@@ -157,12 +157,10 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       if (has_new_frame) {
         rs2::video_frame color = frames.get_color_frame();
         if (color) {
-          // Log initial hardware timestamp
+          // Log latest hardware timestamp
           {
-            std::lock_guard<std::mutex> lck(first_frame_mutex);
-            if (first_frame_timestamps.find(cam_name) == first_frame_timestamps.end()) {
-              first_frame_timestamps[cam_name] = frames.get_timestamp();
-            }
+            std::lock_guard<std::mutex> lck(timestamp_mutex);
+            latest_timestamps[cam_name] = frames.get_timestamp();
           }
 
           frames_captured[cam_name]++;
@@ -261,12 +259,10 @@ void stream_camera(const std::string &serial, int index,
       } catch (...) {}
 
       if (has_new_frame) {
-        // Log initial hardware timestamp
+        // Log latest hardware timestamp
         {
-          std::lock_guard<std::mutex> lck(first_frame_mutex);
-          if (first_frame_timestamps.find(cam_name) == first_frame_timestamps.end()) {
-            first_frame_timestamps[cam_name] = frames.get_timestamp();
-          }
+          std::lock_guard<std::mutex> lck(timestamp_mutex);
+          latest_timestamps[cam_name] = frames.get_timestamp();
         }
 
         frames_captured[cam_name]++;
@@ -415,19 +411,21 @@ int main(int argc, char **argv) {
     }
     sync_cv.notify_all();
 
-    // Print initial hardware delta
-    if (!initial_delta_printed) {
-      std::lock_guard<std::mutex> lck(first_frame_mutex);
-      if (first_frame_timestamps.size() == 3) {
+    // Print true phase delta after cameras stabilize (e.g. at 150 ticks = 5s)
+    if (!phase_delta_printed && current_tick == 150) {
+      std::lock_guard<std::mutex> lck(timestamp_mutex);
+      if (latest_timestamps.size() == 3) {
         double min_t = -1.0;
-        double max_t = -1.0;
-        for (const auto& kv : first_frame_timestamps) {
+        for (const auto& kv : latest_timestamps) {
           if (min_t < 0 || kv.second < min_t) min_t = kv.second;
-          if (max_t < 0 || kv.second > max_t) max_t = kv.second;
         }
-        double delta = max_t - min_t;
-        log("\n[Hardware Sync] Initial capture phase delta across all cameras: " + std::to_string(delta) + " ms\n");
-        initial_delta_printed = true;
+        std::ostringstream ss;
+        ss << "\n[Hardware Phase Sync] Concurrent frame phase offsets:\n";
+        for (const auto& kv : latest_timestamps) {
+          ss << "  " << kv.first << ": +" << std::fixed << std::setprecision(2) << (kv.second - min_t) << " ms\n";
+        }
+        log(ss.str());
+        phase_delta_printed = true;
       }
     }
 
