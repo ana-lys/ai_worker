@@ -10,7 +10,6 @@ import rclpy
 from rclpy.serialization import deserialize_message
 import rosbag2_py
 from rosidl_runtime_py.utilities import get_message
-import tf_transformations
 
 def get_rosbag_options(bag_path):
     storage_options = rosbag2_py.StorageOptions(
@@ -70,8 +69,23 @@ def scan_to_points(scan_msg):
 def get_tf_from_odom(odom_msg):
     p = odom_msg.pose.pose.position
     q = odom_msg.pose.pose.orientation
-    trans = tf_transformations.translation_matrix([p.x, p.y, p.z])
-    rot = tf_transformations.quaternion_matrix([q.x, q.y, q.z, q.w])
+    
+    # Pure numpy quaternion to rotation matrix
+    # q = [x, y, z, w]
+    x, y, z, w = q.x, q.y, q.z, q.w
+    
+    rot = np.array([
+        [1 - 2*(y**2 + z**2), 2*(x*y - w*z),     2*(x*z + w*y),     0],
+        [2*(x*y + w*z),     1 - 2*(x**2 + z**2), 2*(y*z - w*x),     0],
+        [2*(x*z - w*y),     2*(y*z + w*x),     1 - 2*(x**2 + y**2), 0],
+        [0,                 0,                 0,                 1]
+    ])
+    
+    trans = np.eye(4)
+    trans[0, 3] = p.x
+    trans[1, 3] = p.y
+    trans[2, 3] = p.z
+    
     return np.dot(trans, rot)
 
 def fps(synced, num_points):
@@ -179,12 +193,12 @@ def main():
         init_tf = np.linalg.inv(base_odom_tf) @ odom_i_tf
         
         result = o3d.pipelines.registration.registration_icp(
-            source, target, max_correspondence_distance=0.1,
+            source, target, max_correspondence_distance=0.3,
             init=init_tf,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane()
         )
         
-        if result.fitness < 0.5 or result.inlier_rmse > 0.03:
+        if result.fitness < 0.1 or result.inlier_rmse > 0.1:
             print(f"  -> Rejecting frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
             continue
             
@@ -192,11 +206,12 @@ def main():
         source.transform(result.transformation)
         merged_pcd += source
 
-    print("Cleaning final merged cloud...")
+    print(f"Cleaning final merged cloud (size: {len(merged_pcd.points)} points)...")
     merged_pcd, _ = merged_pcd.remove_radius_outlier(nb_points=16, radius=0.05)
     
     print("Extracting Primitives...")
     merged_pts = np.asarray(merged_pcd.points)
+    print(f"Total points after cleaning: {len(merged_pts)}")
     
     walls = []
     remaining = merged_pts.copy()
