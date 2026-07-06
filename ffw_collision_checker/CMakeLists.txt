@@ -254,8 +254,8 @@ if(PROXSUITE_SHARED_LIBS)
 endif()
 
 # Install 3rd party resources (XMLs, models)
-install(DIRECTORY 3rd_party
-    DESTINATION share/${PROJECT_NAME}
+install(DIRECTORY 3rd_party/robotis_ffw
+    DESTINATION share/${PROJECT_NAME}/3rd_party
 )
 
 install(DIRECTORY launch

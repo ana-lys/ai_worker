@@ -427,8 +427,8 @@ public:
   }
 
   void clip_target(const Eigen::Isometry3d &achieved_l,
-                   const Eigen::Isometry3d &achieved_r, double max_dist = 0.002,
-                   double max_angle = 0.05) {
+                   const Eigen::Isometry3d &achieved_r, double max_dist = 0.01,
+                   double max_angle = 0.1) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
 
     // Left arm clipping

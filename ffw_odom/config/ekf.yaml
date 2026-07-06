@@ -1,0 +1,46 @@
+### ekf config file ###
+ekf_filter_node:
+  ros__parameters:
+    use_sim_time: false
+    clear_params: true
+
+    # The frequency, in Hz, at which the filter will output a position estimate.
+    frequency: 30.0
+
+    # The period, in seconds, after which we consider a sensor to have timed out.
+    sensor_timeout: 0.1
+
+    # If this is set to true, no 3D information will be used in your state estimate.
+    two_d_mode: true
+
+    # Frames
+    map_frame: map              
+    odom_frame: odom            
+    base_link_frame: base_link  
+    world_frame: odom           
+
+    # Do NOT publish TF
+    publish_tf: false
+    publish_acceleration: false
+
+    # Swerve wheel odometry
+    odom0: /odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_differential: false
+    odom0_relative: false
+
+    # rf2o laser odometry
+    odom1: /rf2o/odom
+    odom1_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom1_queue_size: 10
+    odom1_differential: false
+    odom1_relative: false
