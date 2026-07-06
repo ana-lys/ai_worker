@@ -340,18 +340,6 @@ def generate_launch_description():
         }]
     )
 
-            'range_min': 0.05,
-            'range_max': 20.0,
-            'use_inf': True,
-            'tolerance': 0.05,
-            'queue_size': 10,
-            'enable_shadow_filter': True,
-            'enable_average_filter': True,
-        }, {
-            'use_sim_time': use_sim,
-        }],
-    )
-
     odom_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
                                                             'launch',
