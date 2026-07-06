@@ -363,7 +363,7 @@ def generate_launch_description():
             lidar_timer_20s,
             lidar_timer_10s,
             head_eef_tracker_node,
-            dual_laser_merger_node,
+            ffw_laser_merger_node,
             odom_launch,
         ]
     )
