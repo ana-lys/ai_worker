@@ -20,7 +20,7 @@ def generate_launch_description():
         executable='rf2o_laser_odometry_node',
         name='rf2o_laser_odometry',
         output='log',
-        arguments=['--ros-args', '--log-level', 'warn'],
+        arguments=['--ros-args', '--log-level', 'error'],
         parameters=[{
             'laser_scan_topic' : '/scan',
             'odom_topic' : '/rf2o/odom',
