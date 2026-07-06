@@ -112,12 +112,23 @@ def ransac_line_fit(pts, threshold=0.03, iterations=500):
     return best_inliers
 
 def main():
-    bag_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/scan')
+    pkg_dir = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping')
+    bag_path = None
+    
     if len(sys.argv) > 1:
         bag_path = sys.argv[1]
-        
-    if not os.path.exists(bag_path):
-        print(f"Error: Bag path '{bag_path}' does not exist.")
+    else:
+        # Find the most recent scan_* folder
+        try:
+            scan_dirs = [os.path.join(pkg_dir, d) for d in os.listdir(pkg_dir) if d.startswith('scan_') and os.path.isdir(os.path.join(pkg_dir, d))]
+            if scan_dirs:
+                bag_path = max(scan_dirs, key=os.path.getctime)
+                print(f"Auto-selected most recent bag: {bag_path}")
+        except Exception as e:
+            pass
+            
+    if not bag_path or not os.path.exists(bag_path):
+        print("Error: Could not find any valid bag path.")
         print("Please run the record_map.launch.py first to record the data.")
         sys.exit(1)
 
