@@ -322,9 +322,9 @@ def generate_launch_description():
         condition=IfCondition(use_head_eef_tracker),
     )
 
-    ffw_laser_merger_node = Node(
+    ffw_laser_filter_node = Node(
         package='ffw_utilities',
-        executable='ffw_laser_merger_node',
+        executable='ffw_laser_filter_node',
         output='screen',
         parameters=[{
             'left_min_x': -0.5,
@@ -335,8 +335,31 @@ def generate_launch_description():
             'right_max_x': 0.4,
             'right_min_y': -0.2,
             'right_max_y': 0.6,
+            'target_frame': 'base_link'
+        }]
+    )
+
+    dual_laser_merger_node = Node(
+        package='dual_laser_merger',
+        executable='dual_laser_merger_node',
+        output='screen',
+        parameters=[{
+            'laser_1_topic': '/scan_left',
+            'laser_2_topic': '/scan_right',
+            'merged_scan_topic': '/scan',
+            'merged_cloud_topic': '/scan_cloud',
             'target_frame': 'base_link',
-            'publish_rate': 30.0
+            'angle_min': -3.141592654,
+            'angle_max': 3.141592654,
+            'angle_increment': 0.006544985,
+            'scan_time': 0.1,
+            'range_min': 0.05,
+            'range_max': 20.0,
+            'use_inf': True,
+            'tolerance': 0.05,
+            'queue_size': 10,
+            'enable_shadow_filter': True,
+            'enable_average_filter': True,
         }]
     )
 
@@ -363,7 +386,8 @@ def generate_launch_description():
             lidar_timer_20s,
             lidar_timer_10s,
             head_eef_tracker_node,
-            ffw_laser_merger_node,
+            ffw_laser_filter_node,
+            dual_laser_merger_node,
             odom_launch,
         ]
     )

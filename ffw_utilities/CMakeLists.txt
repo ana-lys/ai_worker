@@ -18,8 +18,8 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
-add_executable(ffw_laser_merger_node src/ffw_laser_merger_node.cpp)
-ament_target_dependencies(ffw_laser_merger_node
+add_executable(ffw_laser_filter_node src/ffw_laser_filter_node.cpp)
+ament_target_dependencies(ffw_laser_filter_node
   rclcpp
   sensor_msgs
   tf2
@@ -29,7 +29,7 @@ ament_target_dependencies(ffw_laser_merger_node
 )
 
 install(TARGETS
-  ffw_laser_merger_node
+  ffw_laser_filter_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

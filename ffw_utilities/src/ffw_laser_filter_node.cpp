@@ -12,10 +12,10 @@
 
 using std::placeholders::_1;
 
-class LaserMergerNode : public rclcpp::Node
+class LaserFilterNode : public rclcpp::Node
 {
 public:
-  LaserMergerNode() : Node("ffw_laser_merger_node")
+  LaserFilterNode() : Node("ffw_laser_filter_node")
   {
     // Declare parameters for left bounding box (relative to left lidar, aligned with base_link)
     this->declare_parameter("left_min_x", -0.5);
@@ -30,7 +30,6 @@ public:
     this->declare_parameter("right_max_y", 0.6);
 
     this->declare_parameter("target_frame", "base_link");
-    this->declare_parameter("publish_rate", 30.0);
 
     // Get parameters
     left_min_x_ = this->get_parameter("left_min_x").as_double();
@@ -44,7 +43,6 @@ public:
     right_max_y_ = this->get_parameter("right_max_y").as_double();
 
     target_frame_ = this->get_parameter("target_frame").as_string();
-    double pub_rate = this->get_parameter("publish_rate").as_double();
 
     // TF Setup
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -52,97 +50,60 @@ public:
 
     // Subscriptions
     sub_left_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-      "/scan_left_raw", rclcpp::SensorDataQoS(), std::bind(&LaserMergerNode::left_scan_cb, this, _1));
+      "/scan_left_raw", rclcpp::SensorDataQoS(), std::bind(&LaserFilterNode::left_scan_cb, this, _1));
     sub_right_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-      "/scan_right_raw", rclcpp::SensorDataQoS(), std::bind(&LaserMergerNode::right_scan_cb, this, _1));
+      "/scan_right_raw", rclcpp::SensorDataQoS(), std::bind(&LaserFilterNode::right_scan_cb, this, _1));
 
     // Publishers
-    pub_merged_ = this->create_publisher<sensor_msgs::msg::LaserScan>("/scan", rclcpp::SensorDataQoS());
+    pub_left_ = this->create_publisher<sensor_msgs::msg::LaserScan>("/scan_left", rclcpp::SensorDataQoS());
+    pub_right_ = this->create_publisher<sensor_msgs::msg::LaserScan>("/scan_right", rclcpp::SensorDataQoS());
     pub_markers_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/scan_debug_markers", 10);
 
-    // Timer
-    auto period = std::chrono::duration<double>(1.0 / pub_rate);
-    timer_ = this->create_wall_timer(period, std::bind(&LaserMergerNode::timer_cb, this));
-
-    RCLCPP_INFO(this->get_logger(), "FFW Laser Merger Node Initialized (Relative Base Link Filtering)");
+    RCLCPP_INFO(this->get_logger(), "FFW Laser Filter Node Initialized (Clean Pass-through)");
   }
 
 private:
   void left_scan_cb(const sensor_msgs::msg::LaserScan::SharedPtr msg)
   {
-    left_scan_ = msg;
+    sensor_msgs::msg::LaserScan filtered_scan = *msg; // Deep copy
+    process_scan(filtered_scan, left_min_x_, left_max_x_, left_min_y_, left_max_y_);
+    pub_left_->publish(filtered_scan);
+    publish_debug_markers(); // We can publish markers here occasionally or just rely on it
   }
 
   void right_scan_cb(const sensor_msgs::msg::LaserScan::SharedPtr msg)
   {
-    right_scan_ = msg;
+    sensor_msgs::msg::LaserScan filtered_scan = *msg; // Deep copy
+    process_scan(filtered_scan, right_min_x_, right_max_x_, right_min_y_, right_max_y_);
+    pub_right_->publish(filtered_scan);
   }
 
-  void timer_cb()
-  {
-    if (!left_scan_ && !right_scan_) return;
-
-    // Use header from whatever scan we have, default to left if both exist
-    auto base_scan = left_scan_ ? left_scan_ : right_scan_;
-
-    sensor_msgs::msg::LaserScan merged_scan;
-    merged_scan.header.stamp = base_scan->header.stamp;
-    merged_scan.header.frame_id = target_frame_;
-    
-    // Setup standard 360 degree scan params
-    merged_scan.angle_min = -M_PI;
-    merged_scan.angle_max = M_PI;
-    merged_scan.angle_increment = base_scan->angle_increment;
-    merged_scan.time_increment = base_scan->time_increment;
-    merged_scan.scan_time = base_scan->scan_time;
-    merged_scan.range_min = base_scan->range_min;
-    merged_scan.range_max = base_scan->range_max;
-
-    int num_rays = std::ceil((merged_scan.angle_max - merged_scan.angle_min) / merged_scan.angle_increment);
-    merged_scan.ranges.assign(num_rays, std::numeric_limits<float>::infinity());
-    merged_scan.intensities.assign(num_rays, 0.0);
-
-    // Process Left Scan
-    if (left_scan_) {
-      process_scan(left_scan_, merged_scan, left_min_x_, left_max_x_, left_min_y_, left_max_y_);
-    }
-
-    // Process Right Scan
-    if (right_scan_) {
-      process_scan(right_scan_, merged_scan, right_min_x_, right_max_x_, right_min_y_, right_max_y_);
-    }
-
-    pub_merged_->publish(merged_scan);
-    publish_debug_markers();
-  }
-
-  void process_scan(const sensor_msgs::msg::LaserScan::SharedPtr& scan, 
-                    sensor_msgs::msg::LaserScan& merged_scan,
+  void process_scan(sensor_msgs::msg::LaserScan& scan,
                     double min_x, double max_x, double min_y, double max_y)
   {
     geometry_msgs::msg::TransformStamped transform;
     try {
-      transform = tf_buffer_->lookupTransform(target_frame_, scan->header.frame_id, tf2::TimePointZero);
+      transform = tf_buffer_->lookupTransform(target_frame_, scan.header.frame_id, tf2::TimePointZero);
     } catch (const tf2::TransformException & ex) {
       RCLCPP_WARN_SKIPFIRST_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
                                      "Could not transform %s to %s: %s", 
-                                     scan->header.frame_id.c_str(), target_frame_.c_str(), ex.what());
+                                     scan.header.frame_id.c_str(), target_frame_.c_str(), ex.what());
       return;
     }
 
-    for (size_t i = 0; i < scan->ranges.size(); ++i) {
-      float r = scan->ranges[i];
-      if (!std::isfinite(r) || r < scan->range_min || r > scan->range_max) {
+    for (size_t i = 0; i < scan.ranges.size(); ++i) {
+      float r = scan.ranges[i];
+      if (!std::isfinite(r) || r < scan.range_min || r > scan.range_max) {
         continue;
       }
 
-      double angle = scan->angle_min + i * scan->angle_increment;
+      double angle = scan.angle_min + i * scan.angle_increment;
       double local_x = r * std::cos(angle);
       double local_y = r * std::sin(angle);
 
       // Transform to target frame (base_link) FIRST
       geometry_msgs::msg::PointStamped pt_in, pt_out;
-      pt_in.header = scan->header;
+      pt_in.header = scan.header;
       pt_in.point.x = local_x;
       pt_in.point.y = local_y;
       pt_in.point.z = 0.0;
@@ -155,42 +116,28 @@ private:
 
       // Apply bounding box filter
       if (rel_x >= min_x && rel_x <= max_x && rel_y >= min_y && rel_y <= max_y) {
-        continue; // Drop the point because it hit the robot body
-      }
-
-      // Re-project into the merged scan
-      double out_angle = std::atan2(pt_out.point.y, pt_out.point.x);
-      double out_range = std::hypot(pt_out.point.x, pt_out.point.y);
-
-      if (out_range < merged_scan.range_min || out_range > merged_scan.range_max) {
-        continue;
-      }
-
-      // Normalize angle to [angle_min, angle_max] if needed, though atan2 is [-pi, pi]
-      int index = std::round((out_angle - merged_scan.angle_min) / merged_scan.angle_increment);
-      if (index >= 0 && index < (int)merged_scan.ranges.size()) {
-        if (out_range < merged_scan.ranges[index]) {
-          merged_scan.ranges[index] = out_range;
-          if (scan->intensities.size() > i) {
-            merged_scan.intensities[index] = scan->intensities[i];
-          }
-        }
+        // Point is inside the bounding box, drop it!
+        // We set to 0.0 instead of infinity to ensure downstream mergers don't treat it as "free space to infinity"
+        scan.ranges[i] = 0.0;
       }
     }
   }
 
   void publish_debug_markers()
   {
+    // Throttle marker publishing to not spam rviz
+    static auto last_publish = this->get_clock()->now();
+    if ((this->get_clock()->now() - last_publish).seconds() < 1.0) {
+      return;
+    }
+    last_publish = this->get_clock()->now();
+
     visualization_msgs::msg::MarkerArray markers;
 
-    if (left_scan_) {
-      markers.markers.push_back(create_rect_marker(target_frame_, left_scan_->header.frame_id, 0, 
-                                                   left_min_x_, left_max_x_, left_min_y_, left_max_y_));
-    }
-    if (right_scan_) {
-      markers.markers.push_back(create_rect_marker(target_frame_, right_scan_->header.frame_id, 1, 
-                                                   right_min_x_, right_max_x_, right_min_y_, right_max_y_));
-    }
+    markers.markers.push_back(create_rect_marker(target_frame_, "lidar_l_link", 0, 
+                                                 left_min_x_, left_max_x_, left_min_y_, left_max_y_));
+    markers.markers.push_back(create_rect_marker(target_frame_, "lidar_r_link", 1, 
+                                                 right_min_x_, right_max_x_, right_min_y_, right_max_y_));
 
     pub_markers_->publish(markers);
   }
@@ -247,21 +194,18 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr sub_left_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr sub_right_;
-  rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr pub_merged_;
+  rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr pub_left_;
+  rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr pub_right_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
 
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-  rclcpp::TimerBase::SharedPtr timer_;
-
-  sensor_msgs::msg::LaserScan::SharedPtr left_scan_;
-  sensor_msgs::msg::LaserScan::SharedPtr right_scan_;
 };
 
 int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<LaserMergerNode>());
+  rclcpp::spin(std::make_shared<LaserFilterNode>());
   rclcpp::shutdown();
   return 0;
 }
