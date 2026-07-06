@@ -1,9 +1,18 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch.substitutions import PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
+    use_ekf_arg = DeclareLaunchArgument(
+        'use_ekf',
+        default_value='false',
+        description='Enable EKF fusion of laser and swerve odometry'
+    )
+    
+    use_ekf = LaunchConfiguration('use_ekf')
 
     # rf2o node
     rf2o_node = Node(
@@ -38,10 +47,12 @@ def generate_launch_description():
         parameters=[ekf_config],
         remappings=[
             ('odometry/filtered', 'ffw_laser_odom')
-        ]
+        ],
+        condition=IfCondition(use_ekf)
     )
 
     return LaunchDescription([
+        use_ekf_arg,
         rf2o_node,
         ekf_node
     ])
