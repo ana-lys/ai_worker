@@ -349,6 +349,13 @@ def generate_launch_description():
         }],
     )
 
+    odom_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
+                                                            'launch',
+                                                            'odom.launch.py'])),
+        condition=IfCondition(launch_lidar)
+    )
+
     return LaunchDescription(
         declared_arguments + [
             control_node,
@@ -366,5 +373,6 @@ def generate_launch_description():
             lidar_timer_10s,
             head_eef_tracker_node,
             dual_laser_merger_node,
+            odom_launch,
         ]
     )
