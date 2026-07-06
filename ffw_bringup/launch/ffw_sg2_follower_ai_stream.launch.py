@@ -367,6 +367,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
                                                             'launch',
                                                             'odom.launch.py'])),
+        launch_arguments={'use_ekf': 'true'}.items(),
         condition=IfCondition(launch_lidar)
     )
 
