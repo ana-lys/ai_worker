@@ -67,7 +67,7 @@ class LaserBoxFilterNode(Node):
             
             # If point is inside the bounding box, cut it off
             if self.min_x <= x <= self.max_x and self.min_y <= y <= self.max_y:
-                ranges[i] = float('inf')
+                ranges[i] = 0.0
                 if has_intensities:
                     intensities[i] = 0.0
                     
