@@ -745,7 +745,7 @@ controller_interface::return_type SwerveDriveController::update(
   bool timeout = false;
   // Check if ref_timeout_ is valid (non-zero duration) before calculating difference
   if (ref_timeout_.seconds() > 0.0 && (time - last_cmd_vel_time_) > ref_timeout_) {
-    RCLCPP_WARN_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       get_node()->get_logger(),
       *get_node()->get_clock(), 10000, "time: %.3f, last_cmd_vel_time_: %.3f, ref_timeout_: %.3f",
       time.seconds(), last_cmd_vel_time_.seconds(), ref_timeout_.seconds());

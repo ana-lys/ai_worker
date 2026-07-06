@@ -363,12 +363,17 @@ def generate_launch_description():
         }]
     )
 
-    odom_launch = IncludeLaunchDescription(
+    odom_launch_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
                                                             'launch',
                                                             'odom.launch.py'])),
         launch_arguments={'use_ekf': 'true'}.items(),
         condition=IfCondition(launch_lidar)
+    )
+    
+    odom_launch_delayed = TimerAction(
+        period=7.0,
+        actions=[odom_launch_include]
     )
 
     return LaunchDescription(
@@ -389,6 +394,6 @@ def generate_launch_description():
             head_eef_tracker_node,
             ffw_laser_filter_node,
             dual_laser_merger_node,
-            odom_launch,
+            odom_launch_delayed,
         ]
     )

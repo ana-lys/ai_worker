@@ -28,7 +28,7 @@ def generate_launch_description():
             'base_frame_id' : 'base_link',
             'odom_frame_id' : 'odom_rf2o',
             'init_pose_from_topic' : '',
-            'freq' : 20.0
+            'freq' : 50.0
         }]
     )
 
