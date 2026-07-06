@@ -121,7 +121,7 @@ def generate_launch_description():
         arguments=['--ros-args', '--log-level', 'ERROR'],
         parameters=[{
             'frame_id': 'lidar_l_link',
-            'output_topic': output_topic0,
+            'output_topic': 'scan_left_raw',
             'inverted': inverted,
             'hostip': hostip,
             'port': port0,
@@ -141,7 +141,7 @@ def generate_launch_description():
         arguments=['--ros-args', '--log-level', 'ERROR'],
         parameters=[{
             'frame_id': 'lidar_r_link',
-            'output_topic': output_topic1,
+            'output_topic': 'scan_right_raw',
             'inverted': inverted,
             'hostip': hostip,
             'port': port1,
@@ -151,6 +151,34 @@ def generate_launch_description():
             'laser_enable': laser_enable,
             'scan_range_start': scan_range_start,
             'scan_range_stop': scan_range_stop
+        }]
+    )
+
+    filter_left_node = Node(
+        package='ffw_utilities',
+        executable='laser_box_filter.py',
+        name='laser_box_filter_left',
+        parameters=[{
+            'input_topic': 'scan_left_raw',
+            'output_topic': output_topic0,
+            'min_x': -0.15,
+            'max_x': 0.15,
+            'min_y': -0.2,
+            'max_y': 0.0
+        }]
+    )
+
+    filter_right_node = Node(
+        package='ffw_utilities',
+        executable='laser_box_filter.py',
+        name='laser_box_filter_right',
+        parameters=[{
+            'input_topic': 'scan_right_raw',
+            'output_topic': output_topic1,
+            'min_x': -0.15,
+            'max_x': 0.15,
+            'min_y': 0.0,
+            'max_y': 0.2
         }]
     )
 
@@ -173,5 +201,7 @@ def generate_launch_description():
     ld.add_action(declare_sensorip1_cmd)
     ld.add_action(richbeam_lidar_node0)
     ld.add_action(richbeam_lidar_node1)
+    ld.add_action(filter_left_node)
+    ld.add_action(filter_right_node)
 
     return ld

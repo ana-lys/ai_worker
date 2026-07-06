@@ -1274,6 +1274,23 @@ controller_interface::return_type SwerveDriveController::update(
     odom_msg_.twist.twist.linear.x = odometry_.getVx();
     odom_msg_.twist.twist.linear.y = odometry_.getVy();
     odom_msg_.twist.twist.angular.z = odometry_.getWz();
+
+    // Dynamically scale covariance based on whether the robot is stationary
+    double v_norm = std::sqrt(std::pow(odometry_.getVx(), 2) + std::pow(odometry_.getVy(), 2));
+    double w_norm = std::abs(odometry_.getWz());
+    bool is_stationary = (v_norm < 0.005 && w_norm < 0.005);
+
+    double cov_v = is_stationary ? 1e-9 : 0.01;
+    double cov_w = is_stationary ? 1e-9 : 0.01;
+
+    odom_msg_.pose.covariance[0] = 0.01;
+    odom_msg_.pose.covariance[7] = 0.01;
+    odom_msg_.pose.covariance[35] = 0.01;
+
+    odom_msg_.twist.covariance[0] = cov_v;
+    odom_msg_.twist.covariance[7] = cov_v;
+    odom_msg_.twist.covariance[35] = cov_w;
+
     rt_odom_state_publisher_->try_publish(odom_msg_);
   }
 
