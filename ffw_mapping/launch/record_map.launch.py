@@ -10,9 +10,6 @@ def generate_launch_description():
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     pkg_src_dir = os.path.expanduser(f'~/robotis_ws/src/ai_worker/ffw_mapping/scan_{timestamp}')
-    
-    # Create the directory if it doesn't exist
-    os.makedirs(pkg_src_dir, exist_ok=True)
 
     record_process = ExecuteProcess(
         cmd=['ros2', 'bag', 'record', '-o', pkg_src_dir, '/scan', '/ffw_laser_odom'],
