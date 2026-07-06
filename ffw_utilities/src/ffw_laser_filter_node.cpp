@@ -117,8 +117,8 @@ private:
       // Apply bounding box filter
       if (rel_x >= min_x && rel_x <= max_x && rel_y >= min_y && rel_y <= max_y) {
         // Point is inside the bounding box, drop it!
-        // We set to 0.0 instead of infinity to ensure downstream mergers don't treat it as "free space to infinity"
-        scan.ranges[i] = 0.0;
+        // We set to NaN to ensure RViz and mergers completely ignore it and don't draw a point at the origin
+        scan.ranges[i] = std::numeric_limits<float>::quiet_NaN();
       }
     }
   }
