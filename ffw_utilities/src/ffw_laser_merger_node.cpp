@@ -17,20 +17,31 @@ class LaserMergerNode : public rclcpp::Node
 public:
   LaserMergerNode() : Node("ffw_laser_merger_node")
   {
-    // Declare parameters for the robot's physical footprint in base_link
-    this->declare_parameter("robot_min_x", -0.15);
-    this->declare_parameter("robot_max_x", 0.15);
-    this->declare_parameter("robot_min_y", -0.2);
-    this->declare_parameter("robot_max_y", 0.2);
+    // Declare parameters for left bounding box (relative to left lidar, aligned with base_link)
+    this->declare_parameter("left_min_x", -0.5);
+    this->declare_parameter("left_max_x", 0.4);
+    this->declare_parameter("left_min_y", -0.6);
+    this->declare_parameter("left_max_y", 0.2);
+
+    // Declare parameters for right bounding box (relative to right lidar, aligned with base_link)
+    this->declare_parameter("right_min_x", -0.5);
+    this->declare_parameter("right_max_x", 0.4);
+    this->declare_parameter("right_min_y", -0.2);
+    this->declare_parameter("right_max_y", 0.6);
 
     this->declare_parameter("target_frame", "base_link");
     this->declare_parameter("publish_rate", 30.0);
 
     // Get parameters
-    robot_min_x_ = this->get_parameter("robot_min_x").as_double();
-    robot_max_x_ = this->get_parameter("robot_max_x").as_double();
-    robot_min_y_ = this->get_parameter("robot_min_y").as_double();
-    robot_max_y_ = this->get_parameter("robot_max_y").as_double();
+    left_min_x_ = this->get_parameter("left_min_x").as_double();
+    left_max_x_ = this->get_parameter("left_max_x").as_double();
+    left_min_y_ = this->get_parameter("left_min_y").as_double();
+    left_max_y_ = this->get_parameter("left_max_y").as_double();
+
+    right_min_x_ = this->get_parameter("right_min_x").as_double();
+    right_max_x_ = this->get_parameter("right_max_x").as_double();
+    right_min_y_ = this->get_parameter("right_min_y").as_double();
+    right_max_y_ = this->get_parameter("right_max_y").as_double();
 
     target_frame_ = this->get_parameter("target_frame").as_string();
     double pub_rate = this->get_parameter("publish_rate").as_double();
@@ -53,7 +64,7 @@ public:
     auto period = std::chrono::duration<double>(1.0 / pub_rate);
     timer_ = this->create_wall_timer(period, std::bind(&LaserMergerNode::timer_cb, this));
 
-    RCLCPP_INFO(this->get_logger(), "FFW Laser Merger Node Initialized (Base Link Footprint Filtering)");
+    RCLCPP_INFO(this->get_logger(), "FFW Laser Merger Node Initialized (Relative Base Link Filtering)");
   }
 
 private:
@@ -93,12 +104,12 @@ private:
 
     // Process Left Scan
     if (left_scan_) {
-      process_scan(left_scan_, merged_scan);
+      process_scan(left_scan_, merged_scan, left_min_x_, left_max_x_, left_min_y_, left_max_y_);
     }
 
     // Process Right Scan
     if (right_scan_) {
-      process_scan(right_scan_, merged_scan);
+      process_scan(right_scan_, merged_scan, right_min_x_, right_max_x_, right_min_y_, right_max_y_);
     }
 
     pub_merged_->publish(merged_scan);
@@ -106,7 +117,8 @@ private:
   }
 
   void process_scan(const sensor_msgs::msg::LaserScan::SharedPtr& scan, 
-                    sensor_msgs::msg::LaserScan& merged_scan)
+                    sensor_msgs::msg::LaserScan& merged_scan,
+                    double min_x, double max_x, double min_y, double max_y)
   {
     geometry_msgs::msg::TransformStamped transform;
     try {
@@ -137,9 +149,12 @@ private:
 
       tf2::doTransform(pt_in, pt_out, transform);
 
-      // Apply bounding box filter in the base_link frame
-      if (pt_out.point.x >= robot_min_x_ && pt_out.point.x <= robot_max_x_ && 
-          pt_out.point.y >= robot_min_y_ && pt_out.point.y <= robot_max_y_) {
+      // Calculate the point's position relative to the lidar's origin, but in the target_frame's orientation
+      double rel_x = pt_out.point.x - transform.transform.translation.x;
+      double rel_y = pt_out.point.y - transform.transform.translation.y;
+
+      // Apply bounding box filter
+      if (rel_x >= min_x && rel_x <= max_x && rel_y >= min_y && rel_y <= max_y) {
         continue; // Drop the point because it hit the robot body
       }
 
@@ -167,17 +182,24 @@ private:
   void publish_debug_markers()
   {
     visualization_msgs::msg::MarkerArray markers;
-    // We only need one marker now, representing the robot footprint in base_link
-    markers.markers.push_back(create_rect_marker(target_frame_, 0, 
-                                                 robot_min_x_, robot_max_x_, robot_min_y_, robot_max_y_));
+
+    if (left_scan_) {
+      markers.markers.push_back(create_rect_marker(target_frame_, left_scan_->header.frame_id, 0, 
+                                                   left_min_x_, left_max_x_, left_min_y_, left_max_y_));
+    }
+    if (right_scan_) {
+      markers.markers.push_back(create_rect_marker(target_frame_, right_scan_->header.frame_id, 1, 
+                                                   right_min_x_, right_max_x_, right_min_y_, right_max_y_));
+    }
+
     pub_markers_->publish(markers);
   }
 
-  visualization_msgs::msg::Marker create_rect_marker(const std::string& frame_id, int id, 
+  visualization_msgs::msg::Marker create_rect_marker(const std::string& target_frame, const std::string& lidar_frame, int id, 
                                                      double min_x, double max_x, double min_y, double max_y)
   {
     visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = frame_id;
+    marker.header.frame_id = target_frame;
     marker.header.stamp = this->get_clock()->now();
     marker.ns = "laser_box_border";
     marker.id = id;
@@ -191,11 +213,24 @@ private:
     marker.color.b = 0.0;
     marker.color.a = 1.0;
 
+    // We need to offset the marker by the lidar's translation in base_link
+    geometry_msgs::msg::TransformStamped transform;
+    double t_x = 0.0;
+    double t_y = 0.0;
+    try {
+      transform = tf_buffer_->lookupTransform(target_frame, lidar_frame, tf2::TimePointZero);
+      t_x = transform.transform.translation.x;
+      t_y = transform.transform.translation.y;
+    } catch (const tf2::TransformException & ex) {
+      // Just return empty marker if transform fails
+      return marker;
+    }
+
     geometry_msgs::msg::Point p1, p2, p3, p4;
-    p1.x = min_x; p1.y = min_y; p1.z = 0;
-    p2.x = max_x; p2.y = min_y; p2.z = 0;
-    p3.x = max_x; p3.y = max_y; p3.z = 0;
-    p4.x = min_x; p4.y = max_y; p4.z = 0;
+    p1.x = t_x + min_x; p1.y = t_y + min_y; p1.z = 0;
+    p2.x = t_x + max_x; p2.y = t_y + min_y; p2.z = 0;
+    p3.x = t_x + max_x; p3.y = t_y + max_y; p3.z = 0;
+    p4.x = t_x + min_x; p4.y = t_y + max_y; p4.z = 0;
 
     marker.points.push_back(p1);
     marker.points.push_back(p2);
@@ -206,7 +241,8 @@ private:
     return marker;
   }
 
-  double robot_min_x_, robot_max_x_, robot_min_y_, robot_max_y_;
+  double left_min_x_, left_max_x_, left_min_y_, left_max_y_;
+  double right_min_x_, right_max_x_, right_min_y_, right_max_y_;
   std::string target_frame_;
 
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr sub_left_;
