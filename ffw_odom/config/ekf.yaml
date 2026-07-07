@@ -19,8 +19,8 @@ ekf_filter_node:
     base_link_frame: base_link  
     world_frame: odom           
 
-    # Do NOT publish TF
-    publish_tf: false
+    # Publish TF so RViz can use the EKF odom frame!
+    publish_tf: true
     publish_acceleration: false
 
     # Swerve wheel odometry
