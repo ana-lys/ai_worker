@@ -177,17 +177,30 @@ def main():
         print("Error: No valid pointclouds generated.")
         sys.exit(1)
 
-    print("Merging clouds using pure EKF odometry (No ICP)...")
+    print("Running Sequential ICP Merge...")
     merged_pcd = clouds[0]['pcd']
     base_odom_tf = get_tf_from_odom(clouds[0]['odom'])
 
     for i in range(1, len(clouds)):
+        target = merged_pcd
         source = clouds[i]['pcd']
         odom_i_tf = get_tf_from_odom(clouds[i]['odom'])
         init_tf = np.linalg.inv(base_odom_tf) @ odom_i_tf
 
-        # Trust EKF completely; apply the transform without any ICP sliding
-        source.transform(init_tf)
+        # Tight ICP using PointToPoint to prevent sliding along walls
+        result = o3d.pipelines.registration.registration_icp(
+            source, target, max_correspondence_distance=0.03,
+            init=init_tf,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        )
+        
+        if result.fitness < 0.1 or result.inlier_rmse > 0.03:
+            print(f"  -> Rejecting frame {i} ICP (falling back to EKF): fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
+            source.transform(init_tf) # Fallback to EKF if ICP fails
+        else:
+            print(f"  -> Merged frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
+            source.transform(result.transformation)
+            
         merged_pcd += source
 
     print(f"Cleaning final merged cloud (size: {len(merged_pcd.points)} points)...")
