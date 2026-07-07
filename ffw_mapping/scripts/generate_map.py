@@ -181,93 +181,27 @@ def main():
         print("Error: No valid pointclouds generated.")
         sys.exit(1)
 
-    print("Running Sequential ICP Merge...")
+    print("Merging clouds using pure EKF odometry (No ICP)...")
     merged_pcd = clouds[0]['pcd']
     base_odom_tf = get_tf_from_odom(clouds[0]['odom'])
 
     for i in range(1, len(clouds)):
-        target = merged_pcd
         source = clouds[i]['pcd']
         odom_i_tf = get_tf_from_odom(clouds[i]['odom'])
         init_tf = np.linalg.inv(base_odom_tf) @ odom_i_tf
 
-        # Tight ICP using PointToPoint to prevent sliding along walls
-        result = o3d.pipelines.registration.registration_icp(
-            source, target, max_correspondence_distance=0.03,
-            init=init_tf,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
-        )
-        
-        if result.fitness < 0.1 or result.inlier_rmse > 0.03:
-            print(f"  -> Rejecting frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
-            source.transform(init_tf) # Fallback to EKF if ICP fails
-        else:
-            print(f"  -> Merged frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
-            source.transform(result.transformation)
-            
+        # Trust EKF completely; apply the transform without any ICP sliding
+        source.transform(init_tf)
         merged_pcd += source
 
     print(f"Cleaning final merged cloud (size: {len(merged_pcd.points)} points)...")
     # Aggressive outlier removal
     merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=30, std_ratio=1.0)
     merged_pcd, _ = merged_pcd.remove_radius_outlier(nb_points=25, radius=0.08)
-    o3d.io.write_point_cloud("/tmp/merged_map.pcd", merged_pcd)
     
-    print("Extracting Primitives...")
-    merged_pts = np.asarray(merged_pcd.points)
-    print(f"Total points after cleaning: {len(merged_pts)}")
-    
-    walls = []
-    remaining = merged_pts.copy()
-    N_WALLS = 15
-
-    for _ in range(N_WALLS):
-        if len(remaining) < 20: break
-        inlier_mask = ransac_line_fit(remaining, threshold=0.04)
-        if np.sum(inlier_mask) < 20: break
-        
-        inlier_pts = remaining[inlier_mask]
-        
-        centroid = np.mean(inlier_pts, axis=0)
-        cov = np.cov(inlier_pts[:, :2].T)
-        evals, evecs = np.linalg.eigh(cov)
-        direction = evecs[:, 1]
-        
-        projections = np.dot(inlier_pts[:, :2] - centroid[:2], direction)
-        p_min, p_max = np.min(projections), np.max(projections)
-        
-        p1 = centroid[:2] + direction * p_min
-        p2 = centroid[:2] + direction * p_max
-        
-        walls.append({
-            'x1': float(p1[0]), 'y1': float(p1[1]),
-            'x2': float(p2[0]), 'y2': float(p2[1]),
-            'thickness': 0.05
-        })
-        
-        remaining = remaining[~inlier_mask]
-
-    print(f"Extracted {len(walls)} walls.")
-
-    # --- legs/poles: cluster leftover points, fit small circle ---
-    print("Clustering leftover points for poles...")
-    poles = []
-    if len(remaining) > 0:
-        labels = DBSCAN(eps=0.04, min_samples=4).fit_predict(remaining[:, :2])
-        for label in set(labels) - {-1}:
-            cluster = remaining[labels == label]
-            if len(cluster) < 4: continue
-            (cx, cy), r = cv2.minEnclosingCircle(cluster[:, :2].astype(np.float32))
-            if r < 0.15:  # reject non-leg blobs
-                poles.append({"cx": float(cx), "cy": float(cy), "r": float(r)})
-
-    print(f"Extracted {len(poles)} poles.")
-
-    map_out_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/map.yaml')
-    with open(map_out_path, 'w') as f:
-        yaml.dump({"walls": walls, "poles": poles}, f)
-        
-    print(f"\nDone! Map saved to {map_out_path}")
+    map_out_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/map.pcd')
+    o3d.io.write_point_cloud(map_out_path, merged_pcd)
+    print(f"\nDone! High-density point cloud map saved to {map_out_path}")
 
 if __name__ == '__main__':
     main()
