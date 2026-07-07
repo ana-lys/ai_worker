@@ -188,26 +188,30 @@ def main():
     for i in range(1, len(clouds)):
         target = merged_pcd
         source = clouds[i]['pcd']
-        
         odom_i_tf = get_tf_from_odom(clouds[i]['odom'])
         init_tf = np.linalg.inv(base_odom_tf) @ odom_i_tf
-        
+
+        # Tight ICP using PointToPoint to prevent sliding along walls
         result = o3d.pipelines.registration.registration_icp(
-            source, target, max_correspondence_distance=0.3,
+            source, target, max_correspondence_distance=0.08,
             init=init_tf,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane()
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
         )
         
         if result.fitness < 0.1 or result.inlier_rmse > 0.1:
             print(f"  -> Rejecting frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
-            continue
+            source.transform(init_tf) # Fallback to EKF if ICP fails
+        else:
+            print(f"  -> Merged frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
+            source.transform(result.transformation)
             
-        print(f"  -> Merged frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
-        source.transform(result.transformation)
         merged_pcd += source
 
     print(f"Cleaning final merged cloud (size: {len(merged_pcd.points)} points)...")
-    merged_pcd, _ = merged_pcd.remove_radius_outlier(nb_points=16, radius=0.05)
+    # Aggressive outlier removal
+    merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=30, std_ratio=1.0)
+    merged_pcd, _ = merged_pcd.remove_radius_outlier(nb_points=25, radius=0.08)
+    o3d.io.write_point_cloud("/tmp/merged_map.pcd", merged_pcd)
     
     print("Extracting Primitives...")
     merged_pts = np.asarray(merged_pcd.points)
