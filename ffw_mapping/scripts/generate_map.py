@@ -171,10 +171,6 @@ def main():
         pcd.points = o3d.utility.Vector3dVector(pts)
         
         pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-        pcd = pcd.voxel_down_sample(voxel_size=0.02)
-        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
-        pcd.orient_normals_towards_camera_location(np.array([0., 0., 0.]))
-        
         clouds.append({'pcd': pcd, 'odom': odom})
 
     if not clouds:
@@ -195,9 +191,8 @@ def main():
         merged_pcd += source
 
     print(f"Cleaning final merged cloud (size: {len(merged_pcd.points)} points)...")
-    # Aggressive outlier removal
-    merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=30, std_ratio=1.0)
-    merged_pcd, _ = merged_pcd.remove_radius_outlier(nb_points=25, radius=0.08)
+    # Light outlier removal to preserve raw crispness
+    merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
     
     map_out_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/map.pcd')
     o3d.io.write_point_cloud(map_out_path, merged_pcd)
