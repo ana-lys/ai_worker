@@ -193,12 +193,12 @@ def main():
 
         # Tight ICP using PointToPoint to prevent sliding along walls
         result = o3d.pipelines.registration.registration_icp(
-            source, target, max_correspondence_distance=0.08,
+            source, target, max_correspondence_distance=0.03,
             init=init_tf,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
         )
         
-        if result.fitness < 0.1 or result.inlier_rmse > 0.1:
+        if result.fitness < 0.1 or result.inlier_rmse > 0.03:
             print(f"  -> Rejecting frame {i}: fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
             source.transform(init_tf) # Fallback to EKF if ICP fails
         else:
