@@ -218,6 +218,10 @@ void CLaserOdometry2DNode::publish()
   odom.pose.pose.position.y = rf2o_ref.robot_pose_.translation()(1);
   odom.pose.pose.position.z = 0.0;
   odom.pose.pose.orientation = quaternion;
+  //set the covariance for pose
+  odom.pose.covariance[0] = 0.0001;
+  odom.pose.covariance[7] = 0.0001;
+  odom.pose.covariance[35] = 0.0001;
   //set the velocity
   odom.child_frame_id = base_frame_id;
   odom.twist.twist.linear.x = rf2o_ref.lin_speed;    //linear speed
