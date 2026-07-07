@@ -5,6 +5,7 @@ import yaml
 import numpy as np
 import open3d as o3d
 import cv2
+import matplotlib.pyplot as plt
 from sklearn.cluster import DBSCAN
 import rclpy
 from rclpy.serialization import deserialize_message
@@ -219,64 +220,89 @@ def main():
         merged_pcd += source
 
     print("Cleaning final merged cloud...")
-    # RELAXED filtering to keep edges!
-    merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=1.5)
+    # RELAXED filtering to keep edges but kill stray noise!
+    merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    merged_pcd, _ = merged_pcd.remove_radius_outlier(nb_points=15, radius=0.05)
     
     map_out_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/map.pcd')
     o3d.io.write_point_cloud(map_out_path, merged_pcd)
     print(f"Done! High-density map saved to {map_out_path}")
 
-    print("Extracting robust lines via Hough Transform and Merging...")
+    print("Generating Density Heatmap...")
     pts = np.asarray(merged_pcd.points)[:, :2]
+    # Calculate density using KDTree
+    pcd_tree = o3d.geometry.KDTreeFlann(merged_pcd)
+    densities = []
+    for i in range(len(merged_pcd.points)):
+        [k, idx, _] = pcd_tree.search_radius_vector_3d(merged_pcd.points[i], 0.05)
+        densities.append(k)
+        
+    densities = np.array(densities)
+    
+    plt.figure(figsize=(12, 12), dpi=150)
+    plt.scatter(pts[:, 0], pts[:, 1], c=densities, cmap='viridis', s=1, norm=plt.matplotlib.colors.LogNorm())
+    plt.colorbar(label='Density (points within 5cm radius)')
+    plt.axis('equal')
+    plt.grid(True)
+    plt.title("Merged Point Cloud (Density/Intensity Map)")
+    
+    density_img_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/density_map.png')
+    plt.savefig(density_img_path, bbox_inches='tight')
+    print(f"Saved Density Map to {density_img_path}")
+    if os.environ.get('DISPLAY'):
+        plt.show(block=False)
+
+    print("Extracting robust lines via Hough Transform and Merging...")
     resolution = 0.02 # 2cm per pixel
     min_x, min_y = np.min(pts, axis=0)
     max_x, max_y = np.max(pts, axis=0)
-    
+
     width = int((max_x - min_x) / resolution) + 1
     height = int((max_y - min_y) / resolution) + 1
     grid = np.zeros((height, width), dtype=np.uint8)
-    
+
     px = ((pts[:, 0] - min_x) / resolution).astype(int)
     py = ((pts[:, 1] - min_y) / resolution).astype(int)
     grid[py, px] = 255
-    
+
     grid_dilated = cv2.dilate(grid, np.ones((3,3), np.uint8), iterations=1)
-    
+
     # Relaxed Hough transform so we detect MORE lines, then merge them!
     raw_lines = cv2.HoughLinesP(
-        grid_dilated, 
-        rho=1, 
-        theta=np.pi/180, 
-        threshold=30,      
-        minLineLength=30,  
-        maxLineGap=10      
+        grid_dilated,
+        rho=1,
+        theta=np.pi/180,
+        threshold=30,
+        minLineLength=30,
+        maxLineGap=10
     )
-    
-    img_bgr = cv2.cvtColor(grid, cv2.COLOR_GRAY2BGR)
-    img_bgr[grid > 0] = (200, 200, 200) # Draw points in light grey
-    
+
+    # Black background, dark gray points
+    img_bgr = np.zeros((height, width, 3), dtype=np.uint8)
+    img_bgr[grid > 0] = (100, 100, 100) 
+
     if raw_lines is not None:
         print(f"Found {len(raw_lines)} raw line segments. Merging overlapping lines...")
-        merged_lines = merge_lines(raw_lines, angle_tol=np.pi/18, dist_tol=10.0) # 10 pixels = 20cm thickness allowed for merging
-        
+        merged_lines = merge_lines(raw_lines, angle_tol=np.pi/18, dist_tol=10.0)
+
         # Sort by weight (confidence) so we can draw the most confident ones on top or thicker
         merged_lines.sort(key=lambda x: x['weight'], reverse=True)
         print(f"Reduced to {len(merged_lines)} compact, true edges!")
-        
+
         for m in merged_lines:
             x1, y1, x2, y2 = m['coords']
             weight = m['weight']
-            # Color based on confidence
+            # Adjusted color scheme (BGR format)
             if weight > 5:
-                color = (0, 0, 255) # Red for high confidence
+                color = (0, 255, 0) # Green for high confidence
                 thickness = 3
             elif weight > 2:
-                color = (0, 255, 255) # Yellow for medium
+                color = (255, 255, 0) # Cyan for medium confidence
                 thickness = 2
             else:
-                color = (255, 0, 0) # Blue for low
+                color = (0, 0, 255) # Red for low confidence
                 thickness = 1
-                
+
             cv2.line(img_bgr, (int(x1), int(y1)), (int(x2), int(y2)), color, thickness)
     else:
         print("No lines found!")
