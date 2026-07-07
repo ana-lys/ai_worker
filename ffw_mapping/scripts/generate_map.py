@@ -103,57 +103,6 @@ def fps(synced, num_points):
 
     return [synced[i] for i in selected_indices]
 
-def merge_lines(lines, angle_tol=np.pi/18, dist_tol=5.0): # dist_tol in pixels
-    merged = []
-    
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        angle = np.arctan2(y2 - y1, x2 - x1)
-        if angle < 0: angle += np.pi
-        
-        matched = False
-        for m in merged:
-            mx1, my1, mx2, my2 = m['coords']
-            mangle = m['angle']
-            
-            diff = abs(angle - mangle)
-            diff = min(diff, np.pi - diff)
-            if diff > angle_tol:
-                continue
-                
-            dx = mx2 - mx1
-            dy = my2 - my1
-            mag = np.hypot(dx, dy)
-            if mag == 0: continue
-            
-            A = -dy / mag
-            B = dx / mag
-            C = -(A * mx1 + B * my1)
-            
-            dist1 = abs(A * x1 + B * y1 + C)
-            dist2 = abs(A * x2 + B * y2 + C)
-            
-            if dist1 < dist_tol and dist2 < dist_tol:
-                # Merge by finding extreme points along the line
-                pts = np.array([[x1, y1], [x2, y2], [mx1, my1], [mx2, my2]])
-                dir_vec = np.array([dx, dy]) / mag
-                projs = np.dot(pts, dir_vec)
-                
-                min_idx = np.argmin(projs)
-                max_idx = np.argmax(projs)
-                
-                m['coords'] = [pts[min_idx][0], pts[min_idx][1], pts[max_idx][0], pts[max_idx][1]]
-                m['angle'] = np.arctan2(pts[max_idx][1] - pts[min_idx][1], pts[max_idx][0] - pts[min_idx][0])
-                if m['angle'] < 0: m['angle'] += np.pi
-                m['weight'] += 1
-                matched = True
-                break
-                
-        if not matched:
-            merged.append({'coords': [x1, y1, x2, y2], 'angle': angle, 'weight': 1})
-            
-    return merged
-
 def main():
     pkg_dir = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping')
     bag_path = None
@@ -249,76 +198,17 @@ def main():
     density_img_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/density_map.png')
     plt.savefig(density_img_path, bbox_inches='tight')
     print(f"Saved Density Map to {density_img_path}")
-    if os.environ.get('DISPLAY'):
-        plt.show(block=False)
 
-    print("Extracting robust lines via Hough Transform and Merging...")
-    resolution = 0.02 # 2cm per pixel
-    min_x, min_y = np.min(pts, axis=0)
-    max_x, max_y = np.max(pts, axis=0)
-
-    width = int((max_x - min_x) / resolution) + 1
-    height = int((max_y - min_y) / resolution) + 1
-    grid = np.zeros((height, width), dtype=np.uint8)
-
-    px = ((pts[:, 0] - min_x) / resolution).astype(int)
-    py = ((pts[:, 1] - min_y) / resolution).astype(int)
-    grid[py, px] = 255
-
-    grid_dilated = cv2.dilate(grid, np.ones((3,3), np.uint8), iterations=1)
-
-    # Relaxed Hough transform so we detect MORE lines, then merge them!
-    raw_lines = cv2.HoughLinesP(
-        grid_dilated,
-        rho=1,
-        theta=np.pi/180,
-        threshold=30,
-        minLineLength=30,
-        maxLineGap=10
-    )
-
-    # Black background, dark gray points
-    img_bgr = np.zeros((height, width, 3), dtype=np.uint8)
-    img_bgr[grid > 0] = (100, 100, 100) 
-
-    if raw_lines is not None:
-        print(f"Found {len(raw_lines)} raw line segments. Merging overlapping lines...")
-        merged_lines = merge_lines(raw_lines, angle_tol=np.pi/18, dist_tol=10.0)
-
-        # Sort by weight (confidence) so we can draw the most confident ones on top or thicker
-        merged_lines.sort(key=lambda x: x['weight'], reverse=True)
-        print(f"Reduced to {len(merged_lines)} compact, true edges!")
-
-        for m in merged_lines:
-            x1, y1, x2, y2 = m['coords']
-            weight = m['weight']
-            # Adjusted color scheme (BGR format)
-            if weight > 5:
-                color = (0, 255, 0) # Green for high confidence
-                thickness = 3
-            elif weight > 2:
-                color = (255, 255, 0) # Cyan for medium confidence
-                thickness = 2
-            else:
-                color = (0, 0, 255) # Red for low confidence
-                thickness = 1
-
-            cv2.line(img_bgr, (int(x1), int(y1)), (int(x2), int(y2)), color, thickness)
-    else:
-        print("No lines found!")
-
-    out_img_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/extracted_walls.png')
-    cv2.imwrite(out_img_path, img_bgr)
-    print(f"Saved lines image to {out_img_path}")
-    
-    # Show it in a CV window as finish!
-    if os.environ.get('DISPLAY'):
-        print("Displaying in OpenCV window. Press any key to exit...")
-        cv2.imshow("Extracted Walls", img_bgr)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-    else:
-        print("No DISPLAY found, skipping cv2.imshow (image saved to disk).")
+    # Display using cv2 window as requested
+    img = cv2.imread(density_img_path)
+    if img is not None:
+        if os.environ.get('DISPLAY'):
+            print("Displaying in OpenCV window. Press any key to exit...")
+            cv2.imshow("Density Map", img)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        else:
+            print("No DISPLAY found, skipping cv2.imshow.")
 
 if __name__ == '__main__':
     main()
