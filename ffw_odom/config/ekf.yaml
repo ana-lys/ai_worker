@@ -34,12 +34,12 @@ ekf_filter_node:
     odom0_differential: false
     odom0_relative: false
 
-    # rf2o laser odometry
+    # rf2o laser odometry (absolute pose correction)
     odom1: /rf2o/odom
-    odom1_config: [false, false, false,
-                   false, false, false,
-                   true,  true,  false,
+    odom1_config: [true,  true,  false,
                    false, false, true,
+                   false, false,  false,
+                   false, false, false,
                    false, false, false]
     odom1_queue_size: 10
     odom1_differential: false
