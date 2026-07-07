@@ -15,9 +15,9 @@ ekf_filter_node:
 
     # Frames
     map_frame: map              
-    odom_frame: odom            
+    odom_frame: odom_ekf            
     base_link_frame: base_link  
-    world_frame: odom           
+    world_frame: odom_ekf           
 
     # Publish TF so RViz can use the EKF odom frame!
     publish_tf: true

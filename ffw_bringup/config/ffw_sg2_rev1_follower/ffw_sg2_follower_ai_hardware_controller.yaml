@@ -148,7 +148,7 @@
       odom_source: "feedback"
       base_frame_id: "base_link"
       odom_frame_id: "odom"
-      enable_odom_tf: false
+      enable_odom_tf: true
       pose_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
       twist_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
       velocity_rolling_window_size: 10
