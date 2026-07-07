@@ -12,7 +12,7 @@ def generate_launch_description():
     pkg_src_dir = os.path.expanduser(f'~/robotis_ws/src/ai_worker/ffw_mapping/scan_{timestamp}')
 
     record_process = ExecuteProcess(
-        cmd=['ros2', 'bag', 'record', '-o', pkg_src_dir, '/scan', '/ffw_laser_odom'],
+        cmd=['ros2', 'bag', 'record', '-o', pkg_src_dir, '/scan', '/ffw_laser_odom', '/odom', '/rf2o/odom'],
         output='screen'
     )
 
