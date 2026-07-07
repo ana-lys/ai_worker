@@ -46,7 +46,7 @@ def generate_launch_description():
         output='screen',
         parameters=[ekf_config],
         remappings=[
-            ('odometry/filtered', 'odom_ekf')
+            ('odometry/filtered', 'ffw_laser_odom')
         ],
         condition=IfCondition(use_ekf)
     )

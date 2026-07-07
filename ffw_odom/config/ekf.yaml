@@ -14,10 +14,10 @@ ekf_filter_node:
     two_d_mode: true
 
     # Frames
-    map_frame: odom_ekf
-    odom_frame: odom
+    map_frame: map              
+    odom_frame: odom            
     base_link_frame: base_link  
-    world_frame: odom_ekf           
+    world_frame: odom           
 
     # Publish TF so RViz can use the EKF odom frame!
     publish_tf: true
