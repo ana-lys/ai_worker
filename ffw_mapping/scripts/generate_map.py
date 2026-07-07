@@ -189,12 +189,12 @@ def main():
 
         # Tight ICP using PointToPoint to prevent sliding along walls
         result = o3d.pipelines.registration.registration_icp(
-            source, target, max_correspondence_distance=0.03,
+            source, target, max_correspondence_distance=0.015,
             init=init_tf,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
         )
-        
-        if result.fitness < 0.1 or result.inlier_rmse > 0.03:
+
+        if result.fitness < 0.1 or result.inlier_rmse > 0.015:
             print(f"  -> Rejecting frame {i} ICP (falling back to EKF): fitness={result.fitness:.2f}, rmse={result.inlier_rmse:.4f}")
             source.transform(init_tf) # Fallback to EKF if ICP fails
         else:
@@ -204,8 +204,9 @@ def main():
         merged_pcd += source
 
     print(f"Cleaning final merged cloud (size: {len(merged_pcd.points)} points)...")
-    # Light outlier removal to preserve raw crispness
-    merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    # Strict density filter to remove low-density points and flying pixels
+    merged_pcd, _ = merged_pcd.remove_radius_outlier(nb_points=35, radius=0.05)
+    merged_pcd, _ = merged_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=1.0)
     
     map_out_path = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_mapping/map.pcd')
     o3d.io.write_point_cloud(map_out_path, merged_pcd)

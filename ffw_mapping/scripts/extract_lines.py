@@ -34,14 +34,14 @@ def main():
     kernel = np.ones((3,3), np.uint8)
     grid_dilated = cv2.dilate(grid, kernel, iterations=1)
     
-    # 2. Extract lines using Probabilistic Hough Transform
+    # 2. Extract lines using Probabilistic Hough Transform (STRICTER)
     lines = cv2.HoughLinesP(
         grid_dilated, 
         rho=1, 
         theta=np.pi/180, 
-        threshold=30, 
-        minLineLength=30, # Minimum line length (pixels) -> 30 * 2cm = 60cm
-        maxLineGap=10      # Max gap between points to still be one line
+        threshold=50,      # Increased from 30: Need more collinear points to form a line
+        minLineLength=50,  # Increased from 30: Minimum 1 meter (50 * 2cm) long to avoid small islands
+        maxLineGap=5       # Decreased from 10: Maximum gap of 10cm (5 * 2cm) to still be considered one line
     )
     
     if lines is None:
