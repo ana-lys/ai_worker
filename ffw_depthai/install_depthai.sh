@@ -22,6 +22,8 @@ echo "Configuring depthai-core..."
 # We disable heavy features to ensure even if it compiles from source, it takes seconds, not hours.
 cmake -B build -S . \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-Wno-psabi" \
+    -DCMAKE_C_FLAGS="-Wno-psabi" \
     -DBUILD_SHARED_LIBS=ON \
     -DDEPTHAI_BUILD_EXAMPLES=OFF \
     -DDEPTHAI_BUILD_TESTS=OFF \
