@@ -16,7 +16,7 @@ def generate_launch_description():
 
     # rf2o node
     rf2o_node = Node(
-        package='rf2o_laser_odometry',
+        package='ffw_odom',
         executable='rf2o_laser_odometry_node',
         name='rf2o_laser_odometry',
         output='log',
