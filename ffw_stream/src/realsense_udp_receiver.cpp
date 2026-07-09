@@ -12,6 +12,7 @@
 #include <atomic>
 #include <ctime>
 #include <cstdlib>
+#include <filesystem>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -194,8 +195,7 @@ private:
       const char* home_dir = getenv("HOME");
       if (home_dir) {
         record_dir = std::string(home_dir) + "/record/glitches/" + buf + "/";
-        std::string cmd = "mkdir -p " + record_dir;
-        system(cmd.c_str());
+        std::filesystem::create_directories(record_dir);
         RCLCPP_INFO(this->get_logger(), "[ZED] Glitch detector active. Saving to: %s", record_dir.c_str());
       }
 
