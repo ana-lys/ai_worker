@@ -5,8 +5,9 @@ echo "==========================================="
 echo " Building depthai-core standalone via vcpkg"
 echo "==========================================="
 
-DEPTHAI_DIR="$HOME/depthai-core-build"
-INSTALL_DIR="$HOME/depthai_install"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPTHAI_DIR="$SCRIPT_DIR/depthai-core"
+INSTALL_DIR="$SCRIPT_DIR/depthai_install"
 
 if [ ! -d "$DEPTHAI_DIR" ]; then
     echo "Cloning depthai-core..."

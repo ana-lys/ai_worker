@@ -9,8 +9,8 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 
-# Point CMake to where we installed depthai-core standalone
-set(DEPTHAI_INSTALL_DIR "$ENV{HOME}/depthai_install")
+# Point CMake to where we installed depthai-core standalone (inside this package)
+set(DEPTHAI_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/depthai_install")
 list(APPEND CMAKE_PREFIX_PATH "${DEPTHAI_INSTALL_DIR}")
 set(depthai_DIR "${DEPTHAI_INSTALL_DIR}/lib/cmake/depthai")
 

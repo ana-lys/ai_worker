@@ -539,6 +539,10 @@ doc/
 ffw_collision_checker/3rd_party/mujoco/
 
 
+# depthai-core local build (inside ffw_depthai)
+ffw_depthai/depthai-core/
+ffw_depthai/depthai_install/
+
 install/
 log/
 build/
