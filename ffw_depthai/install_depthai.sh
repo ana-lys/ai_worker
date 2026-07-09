@@ -15,11 +15,8 @@ fi
 
 cd "$DEPTHAI_DIR"
 
-# Enable vcpkg binary caching (using GitHub packages or default)
-export VCPKG_BINARY_SOURCES="clear;default,readwrite"
-
 echo "Configuring depthai-core..."
-# We disable heavy features to ensure even if it compiles from source, it takes seconds, not hours.
+# Match default build settings - let vcpkg handle dependencies naturally
 cmake -B build -S . \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_FLAGS="-Wno-psabi" \
@@ -27,9 +24,6 @@ cmake -B build -S . \
     -DBUILD_SHARED_LIBS=ON \
     -DDEPTHAI_BUILD_EXAMPLES=OFF \
     -DDEPTHAI_BUILD_TESTS=OFF \
-    -DDEPTHAI_OPENCV_USE_SYSTEM=ON \
-    -DDEPTHAI_ENABLE_CURL=OFF \
-    -DDEPTHAI_ENABLE_REMOTE_CONNECTION=OFF \
     -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
 
 echo "Building depthai-core..."
