@@ -16,7 +16,8 @@
 //
 // Usage:
 //   udp_depth_ir_streamer <dest_ip> <base_port> [width=480] [height=270]
-//   [fps=30] [max_depth_m=1.0] [codec=mjpeg|h264]
+//   [fps=30] [max_depth_m=1.0] [--enable-d405s|--disable-d405s]
+//   [--d435-rgb|--no-d435-rgb]
 //
 //   codec=mjpeg (default) - libjpeg-based, intra-only, each frame independent
 //                           (a lost packet only corrupts one frame). Higher
@@ -293,23 +294,47 @@ int main(int argc, char **argv) {
   if (argc < 3) {
     std::cerr << "Usage: " << argv[0]
               << " <dest_ip> <base_port> [width=480] [height=270] [fps=30] "
-                 "[max_depth_m=1.0]"
+                 "[max_depth_m=1.0] [--enable-d405s|--disable-d405s] "
+                 "[--d435-rgb|--no-d435-rgb]"
               << std::endl;
     return 1;
   }
 
-  std::string dest_ip = argv[1];
-  int base_port = std::atoi(argv[2]);
+  std::vector<std::string> positional_args;
+  bool enable_d405s = true;
+  bool d435_rgb_enabled = true;
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--enable-d405s") {
+      enable_d405s = true;
+    } else if (arg == "--disable-d405s") {
+      enable_d405s = false;
+    } else if (arg == "--d435-rgb") {
+      d435_rgb_enabled = true;
+    } else if (arg == "--no-d435-rgb") {
+      d435_rgb_enabled = false;
+    } else {
+      positional_args.push_back(arg);
+    }
+  }
+
+  if (positional_args.size() < 2) {
+    std::cerr << "Missing required positional arguments." << std::endl;
+    return 1;
+  }
+
+  std::string dest_ip = positional_args[0];
+  int base_port = std::atoi(positional_args[1].c_str());
 
   int width = 480;
   int height = 270;
   int fps = 30;
   float max_depth_m = 1.0f;
 
-  if (argc > 3 && std::string(argv[3]) != "--ros-args") width = std::atoi(argv[3]);
-  if (argc > 4 && std::string(argv[4]) != "--ros-args") height = std::atoi(argv[4]);
-  if (argc > 5 && std::string(argv[5]) != "--ros-args") fps = std::atoi(argv[5]);
-  if (argc > 6 && std::string(argv[6]) != "--ros-args") max_depth_m = static_cast<float>(std::atof(argv[6]));
+  if (positional_args.size() > 2) width = std::atoi(positional_args[2].c_str());
+  if (positional_args.size() > 3) height = std::atoi(positional_args[3].c_str());
+  if (positional_args.size() > 4) fps = std::atoi(positional_args[4].c_str());
+  if (positional_args.size() > 5) max_depth_m = static_cast<float>(std::atof(positional_args[5].c_str()));
 
   if (width == 0) width = 480;
   if (height == 0) height = 270;
@@ -339,16 +364,20 @@ int main(int argc, char **argv) {
 
   log("Destination: " + dest_ip + "  base_port=" + std::to_string(base_port) +
       "  " + std::to_string(width) + "x" + std::to_string(height) + "@" +
-      std::to_string(fps) + "  max_depth=" + std::to_string(max_depth_m) + "m");
+      std::to_string(fps) + "  max_depth=" + std::to_string(max_depth_m) + "m" +
+      "  d405s=" + std::string(enable_d405s ? "on" : "off") +
+      "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off"));
 
   std::vector<std::thread> threads;
   int cam_idx = 0;
   for (size_t i = 0; i < serials.size(); ++i) {
     if (serials[i] == "941322072865") {
-      // The D435i replacing the ZED: Stream 1080p RGB to the ZED's port
-      int rgb_port = base_port + 100;
-      threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port, 1920, 1080, 30);
-    } else {
+      if (d435_rgb_enabled) {
+        // The D435i replacing the ZED: Stream 1080p RGB to the ZED's port
+        int rgb_port = base_port + 100;
+        threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port, 1920, 1080, 30);
+      }
+    } else if (enable_d405s) {
       int depth_port = base_port + cam_idx * 2;
       int ir_port = depth_port + 1;
       threads.emplace_back(stream_camera, serials[i], cam_idx,

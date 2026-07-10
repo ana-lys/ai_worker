@@ -12,7 +12,6 @@
 #include <atomic>
 #include <ctime>
 #include <cstdlib>
-#include <filesystem>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -23,29 +22,42 @@ public:
     this->declare_parameter<int>("base_port", 9000);
     this->declare_parameter<int>("num_cameras", 2);
     this->declare_parameter<bool>("headless", false);
+    this->declare_parameter<bool>("enable_d405s", true);
     
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
+    bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
 
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
-    pub_depth_.resize(num_cameras_);
-    pub_ir_.resize(num_cameras_);
+    if (enable_d405s) {
+      pub_depth_.resize(num_cameras_);
+      pub_ir_.resize(num_cameras_);
 
-    for (int i = 0; i < num_cameras_; ++i) {
-      std::string ns = "camera_" + std::to_string(i);
-      
-      pub_depth_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/depth/image_rect_raw", 10);
-      pub_ir_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/infra1/image_rect_raw", 10);
+      for (int i = 0; i < num_cameras_; ++i) {
+        std::string ns = "camera_" + std::to_string(i);
+        
+        pub_depth_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/depth/image_rect_raw", 10);
+        pub_ir_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/infra1/image_rect_raw", 10);
 
-      int depth_port = base_port + (i * 2);
-      int ir_port = depth_port + 1;
+        int depth_port = base_port + (i * 2);
+        int ir_port = depth_port + 1;
 
-      threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "Depth", depth_port, pub_depth_[i]);
-      threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "IR", ir_port, pub_ir_[i]);
+        threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "Depth", depth_port, pub_depth_[i]);
+        threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "IR", ir_port, pub_ir_[i]);
+      }
+    } else {
+      RCLCPP_INFO(this->get_logger(), "D405 streams disabled; only RGB/base_port+100 will be received");
     }
 
-    if (!this->get_parameter("headless").as_bool()) {
+    bool headless = this->get_parameter("headless").as_bool();
+    const char *display = std::getenv("DISPLAY");
+    const char *wayland_display = std::getenv("WAYLAND_DISPLAY");
+    RCLCPP_INFO(this->get_logger(), "GUI env: DISPLAY=%s WAYLAND_DISPLAY=%s",
+                display ? display : "<unset>",
+                wayland_display ? wayland_display : "<unset>");
+
+    if (!headless) {
       display_thread_ = std::thread(&RealsenseUDPReceiver::displayLoop, this);
     } else {
       RCLCPP_INFO(this->get_logger(), "Running in HEADLESS mode (No OpenCV Windows)");
@@ -181,58 +193,11 @@ private:
       RCLCPP_INFO(this->get_logger(), "[%s] Successfully connected", feed_name.c_str());
 
       cv::Mat frame;
-      cv::Mat prev_frame;
-      cv::Mat prev_gray; 
-      int glitch_counter = 0;
-      int total_rejected = 0;
-      std::string record_dir;
-
-      auto t = std::time(nullptr);
-      auto tm = *std::localtime(&t);
-      char buf[64];
-      std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
-      
-      const char* home_dir = getenv("HOME");
-      if (home_dir) {
-        record_dir = std::string(home_dir) + "/record/glitches/" + buf + "/";
-        std::filesystem::create_directories(record_dir);
-        RCLCPP_INFO(this->get_logger(), "[ZED] Glitch detector active. Saving to: %s", record_dir.c_str());
-      }
 
       while (running_ && rclcpp::ok()) {
         if (!cap.read(frame) || frame.empty()) {
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
           continue;
-        }
-
-        if (!record_dir.empty()) {
-          cv::Mat gray_curr;
-          cv::resize(frame, gray_curr, cv::Size(160, 90));
-          cv::cvtColor(gray_curr, gray_curr, cv::COLOR_BGR2GRAY);
-          
-          if (!prev_gray.empty()) {
-            cv::Mat diff;
-            cv::absdiff(gray_curr, prev_gray, diff);
-            double mad = cv::mean(diff)[0];
-            
-            if (mad > 20.0) {
-               total_rejected++;
-               char fn_buf[128];
-               sprintf(fn_buf, "glitch_%04d_A_prev.jpg", glitch_counter);
-               cv::imwrite(record_dir + fn_buf, prev_frame);
-               sprintf(fn_buf, "glitch_%04d_B_post.jpg", glitch_counter);
-               cv::imwrite(record_dir + fn_buf, frame);
-               cv::Mat diff_color;
-               cv::applyColorMap(diff, diff_color, cv::COLORMAP_JET);
-               cv::resize(diff_color, diff_color, cv::Size(1280, 720), 0, 0, cv::INTER_NEAREST);
-               sprintf(fn_buf, "glitch_%04d_D_diff.jpg", glitch_counter);
-               cv::imwrite(record_dir + fn_buf, diff_color);
-               glitch_counter++;
-               continue;
-            }
-          }
-          prev_gray = gray_curr.clone();
-          prev_frame = frame.clone();
         }
 
         {
@@ -279,6 +244,7 @@ private:
   void displayLoop() {
     std::string window_name = "Multi-Camera UDP Dashboard";
     cv::namedWindow(window_name, cv::WINDOW_AUTOSIZE);
+    RCLCPP_INFO(this->get_logger(), "[GUI] Opened window '%s'", window_name.c_str());
 
     while (running_ && rclcpp::ok()) {
       std::vector<cv::Mat> camera_grids;
@@ -337,20 +303,20 @@ private:
         camera_grids.push_back(cam_grid);
       }
 
+      cv::Mat zed_frame;
+      {
+        std::lock_guard<std::mutex> lock(img_mutex_);
+        if (latest_images_.count("ZED")) zed_frame = latest_images_["ZED"].clone();
+      }
+
+      cv::Mat dashboard;
       if (!camera_grids.empty()) {
         cv::Mat final_grid = camera_grids[0];
         for (size_t i = 1; i < camera_grids.size(); ++i) {
           cv::hconcat(final_grid, camera_grids[i], final_grid);
         }
 
-        cv::Mat zed_frame;
-        {
-          std::lock_guard<std::mutex> lock(img_mutex_);
-          if (latest_images_.count("ZED")) zed_frame = latest_images_["ZED"].clone();
-        }
-
-        cv::Mat dashboard;
-        if (!zed_frame.empty() && final_grid.rows > 0) {
+        if (!zed_frame.empty()) {
           double scale = (double)zed_frame.rows / final_grid.rows;
           int new_width = std::round(final_grid.cols * scale);
           cv::Mat final_grid_scaled;
@@ -360,11 +326,32 @@ private:
         } else {
           dashboard = final_grid;
         }
-
-        cv::resize(dashboard, dashboard, cv::Size(), 0.5, 0.5);
-        drawTelemetryOverlay(dashboard);
-        cv::imshow(window_name, dashboard);
+      } else if (!zed_frame.empty()) {
+        dashboard = zed_frame;
+        cv::putText(dashboard, "Primary RGB Feed", cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
       }
+
+      if (dashboard.empty()) {
+        dashboard = cv::Mat::zeros(720, 1280, CV_8UC3);
+        cv::putText(dashboard, "Waiting for UDP streams...", cv::Point(60, 120),
+                    cv::FONT_HERSHEY_SIMPLEX, 1.6, cv::Scalar(255, 255, 255), 3);
+        cv::putText(dashboard, "Open the sender first, then this window will fill automatically.",
+                    cv::Point(60, 180), cv::FONT_HERSHEY_SIMPLEX, 0.9,
+                    cv::Scalar(180, 180, 180), 2);
+        static bool logged_placeholder = false;
+        if (!logged_placeholder) {
+          RCLCPP_INFO(this->get_logger(), "[GUI] Showing placeholder dashboard until streams arrive");
+          logged_placeholder = true;
+        }
+      }
+
+      cv::resize(dashboard, dashboard, cv::Size(), 0.5, 0.5);
+      drawTelemetryOverlay(dashboard);
+      static int imshow_counter = 0;
+      if (++imshow_counter == 1) {
+        RCLCPP_INFO(this->get_logger(), "[GUI] Calling imshow for the first time");
+      }
+      cv::imshow(window_name, dashboard);
 
       int key = cv::waitKey(15);
       if (key == 27 || key == 'q') {

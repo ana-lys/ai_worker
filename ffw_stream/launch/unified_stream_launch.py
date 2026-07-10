@@ -1,46 +1,93 @@
 import os
-from ament_index_python.packages import get_package_share_directory
 from ament_index_python.packages import get_package_prefix
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
-from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 def generate_launch_description():
-    pkg_dir = get_package_share_directory('ffw_stream')
-
     dest_ip_arg = DeclareLaunchArgument('dest_ip', default_value='192.168.0.241')
     base_port_arg = DeclareLaunchArgument('base_port', default_value='9000')
     fps_arg = DeclareLaunchArgument('fps', default_value='30')
-
-    # RealSense Streamer (Handles all RealSense cameras automatically)
-    rs_exec = os.path.join(get_package_prefix('ffw_stream'), 'lib', 'ffw_stream', 'realsense_udp_streamer')
-    realsense_streamer = ExecuteProcess(
-        cmd=[
-            rs_exec,
-            LaunchConfiguration('dest_ip'),
-            LaunchConfiguration('base_port')
-        ],
-        output='screen'
+    enable_d405s_arg = DeclareLaunchArgument(
+        'enable_d405s',
+        default_value='true',
+        description='Enable the D405 hand cameras'
+    )
+    rgb_source_arg = DeclareLaunchArgument(
+        'rgb_source',
+        default_value='d435',
+        description='RGB camera source: d435, zedm, or oakd_lite'
+    )
+    rgb_resolution_arg = DeclareLaunchArgument(
+        'rgb_resolution',
+        default_value='1080',
+        description='Resolution for the RGB cameras'
     )
 
-    # ZED Streamer (using the native pure C++ streamer)
-    zed_stream_dir = get_package_share_directory('ffw_stream')
-    zed_streamer = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(zed_stream_dir, 'launch', 'zed_stream_launch.py')),
-        launch_arguments={
-            'dest_ip': LaunchConfiguration('dest_ip'),
-            'base_port': '9000',
-            'fps': LaunchConfiguration('fps')
-        }.items()
-    )
+    def launch_setup(context, *args, **kwargs):
+        dest_ip = LaunchConfiguration('dest_ip').perform(context)
+        base_port = LaunchConfiguration('base_port').perform(context)
+        fps = LaunchConfiguration('fps').perform(context)
+        enable_d405s = LaunchConfiguration('enable_d405s').perform(context).lower() == 'true'
+        rgb_source = LaunchConfiguration('rgb_source').perform(context)
+        rgb_resolution = LaunchConfiguration('rgb_resolution').perform(context) if 'rgb_resolution' in context.launch_configurations else 1080
+        actions = []
+
+        # RealSense streamer can be used for D405s and/or D435 RGB.
+        if enable_d405s or rgb_source == 'd435':
+            rs_exec = os.path.join(get_package_prefix('ffw_stream'), 'lib', 'ffw_stream', 'realsense_udp_streamer')
+            d405_flag = '--enable-d405s' if enable_d405s else '--disable-d405s'
+            d435_flag = '--d435-rgb' if rgb_source == 'd435' else '--no-d435-rgb'
+            actions.append(
+                ExecuteProcess(
+                    cmd=[rs_exec, dest_ip, base_port, d405_flag, d435_flag],
+                    output='screen'
+                )
+            )
+
+        if rgb_source == 'zedm':
+            zed_exec = os.path.join(get_package_prefix('ffw_stream'), 'lib', 'ffw_stream', 'zed_udp_streamer')
+            actions.append(
+                ExecuteProcess(
+                    cmd=[
+                        'bash', '-c',
+                        'NVJPEG=$(find /usr/lib/aarch64-linux-gnu -name libnvjpeg.so | head -n 1); '
+                        'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/nvidia -name "libjpeg.so*" | head -n 1); fi; '
+                        'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/tegra -name "libjpeg.so*" | head -n 1); fi; '
+                        'echo "[ZED] Preloading proprietary NVIDIA JPEG library: $NVJPEG"; '
+                        'export LD_PRELOAD=$NVJPEG; "$0" "$1" "$2" "$3"',
+                        zed_exec,
+                        dest_ip,
+                        base_port,
+                        fps
+                    ],
+                    output='screen'
+                )
+            )
+        elif rgb_source == 'oakd_lite':
+            actions.append(
+                Node(
+                    package='ffw_depthai',
+                    executable='depthai_udp_streamer',
+                    name='depthai_udp_streamer',
+                    output='screen',
+                    arguments=[dest_ip, base_port, fps , rgb_resolution] 
+                )
+            )
+        elif rgb_source != 'd435':
+            raise RuntimeError(
+                f"Unsupported rgb_source '{rgb_source}'. Use d435, zedm, or oakd_lite."
+            )
+
+        return actions
 
     return LaunchDescription([
         dest_ip_arg,
         base_port_arg,
         fps_arg,
-        realsense_streamer,
-        zed_streamer
+        enable_d405s_arg,
+        rgb_source_arg,
+        rgb_resolution_arg,
+        OpaqueFunction(function=launch_setup)
     ])

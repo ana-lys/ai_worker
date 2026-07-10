@@ -15,6 +15,9 @@
   <depend>libgstreamer-plugins-base1.0-dev</depend>
   <depend>cv_bridge</depend>
   <depend>sensor_msgs</depend>
+  <exec_depend>ffw_depthai</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   
   <exec_depend>gstreamer1.0-plugins-good</exec_depend>
   <exec_depend>gstreamer1.0-plugins-bad</exec_depend>
