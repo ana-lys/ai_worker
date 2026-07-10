@@ -41,8 +41,8 @@ int main(int argc, char **argv) {
 
   auto cam = pipeline.create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_A);
   cam->initialControl.setSharpness(4);
-  cam->initialControl.setLumaDenoise(2);
-  cam->initialControl.setChromaDenoise(2);
+  cam->initialControl.setLumaDenoise(1);
+  cam->initialControl.setChromaDenoise(3);
   cam->initialControl.setManualFocus(100);
 
   auto *videoOut = cam->requestOutput({1920, 1080}, dai::ImgFrame::Type::NV12);
