@@ -5,7 +5,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('rgb_source', default_value='zedm',
+        DeclareLaunchArgument('rgb_source', default_value='oakd_lite',
                               description='RGB source: zedm, d435, or oakd_lite'),
         DeclareLaunchArgument('headless', default_value='false'),
         # Unified receiver: auto-opens the known ports and displays whatever streams are present.

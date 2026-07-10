@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <chrono>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <memory>
@@ -108,6 +109,10 @@ int main(int argc, char **argv) {
               dest_ip.c_str(), video_port, dest_ip.c_str(), telemetry_port);
 
   int frame_count = 0;
+  int last_reported_count = 0;
+  auto last_report_time = std::chrono::steady_clock::now();
+  double last_frame_ts = -1.0; // hardware timestamp of last frame (ms)
+  double worst_delay_ms = 0.0;
 
   while (rclcpp::ok() && pipeline.isRunning()) {
     // Fixed: Use the correct get() overload
@@ -133,10 +138,28 @@ int main(int argc, char **argv) {
       }
 
       frame_count++;
-      if (frame_count % 300 == 0) {
+
+      // Track hardware timestamp for delay reporting
+      double hw_ts = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6; // ms
+      if (last_frame_ts >= 0.0) {
+        double gap = hw_ts - last_frame_ts;
+        if (gap > worst_delay_ms) worst_delay_ms = gap;
+      }
+      last_frame_ts = hw_ts;
+
+      // Every 5 seconds: send FPS + worst delay, same format as realsense
+      auto now_tp = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(now_tp - last_report_time).count();
+      if (elapsed >= 5.0) {
+        int delta = frame_count - last_reported_count;
+        double fps_val = delta / elapsed;
         std::ostringstream ss;
-        ss << "[OAK-D] Sent " << frame_count << " frames";
+        ss << "[OAK-D] FPS: " << std::fixed << std::setprecision(1) << fps_val
+           << " | Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay_ms << " ms";
         sendUdpText(telemetry_sock, telemetry_addr, ss.str());
+        last_reported_count = frame_count;
+        last_report_time = now_tp;
+        worst_delay_ms = 0.0;
       }
     }
 

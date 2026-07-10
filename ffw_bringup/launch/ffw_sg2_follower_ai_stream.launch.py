@@ -293,8 +293,12 @@ def generate_launch_description():
     stream_launch_dir = PathJoinSubstitution([FindPackageShare('ffw_stream'), 'launch'])
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([stream_launch_dir,
-                                                            'unified_stream_1080p_launch.py'])),
-        launch_arguments={'dest_ip': dest_ip, 'base_port': base_port}.items(),
+                                                            'unified_stream_launch.py'])),
+        launch_arguments={
+            'dest_ip': dest_ip,
+            'base_port': base_port,
+            'rgb_source': 'oakd_lite',
+        }.items(),
         condition=IfCondition(launch_cameras)
     )
 
