@@ -40,9 +40,10 @@ int main(int argc, char **argv) {
   dai::Pipeline pipeline(device);
 
   auto cam = pipeline.create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_A);
-  cam->initialControl.setSharpness(3);
-  cam->initialControl.setLumaDenoise(2);
-  cam->initialControl.setChromaDenoise(3);
+  cam->initialControl.setSharpness(4);
+  cam->initialControl.setLumaDenoise(0);
+  cam->initialControl.setChromaDenoise(0);
+  cam->initialControl.setManualFocus(120);
 
   auto *videoOut = cam->requestOutput({1920, 1080}, dai::ImgFrame::Type::NV12);
 
@@ -106,7 +107,7 @@ int main(int argc, char **argv) {
       }
 
       frame_count++;
-      if (frame_count % 30 == 0) {
+      if (frame_count % 300 == 0) {
         RCLCPP_INFO(node->get_logger(), "Sent %d frames", frame_count);
       }
     }
