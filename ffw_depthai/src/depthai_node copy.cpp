@@ -1,4 +1,6 @@
 #include "depthai/depthai.hpp"
+#include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
@@ -7,7 +9,7 @@
 #include <memory>
 
 void printSystemInformation(const dai::SystemInformation &info) {
-  const float m = 1024.0f * 1024.0f; // MiB
+  const float m = 1024.0f * 1024.0f;
   const auto &t = info.chipTemperature;
   std::cout << "\r[Telemetry] "
             << "CPU CSS: " << std::fixed << std::setprecision(1)
@@ -20,16 +22,9 @@ void printSystemInformation(const dai::SystemInformation &info) {
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<rclcpp::Node>("depthai_stream_node");
+  auto node = std::make_shared<rclcpp::Node>("depthai_mjpeg_udp_node");
 
-  // Parse command line argument
-  std::string mode = "h264"; // Default
-  if (argc > 1) {
-    mode = argv[1];
-    // Convert to lowercase for robustness
-    std::transform(mode.begin(), mode.end(), mode.begin(),
-                   [](unsigned char c){ return std::tolower(c); });
-  }
+  gst_init(nullptr, nullptr);
 
   std::shared_ptr<dai::Device> device;
   try {
@@ -44,93 +39,76 @@ int main(int argc, char **argv) {
 
   dai::Pipeline pipeline(device);
 
-  // Create Camera node (CAM_A is usually the RGB camera)
   auto cam = pipeline.create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_A);
-
-  // Image quality tuning
-  cam->initialControl.setSharpness(3);
-  cam->initialControl.setLumaDenoise(2);
+  cam->initialControl.setSharpness(4);
+  cam->initialControl.setLumaDenoise(1);
   cam->initialControl.setChromaDenoise(3);
 
-  // Request 1080p NV12 output
   auto *videoOut = cam->requestOutput({1920, 1080}, dai::ImgFrame::Type::NV12);
 
-  std::shared_ptr<dai::node::VideoEncoder> videoEnc;
-  std::shared_ptr<dai::MessageQueue> videoQueue;
-  std::string ffplayCmd;
+  auto videoEnc = pipeline.create<dai::node::VideoEncoder>();
+  videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::MJPEG);
+  videoEnc->setQuality(90);
 
-  if (mode == "raw") {
-    RCLCPP_INFO(node->get_logger(), "Selected Mode: RAW 1080p NV12 (Uncompressed)");
-    videoQueue = videoOut->createOutputQueue(5, true); // Larger queue for raw
-    ffplayCmd = "ffplay -f rawvideo -pixel_format nv12 -video_size 1920x1080 -framerate 30 "
-                "-fflags nobuffer -flags low_delay -framedrop "
-                "-window_title 'Live Raw 1080p NV12' -i - 2>/dev/null";
-  }
-  else if (mode == "h265") {
-    RCLCPP_INFO(node->get_logger(), "Selected Mode: H.265 @ 40 Mbps");
-    videoEnc = pipeline.create<dai::node::VideoEncoder>();
-    videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::H265_MAIN);
-    videoEnc->setBitrateKbps(40000);
-    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
-    videoEnc->setKeyframeFrequency(5);
+  videoOut->link(videoEnc->input);
+  auto videoQueue = videoEnc->bitstream.createOutputQueue(8, false);
 
-    videoOut->link(videoEnc->input);
-    videoQueue = videoEnc->bitstream.createOutputQueue();
-
-    ffplayCmd = "ffplay -f hevc -framerate 30 -probesize 32 -analyzeduration 0 "
-                "-fflags nobuffer -flags low_delay -framedrop -strict experimental "
-                "-window_title 'Live 1080p H.265' -i - 2>/dev/null";
-  }
-  else if (mode == "jpeg" || mode == "mjpeg") {
-    RCLCPP_INFO(node->get_logger(), "Selected Mode: MJPEG @ Quality 90");
-    videoEnc = pipeline.create<dai::node::VideoEncoder>();
-    videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::MJPEG);
-    videoEnc->setQuality(90);
-
-    videoOut->link(videoEnc->input);
-    videoQueue = videoEnc->bitstream.createOutputQueue();
-
-    ffplayCmd = "ffplay -f mjpeg -framerate 30 -probesize 32 -analyzeduration 0 "
-                "-fflags nobuffer -flags low_delay -framedrop "
-                "-window_title 'Live 1080p MJPEG' -i - 2>/dev/null";
-  }
-  else {  // Default: H.264
-    RCLCPP_INFO(node->get_logger(), "Selected Mode: H.264 @ 40 Mbps");
-    videoEnc = pipeline.create<dai::node::VideoEncoder>();
-    videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::H264_HIGH);
-    videoEnc->setBitrateKbps(40000);
-    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
-    videoEnc->setKeyframeFrequency(5);
-
-    videoOut->link(videoEnc->input);
-    videoQueue = videoEnc->bitstream.createOutputQueue();
-
-    ffplayCmd = "ffplay -f h264 -framerate 30 -probesize 32 -analyzeduration 0 "
-                "-fflags nobuffer -flags low_delay -framedrop -strict experimental "
-                "-window_title 'Live 1080p H.264' -i - 2>/dev/null";
-  }
-
-  // System logger for telemetry
   auto sysLog = pipeline.create<dai::node::SystemLogger>();
   sysLog->setRate(0.2f);
   auto sysLogQueue = sysLog->out.createOutputQueue();
 
   pipeline.start();
 
-  RCLCPP_INFO(node->get_logger(), "Spawning ffplay...");
-  FILE *ffplayPipe = popen(ffplayCmd.c_str(), "w");
-  if (!ffplayPipe) {
-    RCLCPP_ERROR(node->get_logger(), "Failed to open ffplay pipe!");
+  // ==================== GStreamer Pipeline ====================
+  GError *error = nullptr;
+  GstElement *gst_pipeline = gst_parse_launch(
+      "appsrc name=src is-live=true format=3 do-timestamp=true block=true ! "
+      "image/jpeg,framerate=30/1,width=1920,height=1080 ! "
+      "rtpjpegpay ! "
+      "udpsink host=192.168.0.241 port=9100 sync=false async=false",
+      &error);
+
+  if (error) {
+    RCLCPP_ERROR(node->get_logger(), "GStreamer error: %s", error->message);
+    g_error_free(error);
     rclcpp::shutdown();
     return -1;
   }
 
+  GstElement *appsrc = gst_bin_get_by_name(GST_BIN(gst_pipeline), "src");
+  gst_element_set_state(gst_pipeline, GST_STATE_PLAYING);
+
+  RCLCPP_INFO(node->get_logger(), "Streaming MJPEG over UDP to 192.168.0.241:9100");
+
+  int frame_count = 0;
+
   while (rclcpp::ok() && pipeline.isRunning()) {
-    auto videoFrame = videoQueue->get<dai::ImgFrame>();
-    if (videoFrame) {
+    // Fixed: Use the correct get() overload
+    bool hasTimedOut = false;
+    auto videoFrame = videoQueue->get<dai::ImgFrame>(std::chrono::milliseconds(500), hasTimedOut);
+
+    if (videoFrame && !hasTimedOut) {
       const auto& data = videoFrame->getData();
-      fwrite(data.data(), 1, data.size(), ffplayPipe);
-      fflush(ffplayPipe);
+
+      GstBuffer *buffer = gst_buffer_new_allocate(nullptr, data.size(), nullptr);
+      GstMapInfo map;
+      if (gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+        memcpy(map.data, data.data(), data.size());
+        gst_buffer_unmap(buffer, &map);
+      }
+
+      GST_BUFFER_PTS(buffer) = GST_CLOCK_TIME_NONE;
+      GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+
+      GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc), buffer);
+      if (ret != GST_FLOW_OK) {
+        RCLCPP_WARN(node->get_logger(), "Failed to push buffer (ret=%d)", ret);
+      }
+
+      frame_count++;
+      if (frame_count % 300 == 0) {
+        RCLCPP_INFO(node->get_logger(), "Sent %d frames", frame_count);
+      }
     }
 
     auto sysInfo = sysLogQueue->tryGet<dai::SystemInformation>();
@@ -142,7 +120,10 @@ int main(int argc, char **argv) {
   }
 
   std::cout << "\nShutting down..." << std::endl;
-  pclose(ffplayPipe);
+  gst_element_set_state(gst_pipeline, GST_STATE_NULL);
+  gst_object_unref(appsrc);
+  gst_object_unref(gst_pipeline);
+
   rclcpp::shutdown();
   return 0;
 }

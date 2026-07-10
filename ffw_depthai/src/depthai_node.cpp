@@ -43,13 +43,12 @@ int main(int argc, char **argv) {
   cam->initialControl.setSharpness(4);
   cam->initialControl.setLumaDenoise(1);
   cam->initialControl.setChromaDenoise(3);
-  cam->initialControl.setManualFocus(100);
 
   auto *videoOut = cam->requestOutput({1920, 1080}, dai::ImgFrame::Type::NV12);
 
   auto videoEnc = pipeline.create<dai::node::VideoEncoder>();
   videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::MJPEG);
-  videoEnc->setQuality(85);
+  videoEnc->setQuality(90);
 
   videoOut->link(videoEnc->input);
   auto videoQueue = videoEnc->bitstream.createOutputQueue(8, false);
