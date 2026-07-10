@@ -24,11 +24,13 @@ public:
     this->declare_parameter<bool>("headless", false);
     this->declare_parameter<bool>("enable_d405s", true);
     this->declare_parameter<int>("depthai_video_port", 9100);
+    this->declare_parameter<std::string>("rgb_source", "zedm");
     
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
     bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
     int depthai_video_port = this->get_parameter("depthai_video_port").as_int();
+    rgb_source_ = this->get_parameter("rgb_source").as_string();
 
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
@@ -182,11 +184,24 @@ private:
   }
 
   void zedStreamLoop(int port) {
-    std::string pipeline = "udpsrc port=" + std::to_string(port) + 
-      " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
-      "rtpjitterbuffer latency=50 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
-    
-    std::string feed_name = "ZED";
+    std::string feed_name;
+    std::string pipeline;
+
+    if (rgb_source_ == "oakd_lite") {
+      // OAK-D streams MJPEG-over-RTP (rtpjpegpay on sender side)
+      feed_name = "OAK-D";
+      pipeline = "udpsrc port=" + std::to_string(port) +
+        " caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=JPEG\" ! "
+        "rtpjpegdepay ! jpegdec ! videoconvert ! "
+        "appsink drop=true sync=false max-buffers=1";
+    } else {
+      // ZED / D435 stream H264-over-RTP
+      feed_name = "ZED";
+      pipeline = "udpsrc port=" + std::to_string(port) +
+        " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+        "rtpjitterbuffer latency=50 ! rtph264depay ! decodebin ! videoconvert ! "
+        "appsink drop=true sync=false";
+    }
     RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
 
     while (running_ && rclcpp::ok()) {
@@ -320,7 +335,8 @@ private:
       cv::Mat zed_frame;
       {
         std::lock_guard<std::mutex> lock(img_mutex_);
-        if (latest_images_.count("ZED")) zed_frame = latest_images_["ZED"].clone();
+        if (latest_images_.count("OAK-D")) zed_frame = latest_images_["OAK-D"].clone();
+        else if (latest_images_.count("ZED")) zed_frame = latest_images_["ZED"].clone();
       }
 
       cv::Mat dashboard;
@@ -375,6 +391,7 @@ private:
   }
 
   int num_cameras_;
+  std::string rgb_source_;
   
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_depth_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_ir_;
