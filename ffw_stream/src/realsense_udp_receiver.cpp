@@ -23,10 +23,12 @@ public:
     this->declare_parameter<int>("num_cameras", 2);
     this->declare_parameter<bool>("headless", false);
     this->declare_parameter<bool>("enable_d405s", true);
+    this->declare_parameter<int>("depthai_video_port", 9100);
     
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
     bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
+    int depthai_video_port = this->get_parameter("depthai_video_port").as_int();
 
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
@@ -66,8 +68,13 @@ public:
     int zed_port = base_port + 100;
     threads_.emplace_back(&RealsenseUDPReceiver::zedStreamLoop, this, zed_port);
     
-    int telemetry_port = base_port + 200;
-    threads_.emplace_back(&RealsenseUDPReceiver::telemetryReceiverLoop, this, telemetry_port);
+    // Realsense telemetry on base_port + 200
+    int rs_telemetry_port = base_port + 200;
+    threads_.emplace_back(&RealsenseUDPReceiver::telemetryReceiverLoop, this, "RS", rs_telemetry_port);
+
+    // OAK-D (depthai) telemetry on depthai_video_port + 200
+    int depthai_telemetry_port = depthai_video_port + 200;
+    threads_.emplace_back(&RealsenseUDPReceiver::telemetryReceiverLoop, this, "OAK-D", depthai_telemetry_port);
   }
 
   ~RealsenseUDPReceiver() {
@@ -140,7 +147,7 @@ private:
     }
   }
 
-  void telemetryReceiverLoop(int port) {
+  void telemetryReceiverLoop(const std::string &source, int port) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return;
 
@@ -160,7 +167,7 @@ private:
       return;
     }
 
-    RCLCPP_INFO(this->get_logger(), "[Telemetry] Listening on UDP %d", port);
+    RCLCPP_INFO(this->get_logger(), "[Telemetry/%s] Listening on UDP %d", source.c_str(), port);
 
     char buffer[1024];
     while (running_ && rclcpp::ok()) {
@@ -168,7 +175,7 @@ private:
       if (n > 0) {
         buffer[n] = '\0';
         std::lock_guard<std::mutex> lock(telemetry_mutex_);
-        latest_telemetry_ = std::string(buffer);
+        latest_telemetry_[source] = std::string(buffer);
       }
     }
     close(sock);
@@ -221,8 +228,15 @@ private:
     {
       std::lock_guard<std::mutex> lock(telemetry_mutex_);
       if (latest_telemetry_.empty()) return;
-      text = latest_telemetry_;
+      // Concatenate all telemetry lines
+      for (const auto& [src, msg] : latest_telemetry_) {
+        if (!msg.empty()) {
+          if (!text.empty()) text += "  |  ";
+          text += msg;
+        }
+      }
     }
+    if (text.empty()) return;
 
     int font = cv::FONT_HERSHEY_SIMPLEX;
     double scale = 0.8;
@@ -371,7 +385,7 @@ private:
   std::map<std::string, std::chrono::steady_clock::time_point> fps_timers_;
 
   std::mutex telemetry_mutex_;
-  std::string latest_telemetry_;
+  std::map<std::string, std::string> latest_telemetry_;
 
   std::vector<std::thread> threads_;
   std::thread display_thread_;

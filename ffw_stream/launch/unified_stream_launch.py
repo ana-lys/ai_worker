@@ -19,11 +19,6 @@ def generate_launch_description():
         default_value='d435',
         description='RGB camera source: d435, zedm, or oakd_lite'
     )
-    rgb_resolution_arg = DeclareLaunchArgument(
-        'rgb_resolution',
-        default_value='1080',
-        description='Resolution for the RGB cameras'
-    )
 
     def launch_setup(context, *args, **kwargs):
         dest_ip = LaunchConfiguration('dest_ip').perform(context)
@@ -31,7 +26,6 @@ def generate_launch_description():
         fps = LaunchConfiguration('fps').perform(context)
         enable_d405s = LaunchConfiguration('enable_d405s').perform(context).lower() == 'true'
         rgb_source = LaunchConfiguration('rgb_source').perform(context)
-        rgb_resolution = LaunchConfiguration('rgb_resolution').perform(context) if 'rgb_resolution' in context.launch_configurations else 1080
         actions = []
 
         # RealSense streamer can be used for D405s and/or D435 RGB.
@@ -72,7 +66,7 @@ def generate_launch_description():
                     executable='depthai_udp_streamer',
                     name='depthai_udp_streamer',
                     output='screen',
-                    arguments=[dest_ip, base_port, fps , rgb_resolution] 
+                    arguments=[dest_ip, base_port, fps]
                 )
             )
         elif rgb_source != 'd435':
@@ -88,6 +82,5 @@ def generate_launch_description():
         fps_arg,
         enable_d405s_arg,
         rgb_source_arg,
-        rgb_resolution_arg,
         OpaqueFunction(function=launch_setup)
     ])

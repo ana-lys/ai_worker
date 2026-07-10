@@ -4,20 +4,34 @@
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
 #include <memory>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
-void printSystemInformation(const dai::SystemInformation &info) {
+void sendUdpText(int sock, const struct sockaddr_in &addr, const std::string &msg) {
+  if (sock >= 0) {
+    sendto(sock, msg.c_str(), msg.length(), 0,
+           reinterpret_cast<const struct sockaddr *>(&addr), sizeof(addr));
+  }
+}
+
+void printSystemInformation(const dai::SystemInformation &info, int sock,
+                            const struct sockaddr_in &addr) {
   const float m = 1024.0f * 1024.0f;
   const auto &t = info.chipTemperature;
-  std::cout << "\r[Telemetry] "
-            << "CPU CSS: " << std::fixed << std::setprecision(1)
-            << info.leonCssCpuUsage.average * 100.0f << "% | "
-            << "MSS: " << info.leonMssCpuUsage.average * 100.0f << "% | "
-            << "RAM: " << info.ddrMemoryUsage.used / m << "/"
-            << info.ddrMemoryUsage.total / m << " MiB | "
-            << "Temp: " << t.average << "C    " << std::flush;
+  std::ostringstream ss;
+  ss << "[OAK-D] "
+     << "CPU CSS: " << std::fixed << std::setprecision(1)
+     << info.leonCssCpuUsage.average * 100.0f << "% | "
+     << "MSS: " << info.leonMssCpuUsage.average * 100.0f << "% | "
+     << "RAM: " << info.ddrMemoryUsage.used / m << "/"
+     << info.ddrMemoryUsage.total / m << " MiB | "
+     << "Temp: " << t.average << "C";
+  sendUdpText(sock, addr, ss.str());
 }
 
 int main(int argc, char **argv) {
@@ -59,6 +73,18 @@ int main(int argc, char **argv) {
 
   pipeline.start();
 
+  // ==================== Telemetry UDP Socket ====================
+  const std::string dest_ip = "192.168.0.241";
+  const int video_port = 9100;
+  const int telemetry_port = video_port + 200; // 9300
+
+  int telemetry_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  struct sockaddr_in telemetry_addr;
+  memset(&telemetry_addr, 0, sizeof(telemetry_addr));
+  telemetry_addr.sin_family = AF_INET;
+  telemetry_addr.sin_port = htons(telemetry_port);
+  inet_pton(AF_INET, dest_ip.c_str(), &telemetry_addr.sin_addr);
+
   // ==================== GStreamer Pipeline ====================
   GError *error = nullptr;
   GstElement *gst_pipeline = gst_parse_launch(
@@ -78,7 +104,8 @@ int main(int argc, char **argv) {
   GstElement *appsrc = gst_bin_get_by_name(GST_BIN(gst_pipeline), "src");
   gst_element_set_state(gst_pipeline, GST_STATE_PLAYING);
 
-  RCLCPP_INFO(node->get_logger(), "Streaming MJPEG over UDP to 192.168.0.241:9100");
+  RCLCPP_INFO(node->get_logger(), "Streaming MJPEG over UDP to %s:%d, telemetry -> %s:%d",
+              dest_ip.c_str(), video_port, dest_ip.c_str(), telemetry_port);
 
   int frame_count = 0;
 
@@ -107,19 +134,24 @@ int main(int argc, char **argv) {
 
       frame_count++;
       if (frame_count % 300 == 0) {
-        RCLCPP_INFO(node->get_logger(), "Sent %d frames", frame_count);
+        std::ostringstream ss;
+        ss << "[OAK-D] Sent " << frame_count << " frames";
+        sendUdpText(telemetry_sock, telemetry_addr, ss.str());
       }
     }
 
     auto sysInfo = sysLogQueue->tryGet<dai::SystemInformation>();
     if (sysInfo) {
-      printSystemInformation(*sysInfo);
+      printSystemInformation(*sysInfo, telemetry_sock, telemetry_addr);
     }
 
     rclcpp::spin_some(node);
   }
 
-  std::cout << "\nShutting down..." << std::endl;
+  sendUdpText(telemetry_sock, telemetry_addr, "[OAK-D] Shutting down");
+  if (telemetry_sock >= 0) {
+    close(telemetry_sock);
+  }
   gst_element_set_state(gst_pipeline, GST_STATE_NULL);
   gst_object_unref(appsrc);
   gst_object_unref(gst_pipeline);
