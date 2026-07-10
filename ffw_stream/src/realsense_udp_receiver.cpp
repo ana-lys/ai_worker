@@ -189,9 +189,10 @@ private:
 
     if (rgb_source_ == "oakd_lite") {
       // OAK-D streams MJPEG-over-RTP (rtpjpegpay on sender side)
+      // caps match the working: gst-launch-1.0 udpsrc port=9100 caps="application/x-rtp, media=video, encoding-name=JPEG, payload=26"
       feed_name = "OAK-D";
       pipeline = "udpsrc port=" + std::to_string(port) +
-        " caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=JPEG\" ! "
+        " caps=\"application/x-rtp, media=video, encoding-name=JPEG, payload=26\" ! "
         "rtpjpegdepay ! jpegdec ! videoconvert ! "
         "appsink drop=true sync=false max-buffers=1";
     } else {
