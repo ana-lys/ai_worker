@@ -224,9 +224,14 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # Shut down the executor first to break the background spin loop
         executor.shutdown()
+        # Wait for background thread to exit cleanly
+        spin_thread.join(timeout=1.0)
+        # Destroy node and context safely
         checker.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
         if proc:
             print("Terminating background scan_to_map_icp node...")
             proc.terminate()
