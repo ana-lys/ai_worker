@@ -79,11 +79,10 @@ class AlignmentChecker(Node):
         
         # Try to look up the transform from map to laser frame
         try:
-            now = rclpy.time.Time()
             transform = self.tf_buffer.lookup_transform(
                 'map',
                 msg.header.frame_id,
-                now,
+                msg.header.stamp,
                 timeout=rclpy.duration.Duration(seconds=0.1)
             )
         except Exception as e:
@@ -136,10 +135,10 @@ class AlignmentChecker(Node):
         rms = np.sqrt(np.mean(inlier_dists**2)) if len(inlier_dists) > 0 else 0.0
         inlier_ratio = len(inliers) / len(transformed_pts) if len(transformed_pts) > 0 else 0.0
 
-        # Calculate map coverage ratio: what % of static map points are close to a scan point
+        # Calculate map coverage ratio: what % of static map points are close to a scan point (within 15 cm)
         dists_map = np.linalg.norm(self.map_points[:, np.newaxis, :] - transformed_pts[np.newaxis, :, :], axis=2)
         min_dists_map = np.min(dists_map, axis=1)
-        map_inliers_mask = min_dists_map < 0.4
+        map_inliers_mask = min_dists_map < 0.15
         map_coverage_ratio = np.sum(map_inliers_mask) / len(self.map_points)
         
         # Update dynamic plot if GUI is available
