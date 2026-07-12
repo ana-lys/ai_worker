@@ -83,7 +83,7 @@ class AlignmentChecker(Node):
                 'map',
                 msg.header.frame_id,
                 msg.header.stamp,
-                timeout=rclpy.duration.Duration(seconds=0.1)
+                timeout=rclpy.duration.Duration(seconds=0.25)
             )
         except Exception as e:
             curr_time = time.time()
