@@ -64,6 +64,11 @@ def generate_launch_description():
             default_value='ffw_sg2_follower',
             description='Type of ros2_control',
         ),
+        DeclareLaunchArgument(
+            'launch_rf2o',
+            default_value='false',
+            description='Whether to launch rf2o laser odometry',
+        ),
         # --- NEW ARGUMENTS FOR UDP STREAMER ---
         DeclareLaunchArgument('dest_ip', default_value='192.168.0.241',
                               description='Destination IP for UDP Streamer'),
@@ -83,6 +88,7 @@ def generate_launch_description():
     use_head_eef_tracker = LaunchConfiguration('use_head_eef_tracker')
     init_position_file = LaunchConfiguration('init_position_file')
     ros2_control_type = LaunchConfiguration('ros2_control_type')
+    launch_rf2o = LaunchConfiguration('launch_rf2o')
     dest_ip = LaunchConfiguration('dest_ip')
     base_port = LaunchConfiguration('base_port')
 
@@ -371,7 +377,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
                                                             'launch',
                                                             'odom.launch.py'])),
-        launch_arguments={'use_ekf': 'true'}.items(),
+        launch_arguments={
+            'use_ekf': 'true',
+            'launch_rf2o': launch_rf2o
+        }.items(),
         condition=IfCondition(launch_lidar)
     )
     

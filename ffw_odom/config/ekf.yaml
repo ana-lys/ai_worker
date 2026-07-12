@@ -19,8 +19,7 @@ ekf_filter_node:
     base_link_frame: base_link  
     world_frame: odom           
 
-    # Publish TF so RViz can use the EKF odom frame!
-    publish_tf: true
+    publish_tf: false
     publish_acceleration: false
 
     # Swerve wheel odometry
@@ -36,10 +35,10 @@ ekf_filter_node:
 
     # rf2o laser odometry (absolute pose correction)
     odom1: /rf2o/odom
-    odom1_config: [true,  true,  false,
-                   false, false, true,
-                   false, false,  false,
+    odom1_config: [false, false, false,
                    false, false, false,
+                   true,  true,  false,
+                   false, false, true,
                    false, false, false]
     odom1_queue_size: 10
     odom1_differential: false

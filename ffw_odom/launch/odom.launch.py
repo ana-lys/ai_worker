@@ -12,7 +12,14 @@ def generate_launch_description():
         description='Enable EKF fusion of laser and swerve odometry'
     )
     
+    launch_rf2o_arg = DeclareLaunchArgument(
+        'launch_rf2o',
+        default_value='true',
+        description='Whether to launch rf2o laser odometry'
+    )
+    
     use_ekf = LaunchConfiguration('use_ekf')
+    launch_rf2o = LaunchConfiguration('launch_rf2o')
 
     # rf2o node
     rf2o_node = Node(
@@ -28,8 +35,9 @@ def generate_launch_description():
             'base_frame_id' : 'base_link',
             'odom_frame_id' : 'odom',
             'init_pose_from_topic' : '',
-            'freq' : 50.0
-        }]
+            'freq' : 30.0
+        }],
+        condition=IfCondition(launch_rf2o)
     )
 
     # robot_localization ekf node
@@ -53,6 +61,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_ekf_arg,
+        launch_rf2o_arg,
         rf2o_node,
         ekf_node
     ])

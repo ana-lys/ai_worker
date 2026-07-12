@@ -1,0 +1,341 @@
+// ScanToMapICP.cpp
+//
+// ROS2 node that:
+//   - Loads a static map (pre-filtered wall/line features) from a CSV file at
+//     startup: one "x,y" pair per line, '#' comments allowed,
+//     whitespace-tolerant.
+//   - Subscribes to a single merged sensor_msgs/LaserScan (dual-LakiBeam1,
+//     already merged upstream into one topic).
+//   - Subscribes to nav_msgs/Odometry for the raw (drifting) odometry.
+//   - Runs ScanToMapICP each scan, using the current odom + last known
+//     map->odom offset as the ICP initial guess.
+//   - On a converged/accepted match, updates the map->odom offset.
+//   - Every scan (whether or not this one matched), publishes:
+//       * a corrected nav_msgs/Odometry on ~/odom_corrected (frame: map_frame,
+//         child frame: base_frame)
+//       * a TF broadcast map_frame -> odom_frame
+//     This keeps the existing odom_frame -> base_frame TF chain (from your
+//     wheel odometry / rf2o node) completely untouched -- only the map->odom
+//     offset is adjusted, which is the standard localization-correction
+//     pattern.
+//
+// Threading note: uses the default SingleThreadedExecutor assumption (see
+// main()) so the odom and scan callbacks never run concurrently; no extra
+// locking is needed. If you switch to a MultiThreadedExecutor or callback
+// groups, add a mutex around current_odom_pose_/current_odom_twist_.
+
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+
+#include <cmath>
+#include <fstream>
+#include <optional>
+#include <sstream>
+#include <string>
+
+#include "rf2o_laser_odometry/scan_to_map_icp.hpp"
+
+using icp2d::ICPConfig;
+using icp2d::ICPResult;
+using icp2d::Point2D;
+using icp2d::Pose2D;
+using icp2d::ScanToMapICP;
+
+namespace {
+
+// Loads map points from a whitespace-separated text file with columns
+// "wall_id x y" (a header row is expected and skipped; wall_id is ignored,
+// only x/y are kept). Blank lines and lines starting with '#' are skipped.
+// Comma-separated files also work fine (commas are treated as whitespace).
+// Throws std::runtime_error on I/O failure or a malformed data line.
+std::vector<Point2D> loadMapFromCsv(const std::string &path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    throw std::runtime_error("Could not open map file: " + path);
+  }
+
+  std::vector<Point2D> points;
+  std::string line;
+  size_t line_no = 0;
+  bool header_skipped = false;
+  while (std::getline(file, line)) {
+    ++line_no;
+    size_t start = line.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos)
+      continue; // blank line
+    if (line[start] == '#')
+      continue; // comment
+
+    for (char &c : line)
+      if (c == ',')
+        c = ' '; // allow commas too
+    std::istringstream iss(line);
+
+    double wall_id, x, y;
+    if (!(iss >> wall_id >> x >> y)) {
+      // First non-blank, non-comment line that fails to parse as three
+      // numbers is treated as the "wall_id x y" header and skipped once.
+      if (!header_skipped) {
+        header_skipped = true;
+        continue;
+      }
+      throw std::runtime_error("Malformed map file line " +
+                               std::to_string(line_no) + ": '" + line + "'");
+    }
+    header_skipped = true;
+    points.push_back({x, y}); // wall_id intentionally discarded
+  }
+  return points;
+}
+
+Pose2D poseFromOdomMsg(const nav_msgs::msg::Odometry &msg) {
+  Pose2D p;
+  p.x = msg.pose.pose.position.x;
+  p.y = msg.pose.pose.position.y;
+  p.theta = tf2::getYaw(msg.pose.pose.orientation);
+  return p;
+}
+
+geometry_msgs::msg::Quaternion yawToQuaternion(double yaw) {
+  tf2::Quaternion q;
+  q.setRPY(0.0, 0.0, yaw);
+  geometry_msgs::msg::Quaternion msg;
+  msg.x = q.x();
+  msg.y = q.y();
+  msg.z = q.z();
+  msg.w = q.w();
+  return msg;
+}
+
+} // namespace
+
+class ScanToMapICPNode : public rclcpp::Node {
+public:
+  ScanToMapICPNode() : rclcpp::Node("scan_to_map_icp") {
+    // --- parameters ---
+    map_file_ = declare_parameter<std::string>("map_file", "");
+    scan_topic_ = declare_parameter<std::string>("scan_topic", "/scan");
+    odom_topic_ = declare_parameter<std::string>("odom_topic", "/odom");
+    corrected_odom_topic_ = declare_parameter<std::string>(
+        "corrected_odom_topic", "/odom_corrected");
+    map_frame_ = declare_parameter<std::string>("map_frame", "map");
+    odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
+    base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
+
+    ICPConfig cfg;
+    cfg.max_correspondence_dist =
+        declare_parameter<double>("max_correspondence_dist", 0.4);
+    cfg.huber_delta = declare_parameter<double>("huber_delta", 0.10);
+    cfg.max_iterations = declare_parameter<int>("max_iterations", 30);
+    cfg.min_inlier_ratio = declare_parameter<double>("min_inlier_ratio", 0.25);
+    cfg.normal_k_neighbors = declare_parameter<int>("normal_k_neighbors", 8);
+    cfg.translation_eps = declare_parameter<double>("translation_eps", 1e-4);
+    cfg.rotation_eps = declare_parameter<double>("rotation_eps", 1e-5);
+    cfg.verbose = declare_parameter<bool>("verbose", false);
+    max_accepted_rms_ = declare_parameter<double>("max_accepted_rms", 0.10);
+
+    if (map_file_.empty()) {
+      RCLCPP_FATAL(get_logger(), "Required parameter 'map_file' is empty.");
+      throw std::runtime_error("map_file parameter not set");
+    }
+
+    std::vector<Point2D> map_points;
+    try {
+      map_points = loadMapFromCsv(map_file_);
+    } catch (const std::exception &e) {
+      RCLCPP_FATAL(get_logger(), "Failed to load map: %s", e.what());
+      throw;
+    }
+    RCLCPP_INFO(get_logger(), "Loaded %zu map points from '%s'",
+                map_points.size(), map_file_.c_str());
+
+    matcher_ = std::make_unique<ScanToMapICP>(std::move(map_points), cfg);
+
+    // map->odom offset starts at identity: until the first successful
+    // match, corrected pose == raw odom pose.
+    map_to_odom_offset_ = Pose2D{};
+
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        odom_topic_, rclcpp::SensorDataQoS(),
+        std::bind(&ScanToMapICPNode::odomCallback, this,
+                  std::placeholders::_1));
+
+    scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
+        scan_topic_, rclcpp::SensorDataQoS(),
+        std::bind(&ScanToMapICPNode::scanCallback, this,
+                  std::placeholders::_1));
+
+    corrected_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
+        corrected_odom_topic_, rclcpp::QoS(10));
+
+    RCLCPP_INFO(get_logger(),
+                "scan_to_map_icp ready: scan_topic='%s' odom_topic='%s' -> "
+                "'%s', map/odom/base frames = '%s'/'%s'/'%s'",
+                scan_topic_.c_str(), odom_topic_.c_str(),
+                corrected_odom_topic_.c_str(), map_frame_.c_str(),
+                odom_frame_.c_str(), base_frame_.c_str());
+  }
+
+private:
+  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    current_odom_pose_ = poseFromOdomMsg(*msg);
+    current_odom_twist_ = msg->twist;
+    have_odom_ = true;
+  }
+
+  // Looks up (and caches) the static extrinsic from the scan's frame to
+  // base_frame_. LakiBeam mounts are rigid, so one lookup is enough; if the
+  // transform isn't available yet (TF not warmed up), returns false and the
+  // scan is skipped for that callback only.
+  bool ensureLaserToBaseTransform(const std::string &scan_frame) {
+    if (scan_frame == base_frame_) {
+      laser_to_base_ = Pose2D{0.0, 0.0, 0.0};
+      cached_scan_frame_ = scan_frame;
+      return true;
+    }
+
+    if (laser_to_base_.has_value() && cached_scan_frame_ == scan_frame)
+      return true;
+
+    try {
+      geometry_msgs::msg::TransformStamped t = tf_buffer_->lookupTransform(
+          base_frame_, scan_frame, tf2::TimePointZero,
+          std::chrono::milliseconds(200));
+      Pose2D p;
+      p.x = t.transform.translation.x;
+      p.y = t.transform.translation.y;
+      p.theta = tf2::getYaw(t.transform.rotation);
+      laser_to_base_ = p;
+      cached_scan_frame_ = scan_frame;
+      RCLCPP_INFO(get_logger(),
+                  "Cached static transform %s -> %s (x=%.3f y=%.3f th=%.3f)",
+                  scan_frame.c_str(), base_frame_.c_str(), p.x, p.y, p.theta);
+      return true;
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "Could not look up %s -> %s yet: %s",
+                           scan_frame.c_str(), base_frame_.c_str(), ex.what());
+      return false;
+    }
+  }
+
+  void scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
+    if (!have_odom_)
+      return; // need at least one odom sample first
+
+    if (!ensureLaserToBaseTransform(msg->header.frame_id))
+      return;
+    const Pose2D &laser_to_base = *laser_to_base_;
+
+    // --- convert scan to Point2D in base_frame_ ---
+    std::vector<Point2D> scan_points;
+    scan_points.reserve(msg->ranges.size());
+    for (size_t i = 0; i < msg->ranges.size(); ++i) {
+      const float r = msg->ranges[i];
+      if (!std::isfinite(r) || r < msg->range_min || r > msg->range_max)
+        continue;
+      const double angle =
+          msg->angle_min + static_cast<double>(i) * msg->angle_increment;
+      const Point2D p_laser{r * std::cos(angle), r * std::sin(angle)};
+      scan_points.push_back(laser_to_base.apply(p_laser));
+    }
+    if (scan_points.size() < 10) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Too few valid scan points (%zu), skipping this scan",
+          scan_points.size());
+      return;
+    }
+
+    // --- predict, then correct ---
+    const Pose2D initial_guess = map_to_odom_offset_ * current_odom_pose_;
+    const ICPResult result = matcher_->align(scan_points, initial_guess);
+
+    const bool is_good_match = result.converged ||
+                               (result.inlier_rms < max_accepted_rms_ && result.inlier_count >= 10);
+
+    if (is_good_match) {
+      map_to_odom_offset_ =
+          result.corrected_pose * current_odom_pose_.inverse();
+    } else {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "ICP did not converge/accept this scan "
+                           "(inliers=%d, rms=%.4f), keeping previous map->odom offset",
+                           result.inlier_count, result.inlier_rms);
+    }
+
+    const Pose2D corrected_pose = map_to_odom_offset_ * current_odom_pose_;
+    publishCorrectedOdom(msg->header.stamp, corrected_pose);
+    broadcastMapToOdom(msg->header.stamp);
+  }
+
+  void publishCorrectedOdom(const rclcpp::Time &stamp, const Pose2D &pose) {
+    nav_msgs::msg::Odometry out;
+    out.header.stamp = stamp;
+    out.header.frame_id = map_frame_;
+    out.child_frame_id = base_frame_;
+    out.pose.pose.position.x = pose.x;
+    out.pose.pose.position.y = pose.y;
+    out.pose.pose.position.z = 0.0;
+    out.pose.pose.orientation = yawToQuaternion(pose.theta);
+    out.twist = current_odom_twist_; // pass wheel-odometry-derived velocity
+                                     // through unchanged
+    corrected_odom_pub_->publish(out);
+  }
+
+  void broadcastMapToOdom(const rclcpp::Time &stamp) {
+    geometry_msgs::msg::TransformStamped t;
+    t.header.stamp = stamp;
+    t.header.frame_id = map_frame_;
+    t.child_frame_id = odom_frame_;
+    t.transform.translation.x = map_to_odom_offset_.x;
+    t.transform.translation.y = map_to_odom_offset_.y;
+    t.transform.translation.z = 0.0;
+    t.transform.rotation = yawToQuaternion(map_to_odom_offset_.theta);
+    tf_broadcaster_->sendTransform(t);
+  }
+
+  // --- parameters ---
+  std::string map_file_, scan_topic_, odom_topic_, corrected_odom_topic_;
+  std::string map_frame_, odom_frame_, base_frame_;
+  double max_accepted_rms_;
+
+  // --- state ---
+  std::unique_ptr<ScanToMapICP> matcher_;
+  Pose2D map_to_odom_offset_;
+  Pose2D current_odom_pose_;
+  geometry_msgs::msg::TwistWithCovariance current_odom_twist_;
+  bool have_odom_ = false;
+
+  std::optional<Pose2D> laser_to_base_;
+  std::string cached_scan_frame_;
+
+  // --- ROS interfaces ---
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr corrected_odom_pub_;
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+};
+
+int main(int argc, char **argv) {
+  rclcpp::init(argc, argv);
+  // Single-threaded executor: scan/odom callbacks never overlap, so the
+  // node code above needs no internal locking (see threading note up top).
+  rclcpp::spin(std::make_shared<ScanToMapICPNode>());
+  rclcpp::shutdown();
+  return 0;
+}

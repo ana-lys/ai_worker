@@ -9,6 +9,12 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# Release-mode optimization matters for the ICP matching loop; without it
+# the KD-tree/Eigen-heavy code can run several times slower.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -42,7 +48,28 @@ ament_target_dependencies(rf2o_laser_odometry_node
   nav_msgs
 )
 
-install(TARGETS rf2o_laser_odometry_node
+
+add_executable(scan_to_map_icp
+  src/ScanToMapICP.cpp
+)
+
+target_include_directories(scan_to_map_icp PRIVATE
+  include
+  ${EIGEN3_INCLUDE_DIRS}
+)
+
+ament_target_dependencies(scan_to_map_icp
+  rclcpp
+  std_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  sensor_msgs
+  nav_msgs
+)
+
+install(TARGETS rf2o_laser_odometry_node scan_to_map_icp
   DESTINATION lib/${PROJECT_NAME}
 )
 
