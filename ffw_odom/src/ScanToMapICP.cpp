@@ -239,6 +239,22 @@ private:
       return;
     const Pose2D &laser_to_base = *laser_to_base_;
 
+    // --- look up time-synchronized odometry pose at scan timestamp ---
+    Pose2D sync_odom_pose;
+    try {
+      geometry_msgs::msg::TransformStamped odom_to_base_tf = tf_buffer_->lookupTransform(
+          odom_frame_, base_frame_, msg->header.stamp,
+          std::chrono::milliseconds(50));
+      sync_odom_pose.x = odom_to_base_tf.transform.translation.x;
+      sync_odom_pose.y = odom_to_base_tf.transform.translation.y;
+      sync_odom_pose.theta = tf2::getYaw(odom_to_base_tf.transform.rotation);
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                           "Failed to look up time-synchronized odom pose at scan timestamp: %s. Falling back to latest.",
+                           ex.what());
+      sync_odom_pose = current_odom_pose_;
+    }
+
     // --- convert scan to Point2D in base_frame_ ---
     std::vector<Point2D> scan_points;
     scan_points.reserve(msg->ranges.size());
@@ -260,7 +276,7 @@ private:
     }
 
     // --- predict, then correct ---
-    const Pose2D initial_guess = map_to_odom_offset_ * current_odom_pose_;
+    const Pose2D initial_guess = map_to_odom_offset_ * sync_odom_pose;
     
     auto start_time = std::chrono::high_resolution_clock::now();
     const ICPResult result = matcher_->align(scan_points, initial_guess);
@@ -272,7 +288,7 @@ private:
 
     if (is_good_match) {
       map_to_odom_offset_ =
-          result.corrected_pose * current_odom_pose_.inverse();
+          result.corrected_pose * sync_odom_pose.inverse();
       RCLCPP_INFO(get_logger(), "ICP alignment took %.3f ms (iters=%d, inliers=%d, rms=%.4f)",
                   elapsed.count(), result.iterations, result.inlier_count, result.inlier_rms);
     } else {
@@ -280,7 +296,7 @@ private:
                   elapsed.count(), result.inlier_count, result.inlier_rms);
     }
 
-    const Pose2D corrected_pose = map_to_odom_offset_ * current_odom_pose_;
+    const Pose2D corrected_pose = map_to_odom_offset_ * sync_odom_pose;
     publishCorrectedOdom(msg->header.stamp, corrected_pose);
     broadcastMapToOdom(msg->header.stamp);
   }
