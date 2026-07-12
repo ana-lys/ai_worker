@@ -261,7 +261,11 @@ private:
 
     // --- predict, then correct ---
     const Pose2D initial_guess = map_to_odom_offset_ * current_odom_pose_;
+    
+    auto start_time = std::chrono::high_resolution_clock::now();
     const ICPResult result = matcher_->align(scan_points, initial_guess);
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
 
     const bool is_good_match = result.converged ||
                                (result.inlier_rms < max_accepted_rms_ && result.inlier_count >= 10);
@@ -269,11 +273,11 @@ private:
     if (is_good_match) {
       map_to_odom_offset_ =
           result.corrected_pose * current_odom_pose_.inverse();
+      RCLCPP_INFO(get_logger(), "ICP alignment took %.3f ms (iters=%d, inliers=%d, rms=%.4f)",
+                  elapsed.count(), result.iterations, result.inlier_count, result.inlier_rms);
     } else {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "ICP did not converge/accept this scan "
-                           "(inliers=%d, rms=%.4f), keeping previous map->odom offset",
-                           result.inlier_count, result.inlier_rms);
+      RCLCPP_WARN(get_logger(), "ICP did not converge/accept this scan (took %.3f ms, inliers=%d, rms=%.4f), keeping previous map->odom offset",
+                  elapsed.count(), result.inlier_count, result.inlier_rms);
     }
 
     const Pose2D corrected_pose = map_to_odom_offset_ * current_odom_pose_;

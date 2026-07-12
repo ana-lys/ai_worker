@@ -17,6 +17,7 @@ class AlignmentChecker(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
+        # Setup subscription
         self.subscription = self.create_subscription(
             LaserScan,
             '/scan',
@@ -24,8 +25,30 @@ class AlignmentChecker(Node):
             rclpy.qos.qos_profile_sensor_data
         )
         
-        self.captured = False
-        self.get_logger().info("Subscribed to /scan, waiting for transform from map...")
+        # Setup matplotlib plot (dynamic)
+        self.gui_available = True
+        try:
+            import matplotlib.pyplot as plt
+            plt.ion()  # interactive mode on
+            self.fig, self.ax = plt.subplots(figsize=(10, 8))
+            self.ax.scatter(self.map_points[:, 0], self.map_points[:, 1], c='black', s=20, marker='s', label='Static Map (Walls)')
+            self.scan_scatter = self.ax.scatter([], [], c='red', s=8, alpha=0.6, label='Laser Scan (Transformed)')
+            self.robot_scatter = self.ax.scatter([], [], c='blue', s=120, marker='o', zorder=5, label='Robot Pose')
+            self.heading_arrow = None
+            
+            self.ax.set_title('Scan-to-Map ICP Live Alignment Verification')
+            self.ax.set_xlabel('X (meters)')
+            self.ax.set_ylabel('Y (meters)')
+            self.ax.grid(True)
+            self.ax.axis('equal')
+            self.ax.legend()
+            self.fig.canvas.draw()
+            plt.pause(0.001)
+        except Exception as e:
+            self.gui_available = False
+            self.get_logger().warn(f"No GUI display detected (or matplotlib error: {e}). Live plot disabled, printing stats continuously instead.")
+            
+        self.get_logger().info("Alignment checker initialized. Listening to /scan...")
 
     def load_map(self, path):
         pts = []
@@ -51,8 +74,7 @@ class AlignmentChecker(Node):
         return np.array(pts)
 
     def scan_callback(self, msg):
-        if self.captured:
-            return
+        start_t = time.perf_counter()
         
         # Try to look up the transform from map to laser frame
         try:
@@ -61,13 +83,11 @@ class AlignmentChecker(Node):
                 'map',
                 msg.header.frame_id,
                 now,
-                timeout=rclpy.duration.Duration(seconds=0.2)
+                timeout=rclpy.duration.Duration(seconds=0.1)
             )
-        except Exception as e:
-            # Transform not available yet, wait for next callback
+        except Exception:
+            # Transform not available yet, return and try next scan
             return
-        
-        self.captured = True
         
         # Get transform translation and orientation
         t = transform.transform.translation
@@ -86,6 +106,9 @@ class AlignmentChecker(Node):
         valid = np.isfinite(ranges) & (ranges >= msg.range_min) & (ranges <= msg.range_max)
         ranges = ranges[valid]
         angles = angles[valid]
+        
+        if len(ranges) == 0:
+            return
         
         # Convert to 2D laser coordinates
         laser_pts = np.column_stack((ranges * np.cos(angles), ranges * np.sin(angles)))
@@ -106,67 +129,35 @@ class AlignmentChecker(Node):
         inliers = transformed_pts[inlier_mask]
         inlier_dists = min_dists[inlier_mask]
         
-        rms = np.sqrt(np.mean(inlier_dists**2)) if len(inlier_dists) > 0 else float('inf')
+        rms = np.sqrt(np.mean(inlier_dists**2)) if len(inlier_dists) > 0 else 0.0
         inlier_ratio = len(inliers) / len(transformed_pts) if len(transformed_pts) > 0 else 0.0
         
-        # Print results
-        print("\n" + "="*60)
-        print("ICP ALIGNMENT CHECKER RESULTS")
-        print("="*60)
-        print(f"Robot Position in Map Frame:")
-        print(f"  X:     {t.x:8.4f} meters")
-        print(f"  Y:     {t.y:8.4f} meters")
-        print(f"  Yaw:   {yaw:8.4f} rad ({np.degrees(yaw):.2f} deg)")
-        print(f"ICP Alignment Quality Metrics:")
-        print(f"  Inlier count: {len(inliers)} / {len(transformed_pts)}")
-        print(f"  Inlier ratio: {inlier_ratio*100:.1f}% (min threshold: 25%)")
-        print(f"  Inlier RMS:   {rms:8.4f} meters ({rms*100:.2f} cm)")
-        print("="*60)
-        
-        # Generate matplotlib plot
-        self.plot_matplotlib(self.map_points, transformed_pts, [t.x, t.y], yaw)
-        
-        # Raise SystemExit to cleanly exit rclpy.spin
-        sys.exit(0)
-
-    def plot_matplotlib(self, map_pts, scan_pts, robot_pos, yaw):
-        import matplotlib.pyplot as plt
-        
-        plt.figure(figsize=(10, 8))
-        
-        # Plot map points
-        plt.scatter(map_pts[:, 0], map_pts[:, 1], c='black', s=20, marker='s', label='Static Map (Walls)')
-        
-        # Plot transformed scan points
-        plt.scatter(scan_pts[:, 0], scan_pts[:, 1], c='red', s=8, alpha=0.6, label='Laser Scan (Transformed)')
-        
-        # Plot robot position and orientation arrow
-        plt.scatter(robot_pos[0], robot_pos[1], c='blue', s=120, marker='o', zorder=5, label='Robot Pose')
-        
-        # Draw heading arrow
-        arrow_len = 0.3
-        plt.arrow(
-            robot_pos[0], robot_pos[1],
-            arrow_len * np.cos(yaw), arrow_len * np.sin(yaw),
-            head_width=0.08, head_length=0.08, fc='blue', ec='blue', zorder=5
-        )
-        
-        plt.title('Scan-to-Map ICP Alignment Verification')
-        plt.xlabel('X (meters)')
-        plt.ylabel('Y (meters)')
-        plt.grid(True)
-        plt.axis('equal')
-        plt.legend()
-        
-        output_img = '/tmp/icp_alignment.png'
-        plt.savefig(output_img, bbox_inches='tight')
-        print(f"Saved plot image to {output_img}")
-        
-        # Try to show the plot if graphical display is available
-        try:
-            plt.show()
-        except Exception:
-            print("No GUI display detected. Plot saved as image instead.")
+        # Update dynamic plot if GUI is available
+        if self.gui_available:
+            import matplotlib.pyplot as plt
+            self.scan_scatter.set_offsets(transformed_pts)
+            self.robot_scatter.set_offsets(np.array([[t.x, t.y]]))
+            
+            # Remove old heading arrow
+            if self.heading_arrow:
+                self.heading_arrow.remove()
+                
+            # Draw new heading arrow
+            arrow_len = 0.3
+            self.heading_arrow = self.ax.arrow(
+                t.x, t.y,
+                arrow_len * np.cos(yaw), arrow_len * np.sin(yaw),
+                head_width=0.08, head_length=0.08, fc='blue', ec='blue', zorder=5
+            )
+            
+            # Re-draw the plot dynamically
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+            
+        # Print results and profiling info
+        end_t = time.perf_counter()
+        elapsed_ms = (end_t - start_t) * 1000.0
+        print(f"[Profiling] Python callback + plot update took: {elapsed_ms:6.2f} ms | Pose: [{t.x:7.3f}, {t.y:7.3f}, {yaw:6.3f} rad] | Inliers: {len(inliers)}/{len(transformed_pts)} ({inlier_ratio*100.0:5.1f}%) | RMS: {rms*100.0:5.2f} cm")
 
 def main():
     map_path = '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt'
