@@ -123,7 +123,7 @@ class AlignmentChecker(Node):
         R = np.array([[cos_y, -sin_y], [sin_y, cos_y]])
         transformed_pts = (R @ laser_pts.T).T + np.array([t.x, t.y])
         
-        # Calculate nearest-neighbor distances for RMS error
+        # Calculate nearest-neighbor distances for RMS error (scan points to map points)
         dists = np.linalg.norm(transformed_pts[:, np.newaxis, :] - self.map_points[np.newaxis, :, :], axis=2)
         min_indices = np.argmin(dists, axis=1)
         min_dists = dists[np.arange(len(transformed_pts)), min_indices]
@@ -135,6 +135,12 @@ class AlignmentChecker(Node):
         
         rms = np.sqrt(np.mean(inlier_dists**2)) if len(inlier_dists) > 0 else 0.0
         inlier_ratio = len(inliers) / len(transformed_pts) if len(transformed_pts) > 0 else 0.0
+
+        # Calculate map coverage ratio: what % of static map points are close to a scan point
+        dists_map = np.linalg.norm(self.map_points[:, np.newaxis, :] - transformed_pts[np.newaxis, :, :], axis=2)
+        min_dists_map = np.min(dists_map, axis=1)
+        map_inliers_mask = min_dists_map < 0.4
+        map_coverage_ratio = np.sum(map_inliers_mask) / len(self.map_points)
         
         # Update dynamic plot if GUI is available
         if self.gui_available:
@@ -161,7 +167,7 @@ class AlignmentChecker(Node):
         # Print results and profiling info
         end_t = time.perf_counter()
         elapsed_ms = (end_t - start_t) * 1000.0
-        print(f"[Profiling] Python callback + plot update took: {elapsed_ms:6.2f} ms | Pose: [{t.x:7.3f}, {t.y:7.3f}, {yaw:6.3f} rad] | Inliers: {len(inliers)}/{len(transformed_pts)} ({inlier_ratio*100.0:5.1f}%) | RMS: {rms*100.0:5.2f} cm")
+        print(f"[Profiling] Python callback + plot update took: {elapsed_ms:6.2f} ms | Pose: [{t.x:7.3f}, {t.y:7.3f}, {yaw:6.3f} rad] | Map Coverage: {map_coverage_ratio*100.0:5.1f}% | Scan Inliers: {inlier_ratio*100.0:5.1f}% | RMS: {rms*100.0:5.2f} cm")
 
 def main():
     map_path = '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt'
