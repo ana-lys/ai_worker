@@ -289,8 +289,36 @@ private:
     if (is_good_match) {
       map_to_odom_offset_ =
           result.corrected_pose * sync_odom_pose.inverse();
-      RCLCPP_INFO(get_logger(), "ICP alignment took %.3f ms (iters=%d, inliers=%d, rms=%.4f)",
-                  elapsed.count(), result.iterations, result.inlier_count, result.inlier_rms);
+
+      // Transform scan points to map frame once
+      std::vector<Point2D> transformed_scan;
+      transformed_scan.reserve(scan_points.size());
+      for (const auto &sp : scan_points) {
+        transformed_scan.push_back(result.corrected_pose.apply(sp));
+      }
+
+      // Calculate map coverage (within 15 cm of any scan point)
+      int covered_count = 0;
+      const auto &map_pts = matcher_->mapPoints();
+      for (const auto &mp : map_pts) {
+        double min_dist_sq = std::numeric_limits<double>::max();
+        for (const auto &tp : transformed_scan) {
+          double dx = mp.x - tp.x;
+          double dy = mp.y - tp.y;
+          double dist_sq = dx*dx + dy*dy;
+          if (dist_sq < min_dist_sq) {
+            min_dist_sq = dist_sq;
+          }
+        }
+        if (min_dist_sq < 0.0225) { // 0.15m threshold -> 0.15^2 = 0.0225
+          covered_count++;
+        }
+      }
+      double map_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+      double inlier_ratio = (double)result.inlier_count / scan_points.size();
+
+      RCLCPP_INFO(get_logger(), "ICP alignment took %.3f ms (iters=%d) | Map Coverage: %.1f%% | Scan Inliers: %.1f%% | RMS: %.2f cm",
+                  elapsed.count(), result.iterations, map_coverage * 100.0, inlier_ratio * 100.0, result.inlier_rms * 100.0);
     } else {
       RCLCPP_WARN(get_logger(), "ICP did not converge/accept this scan (took %.3f ms, inliers=%d, rms=%.4f), keeping previous map->odom offset",
                   elapsed.count(), result.inlier_count, result.inlier_rms);
