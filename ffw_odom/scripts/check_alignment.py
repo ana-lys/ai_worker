@@ -16,6 +16,7 @@ class AlignmentChecker(Node):
         self.map_points = self.load_map(map_path)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self._last_tf_warn_time = 0.0
         
         # Setup subscription
         self.subscription = self.create_subscription(
@@ -85,8 +86,11 @@ class AlignmentChecker(Node):
                 now,
                 timeout=rclpy.duration.Duration(seconds=0.1)
             )
-        except Exception:
-            # Transform not available yet, return and try next scan
+        except Exception as e:
+            curr_time = time.time()
+            if curr_time - self._last_tf_warn_time > 3.0:
+                self.get_logger().warn(f"Waiting for transform from 'map' to '{msg.header.frame_id}' (is scan_to_map_icp running?): {e}")
+                self._last_tf_warn_time = curr_time
             return
         
         # Get transform translation and orientation
