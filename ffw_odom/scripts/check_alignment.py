@@ -6,6 +6,8 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformListener
 
@@ -19,11 +21,13 @@ class AlignmentChecker(Node):
         self._last_tf_warn_time = 0.0
         
         # Setup subscription
+        self.cb_group = ReentrantCallbackGroup()
         self.subscription = self.create_subscription(
             LaserScan,
             '/scan',
             self.scan_callback,
-            rclpy.qos.qos_profile_sensor_data
+            rclpy.qos.qos_profile_sensor_data,
+            callback_group=self.cb_group
         )
         
         # Setup matplotlib plot (dynamic)
@@ -191,13 +195,17 @@ def main():
         
     rclpy.init()
     checker = AlignmentChecker(map_path)
+    executor = MultiThreadedExecutor()
+    executor.add_node(checker)
     try:
-        rclpy.spin(checker)
+        executor.spin()
     except SystemExit:
         pass
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
+        checker.destroy_node()
         if proc:
             print("Terminating background scan_to_map_icp node...")
             proc.terminate()
