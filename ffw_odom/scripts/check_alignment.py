@@ -3,6 +3,7 @@ import sys
 import os
 import subprocess
 import time
+import threading
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -20,7 +21,11 @@ class AlignmentChecker(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self._last_tf_warn_time = 0.0
         
-        # Setup subscription
+        # State for passing data to main thread for plotting
+        self.plot_lock = threading.Lock()
+        self.latest_plot_data = None
+        
+        # Setup subscription with ReentrantCallbackGroup
         self.cb_group = ReentrantCallbackGroup()
         self.subscription = self.create_subscription(
             LaserScan,
@@ -29,30 +34,6 @@ class AlignmentChecker(Node):
             rclpy.qos.qos_profile_sensor_data,
             callback_group=self.cb_group
         )
-        
-        # Setup matplotlib plot (dynamic)
-        self.gui_available = True
-        try:
-            import matplotlib.pyplot as plt
-            plt.ion()  # interactive mode on
-            self.fig, self.ax = plt.subplots(figsize=(10, 8))
-            self.ax.scatter(self.map_points[:, 0], self.map_points[:, 1], c='black', s=20, marker='s', label='Static Map (Walls)')
-            self.scan_scatter = self.ax.scatter([], [], c='red', s=8, alpha=0.6, label='Laser Scan (Transformed)')
-            self.robot_scatter = self.ax.scatter([], [], c='blue', s=120, marker='o', zorder=5, label='Robot Pose')
-            self.heading_arrow = None
-            
-            self.ax.set_title('Scan-to-Map ICP Live Alignment Verification')
-            self.ax.set_xlabel('X (meters)')
-            self.ax.set_ylabel('Y (meters)')
-            self.ax.grid(True)
-            self.ax.axis('equal')
-            self.ax.legend()
-            self.fig.canvas.draw()
-            plt.pause(0.001)
-        except Exception as e:
-            self.gui_available = False
-            self.get_logger().warn(f"No GUI display detected (or matplotlib error: {e}). Live plot disabled, printing stats continuously instead.")
-            
         self.get_logger().info("Alignment checker initialized. Listening to /scan...")
 
     def load_map(self, path):
@@ -145,32 +126,14 @@ class AlignmentChecker(Node):
         map_inliers_mask = min_dists_map < 0.15
         map_coverage_ratio = np.sum(map_inliers_mask) / len(self.map_points)
         
-        # Update dynamic plot if GUI is available
-        if self.gui_available:
-            import matplotlib.pyplot as plt
-            self.scan_scatter.set_offsets(transformed_pts)
-            self.robot_scatter.set_offsets(np.array([[t.x, t.y]]))
-            
-            # Remove old heading arrow
-            if self.heading_arrow:
-                self.heading_arrow.remove()
-                
-            # Draw new heading arrow
-            arrow_len = 0.3
-            self.heading_arrow = self.ax.arrow(
-                t.x, t.y,
-                arrow_len * np.cos(yaw), arrow_len * np.sin(yaw),
-                head_width=0.08, head_length=0.08, fc='blue', ec='blue', zorder=5
-            )
-            
-            # Re-draw the plot dynamically
-            self.fig.canvas.draw_idle()
-            self.fig.canvas.flush_events()
+        # Store for plotting thread
+        with self.plot_lock:
+            self.latest_plot_data = (transformed_pts, t.x, t.y, yaw)
             
         # Print results and profiling info
         end_t = time.perf_counter()
         elapsed_ms = (end_t - start_t) * 1000.0
-        print(f"[Profiling] Python callback + plot update took: {elapsed_ms:6.2f} ms | Pose: [{t.x:7.3f}, {t.y:7.3f}, {yaw:6.3f} rad] | Map Coverage: {map_coverage_ratio*100.0:5.1f}% | Scan Inliers: {inlier_ratio*100.0:5.1f}% | RMS: {rms*100.0:5.2f} cm")
+        print(f"[Profiling] Python callback took: {elapsed_ms:6.2f} ms | Pose: [{t.x:7.3f}, {t.y:7.3f}, {yaw:6.3f} rad] | Map Coverage: {map_coverage_ratio*100.0:5.1f}% | Scan Inliers: {inlier_ratio*100.0:5.1f}% | RMS: {rms*100.0:5.2f} cm")
 
 def main():
     map_path = '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt'
@@ -195,17 +158,75 @@ def main():
         
     rclpy.init()
     checker = AlignmentChecker(map_path)
+    
+    # Spin ROS 2 executor in background thread
     executor = MultiThreadedExecutor()
     executor.add_node(checker)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    
+    # Setup matplotlib plot on MAIN thread
+    gui_available = True
     try:
-        executor.spin()
-    except SystemExit:
-        pass
+        import matplotlib.pyplot as plt
+        plt.ion()  # interactive mode on
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.scatter(checker.map_points[:, 0], checker.map_points[:, 1], c='black', s=20, marker='s', label='Static Map (Walls)')
+        scan_scatter = ax.scatter([], [], c='red', s=8, alpha=0.6, label='Laser Scan (Transformed)')
+        robot_scatter = ax.scatter([], [], c='blue', s=120, marker='o', zorder=5, label='Robot Pose')
+        heading_arrow = None
+        
+        ax.set_title('Scan-to-Map ICP Live Alignment Verification')
+        ax.set_xlabel('X (meters)')
+        ax.set_ylabel('Y (meters)')
+        ax.grid(True)
+        ax.axis('equal')
+        ax.legend()
+        fig.canvas.draw()
+        plt.pause(0.001)
+    except Exception as e:
+        gui_available = False
+        print(f"No GUI display detected (or matplotlib error: {e}). Live plot disabled, printing stats continuously instead.")
+
+    try:
+        while rclpy.ok():
+            if gui_available:
+                # Check for new plot data
+                plot_data = None
+                with checker.plot_lock:
+                    if checker.latest_plot_data is not None:
+                        plot_data = checker.latest_plot_data
+                        checker.latest_plot_data = None
+                
+                if plot_data is not None:
+                    transformed_pts, tx, ty, yaw = plot_data
+                    scan_scatter.set_offsets(transformed_pts)
+                    robot_scatter.set_offsets(np.array([[tx, ty]]))
+                    
+                    # Remove old heading arrow
+                    if heading_arrow:
+                        heading_arrow.remove()
+                        
+                    # Draw new heading arrow
+                    arrow_len = 0.3
+                    heading_arrow = ax.arrow(
+                        tx, ty,
+                        arrow_len * np.cos(yaw), arrow_len * np.sin(yaw),
+                        head_width=0.08, head_length=0.08, fc='blue', ec='blue', zorder=5
+                    )
+                    
+                    fig.canvas.draw_idle()
+                    fig.canvas.flush_events()
+                
+                plt.pause(0.03)  # ~30Hz plot refresh rate
+            else:
+                time.sleep(0.1)
     except KeyboardInterrupt:
         pass
     finally:
         executor.shutdown()
         checker.destroy_node()
+        rclpy.shutdown()
         if proc:
             print("Terminating background scan_to_map_icp node...")
             proc.terminate()
