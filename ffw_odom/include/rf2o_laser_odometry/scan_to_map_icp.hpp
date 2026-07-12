@@ -250,7 +250,7 @@ public:
       if (inliers > 0)
         result.inlier_rms = std::sqrt(sq_err_sum / inliers);
 
-      if (inliers < (int)(cfg_.min_inlier_ratio * N) || inliers < 3) {
+      if (inliers < (int)(cfg_.min_inlier_ratio * std::min(map_points_.size(), N)) || inliers < 5) {
         // too little valid overlap between scan and map this frame
         result.converged = false;
         result.iterations = iter;
