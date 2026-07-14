@@ -287,8 +287,8 @@ private:
           end_candidates.push_back(i);
       }
 
-      printf("[WRAP-MERGE] Start candidates: %zu, End candidates: %zu\n",
-             start_candidates.size(), end_candidates.size());
+      // printf("[WRAP-MERGE] Start candidates: %zu, End candidates: %zu\n",
+      //        start_candidates.size(), end_candidates.size());
 
       std::vector<bool> merged_out(segments.size(), false);
       for (size_t s_idx : start_candidates) {
@@ -378,13 +378,13 @@ private:
             }
             double rms = std::sqrt(sum_sq / combined.size());
             if (rms < 0.15) {
-              printf("[WRAP-MERGE]   SUCCESS: Merged segments %zu and %zu (gap=%.3f m, RMS=%.3f, len=%.3f)\n",
-                     s_idx, e_idx, gap, rms, final_seg.length);
+              // printf("[WRAP-MERGE]   SUCCESS: Merged segments %zu and %zu (gap=%.3f m, RMS=%.3f, len=%.3f)\n",
+              //        s_idx, e_idx, gap, rms, final_seg.length);
               seg_start = combined;
               merged_out[e_idx] = true;
               break;
             } else {
-              printf("[WRAP-MERGE]   Rejected merged fit: RMS=%.3f (>= 0.15)\n", rms);
+              // printf("[WRAP-MERGE]   Rejected merged fit: RMS=%.3f (>= 0.15)\n", rms);
             }
           }
         }
