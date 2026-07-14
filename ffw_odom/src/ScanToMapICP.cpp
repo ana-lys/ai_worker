@@ -384,37 +384,33 @@ private:
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
 
-    double map_coverage = 0.0;
-    if (result.converged) {
-      // Transform scan points to map frame once
-      std::vector<Point2D> transformed_scan;
-      transformed_scan.reserve(scan_points.size());
-      for (const auto &sp : scan_points) {
-        transformed_scan.push_back(result.corrected_pose.apply(sp));
-      }
-
-      // Calculate map coverage (within 15 cm of any scan point)
-      int covered_count = 0;
-      const auto &map_pts = matcher_->mapPoints();
-      for (const auto &mp : map_pts) {
-        double min_dist_sq = std::numeric_limits<double>::max();
-        for (const auto &tp : transformed_scan) {
-          double dx = mp.x - tp.x;
-          double dy = mp.y - tp.y;
-          double dist_sq = dx*dx + dy*dy;
-          if (dist_sq < min_dist_sq) {
-            min_dist_sq = dist_sq;
-          }
-        }
-        if (min_dist_sq < 0.0225) { // 0.15m threshold -> 0.15^2 = 0.0225
-          covered_count++;
-        }
-      }
-      map_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+    // Transform scan points to map frame once
+    std::vector<Point2D> transformed_scan;
+    transformed_scan.reserve(scan_points.size());
+    for (const auto &sp : scan_points) {
+      transformed_scan.push_back(result.corrected_pose.apply(sp));
     }
 
-    const bool is_good_match = result.converged &&
-                               (result.inlier_rms < max_accepted_rms_ && map_coverage >= 0.70);
+    // Calculate map coverage (within 15 cm of any scan point)
+    int covered_count = 0;
+    const auto &map_pts = matcher_->mapPoints();
+    for (const auto &mp : map_pts) {
+      double min_dist_sq = std::numeric_limits<double>::max();
+      for (const auto &tp : transformed_scan) {
+        double dx = mp.x - tp.x;
+        double dy = mp.y - tp.y;
+        double dist_sq = dx*dx + dy*dy;
+        if (dist_sq < min_dist_sq) {
+          min_dist_sq = dist_sq;
+        }
+      }
+      if (min_dist_sq < 0.0225) { // 0.15m threshold -> 0.15^2 = 0.0225
+        covered_count++;
+      }
+    }
+    double map_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+
+    const bool is_good_match = (result.inlier_rms < max_accepted_rms_ && map_coverage >= 0.70 && result.inlier_count >= 5);
 
     if (is_good_match) {
       map_to_odom_offset_ =
