@@ -28,6 +28,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/utils.h>
@@ -192,6 +193,9 @@ public:
 
     corrected_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
         corrected_odom_topic_, rclcpp::QoS(10));
+
+    confidence_pub_ = create_publisher<std_msgs::msg::Float64>(
+        "~/confidence", rclcpp::QoS(10));
 
     relocalize_srv_ = create_service<std_srvs::srv::Trigger>(
         "relocalize",
@@ -417,8 +421,8 @@ private:
           result.corrected_pose * sync_odom_pose.inverse();
       double inlier_ratio = (double)result.inlier_count / scan_points.size();
 
-      RCLCPP_INFO(get_logger(), "ICP alignment took %.3f ms (iters=%d) | Map Coverage: %.1f%% | Scan Inliers: %.1f%% | RMS: %.2f cm",
-                  elapsed.count(), result.iterations, map_coverage * 100.0, inlier_ratio * 100.0, result.inlier_rms * 100.0);
+      RCLCPP_DEBUG(get_logger(), "ICP alignment took %.3f ms (iters=%d) | Map Coverage: %.1f%% | Scan Inliers: %.1f%% | RMS: %.2f cm",
+                   elapsed.count(), result.iterations, map_coverage * 100.0, inlier_ratio * 100.0, result.inlier_rms * 100.0);
     } else {
       RCLCPP_WARN(get_logger(), "ICP failed or coverage dropped below 70%% (converged=%d, coverage=%.1f%%, RMS=%.4f). Triggering fallback relocalization...",
                   result.converged, map_coverage * 100.0, result.inlier_rms);
@@ -454,6 +458,7 @@ private:
         RCLCPP_INFO(get_logger(), "Fallback relocalization succeeded. Recovered pose: [%.3f, %.3f, %.3f], coverage: %.1f%%",
                     reloc_pose.x, reloc_pose.y, reloc_pose.theta, reloc_coverage * 100.0);
         map_to_odom_offset_ = reloc_pose * sync_odom_pose.inverse();
+        map_coverage = reloc_coverage;
       } else {
         RCLCPP_ERROR(get_logger(), "Fallback relocalization did not find a better fit (reloc coverage=%.1f%%, original map coverage=%.1f%%). Keeping previous map->odom offset.",
                      reloc_coverage * 100.0, map_coverage * 100.0);
@@ -461,11 +466,11 @@ private:
     }
 
     const Pose2D corrected_pose = map_to_odom_offset_ * sync_odom_pose;
-    publishCorrectedOdom(msg->header.stamp, corrected_pose);
+    publishCorrectedOdom(msg->header.stamp, corrected_pose, map_coverage);
     broadcastMapToOdom(msg->header.stamp);
   }
 
-  void publishCorrectedOdom(const rclcpp::Time &stamp, const Pose2D &pose) {
+  void publishCorrectedOdom(const rclcpp::Time &stamp, const Pose2D &pose, double map_coverage) {
     nav_msgs::msg::Odometry out;
     out.header.stamp = stamp;
     out.header.frame_id = map_frame_;
@@ -476,7 +481,21 @@ private:
     out.pose.pose.orientation = yawToQuaternion(pose.theta);
     out.twist = current_odom_twist_; // pass wheel-odometry-derived velocity
                                      // through unchanged
+
+    // Scale covariance based on map coverage (accuracy representation)
+    double var = 0.001 / (map_coverage * map_coverage + 1e-4);
+    out.pose.covariance[0] = var;   // x variance
+    out.pose.covariance[7] = var;   // y variance
+    out.pose.covariance[35] = var;  // yaw variance
+
+    // Store the raw map_coverage (confidence) in the unused z covariance element
+    out.pose.covariance[14] = map_coverage;
+
     corrected_odom_pub_->publish(out);
+
+    std_msgs::msg::Float64 conf_msg;
+    conf_msg.data = map_coverage;
+    confidence_pub_->publish(conf_msg);
   }
 
   void broadcastMapToOdom(const rclcpp::Time &stamp) {
@@ -511,6 +530,7 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr corrected_odom_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr confidence_pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr relocalize_srv_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
