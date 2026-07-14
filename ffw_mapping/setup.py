@@ -18,7 +18,7 @@ setup(
     maintainer_email='shatapdude@gmail.com',
     description='Offline Mapping tools using ICP and RANSAC',
     license='MIT',
-    scripts=['scripts/generate_map.py'],
+    scripts=['scripts/generate_map.py', 'scripts/convert_bag.py'],
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
