@@ -25,6 +25,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 add_executable(rf2o_laser_odometry_node
@@ -61,6 +62,7 @@ target_include_directories(scan_to_map_icp PRIVATE
 ament_target_dependencies(scan_to_map_icp
   rclcpp
   std_msgs
+  std_srvs
   geometry_msgs
   tf2
   tf2_ros
@@ -69,7 +71,28 @@ ament_target_dependencies(scan_to_map_icp
   nav_msgs
 )
 
-install(TARGETS rf2o_laser_odometry_node scan_to_map_icp
+add_executable(relocalize_test_node
+  src/RelocalizeTestNode.cpp
+)
+
+target_include_directories(relocalize_test_node PRIVATE
+  include
+  ${EIGEN3_INCLUDE_DIRS}
+)
+
+ament_target_dependencies(relocalize_test_node
+  rclcpp
+  std_msgs
+  std_srvs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  sensor_msgs
+  nav_msgs
+)
+
+install(TARGETS rf2o_laser_odometry_node scan_to_map_icp relocalize_test_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

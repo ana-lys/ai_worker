@@ -54,14 +54,37 @@ def generate_launch_description():
         output='screen',
         parameters=[ekf_config],
         remappings=[
-            ('odometry/filtered', 'ffw_laser_odom')
+            ('odometry/filtered', 'ekf_odom')
         ],
         condition=IfCondition(use_ekf)
+    )
+
+    # scan_to_map_icp node
+    default_map_path = '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt'
+    scan_to_map_icp_node = Node(
+        package='ffw_odom',
+        executable='scan_to_map_icp',
+        name='scan_to_map_icp',
+        output='screen',
+        parameters=[{
+            'map_file': default_map_path,
+            'scan_topic': '/scan',
+            'odom_topic': '/odom',
+            'corrected_odom_topic': '/icp_pose_raw',
+            'map_frame': 'map',
+            'odom_frame': 'odom',
+            'base_frame': 'base_link',
+            'max_accepted_rms': 0.10,
+            'max_iterations': 30,
+            'max_correspondence_dist': 0.4,
+            'verbose': False
+        }]
     )
 
     return LaunchDescription([
         use_ekf_arg,
         launch_rf2o_arg,
         rf2o_node,
-        ekf_node
+        ekf_node,
+        scan_to_map_icp_node
     ])

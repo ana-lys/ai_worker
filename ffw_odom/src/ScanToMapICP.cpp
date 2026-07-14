@@ -27,6 +27,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/utils.h>
@@ -40,14 +41,18 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <mutex>
+#include <condition_variable>
 
 #include "rf2o_laser_odometry/scan_to_map_icp.hpp"
+#include "rf2o_laser_odometry/geometric_relocalizer.hpp"
 
 using icp2d::ICPConfig;
 using icp2d::ICPResult;
 using icp2d::Point2D;
 using icp2d::Pose2D;
 using icp2d::ScanToMapICP;
+using icp2d::GeometricRelocalizer;
 
 namespace {
 
@@ -125,7 +130,7 @@ public:
     scan_topic_ = declare_parameter<std::string>("scan_topic", "/scan");
     odom_topic_ = declare_parameter<std::string>("odom_topic", "/odom");
     corrected_odom_topic_ = declare_parameter<std::string>(
-        "corrected_odom_topic", "/odom_corrected");
+        "corrected_odom_topic", "/icp_pose_raw");
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
     odom_frame_ = declare_parameter<std::string>("odom_frame", "odom");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
@@ -157,6 +162,7 @@ public:
     RCLCPP_INFO(get_logger(), "Loaded %zu map points from '%s'",
                 map_points.size(), map_file_.c_str());
 
+    relocalizer_ = std::make_unique<GeometricRelocalizer>(map_points);
     matcher_ = std::make_unique<ScanToMapICP>(std::move(map_points), cfg);
 
     // map->odom offset starts at identity: until the first successful
@@ -167,18 +173,32 @@ public:
     tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
+    callback_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+
+    rclcpp::SubscriptionOptions sub_options;
+    sub_options.callback_group = callback_group_;
+
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         odom_topic_, rclcpp::SensorDataQoS(),
         std::bind(&ScanToMapICPNode::odomCallback, this,
-                  std::placeholders::_1));
+                  std::placeholders::_1),
+        sub_options);
 
     scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
         scan_topic_, rclcpp::SensorDataQoS(),
         std::bind(&ScanToMapICPNode::scanCallback, this,
-                  std::placeholders::_1));
+                  std::placeholders::_1),
+        sub_options);
 
     corrected_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
         corrected_odom_topic_, rclcpp::QoS(10));
+
+    relocalize_srv_ = create_service<std_srvs::srv::Trigger>(
+        "relocalize",
+        std::bind(&ScanToMapICPNode::relocalizeCallback, this,
+                  std::placeholders::_1, std::placeholders::_2),
+        rclcpp::ServicesQoS(),
+        callback_group_);
 
     RCLCPP_INFO(get_logger(),
                 "scan_to_map_icp ready: scan_topic='%s' odom_topic='%s' -> "
@@ -189,6 +209,32 @@ public:
   }
 
 private:
+private:
+  void relocalizeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                          std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+    (void)request;
+    RCLCPP_INFO(get_logger(), "Global relocalization service requested. Waiting for scan to compute pose...");
+    
+    std::unique_lock<std::mutex> lock(reloc_mutex_);
+    reloc_done_ = false;
+    trigger_global_relocalize_ = true;
+    
+    // Wait for scanCallback to solve the pose (timeout 5.0 seconds)
+    if (reloc_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return reloc_done_; })) {
+      response->success = true;
+      // Format response message: x:<x>;y:<y>;theta:<theta>;confidence:<confidence>
+      std::string msg = "x:" + std::to_string(reloc_result_pose_.x) +
+                        ";y:" + std::to_string(reloc_result_pose_.y) +
+                        ";theta:" + std::to_string(reloc_result_pose_.theta) +
+                        ";confidence:" + std::to_string(reloc_result_confidence_);
+      response->message = msg;
+    } else {
+      response->success = false;
+      response->message = "Timeout waiting for laser scan or relocalizer to solve.";
+      RCLCPP_ERROR(get_logger(), "Global relocalization service timeout.");
+    }
+  }
+
   void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
     current_odom_pose_ = poseFromOdomMsg(*msg);
     current_odom_twist_ = msg->twist;
@@ -235,6 +281,9 @@ private:
     if (!have_odom_)
       return; // need at least one odom sample first
 
+    if (!active_ && !trigger_global_relocalize_)
+      return; // Sleep wait state: ignore incoming scans until active
+
     if (!ensureLaserToBaseTransform(msg->header.frame_id))
       return;
     const Pose2D &laser_to_base = *laser_to_base_;
@@ -276,6 +325,54 @@ private:
     }
 
     // --- predict, then correct ---
+    if (trigger_global_relocalize_) {
+      RCLCPP_INFO(get_logger(), "Running global geometric relocalization...");
+      auto start_reloc = std::chrono::high_resolution_clock::now();
+      // Pass the current sync odom pose as the initial guess to help guide the search
+      Pose2D initial_pose = relocalizer_->relocalize(scan_points, *matcher_, sync_odom_pose);
+      auto end_reloc = std::chrono::high_resolution_clock::now();
+      std::chrono::duration<double, std::milli> elapsed_reloc = end_reloc - start_reloc;
+      
+      map_to_odom_offset_ = initial_pose * sync_odom_pose.inverse();
+
+      // Transform scan points to map frame to compute coverage
+      std::vector<Point2D> transformed_scan;
+      transformed_scan.reserve(scan_points.size());
+      for (const auto &sp : scan_points) {
+        transformed_scan.push_back(initial_pose.apply(sp));
+      }
+      int covered_count = 0;
+      const auto &map_pts = matcher_->mapPoints();
+      for (const auto &mp : map_pts) {
+        double min_dist_sq = std::numeric_limits<double>::max();
+        for (const auto &tp : transformed_scan) {
+          double dx = mp.x - tp.x;
+          double dy = mp.y - tp.y;
+          double dist_sq = dx*dx + dy*dy;
+          if (dist_sq < min_dist_sq) {
+            min_dist_sq = dist_sq;
+          }
+        }
+        if (min_dist_sq < 0.0225) { // 0.15m
+          covered_count++;
+        }
+      }
+      double map_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+
+      {
+        std::lock_guard<std::mutex> lock(reloc_mutex_);
+        reloc_result_pose_ = initial_pose;
+        reloc_result_confidence_ = map_coverage;
+        reloc_done_ = true;
+        trigger_global_relocalize_ = false;
+        active_ = true;
+      }
+      reloc_cv_.notify_all();
+
+      RCLCPP_INFO(get_logger(), "Global relocalization complete in %.3f ms. Initial pose guess set to: [%.3f, %.3f, %.3f], confidence: %.1f%%",
+                  elapsed_reloc.count(), initial_pose.x, initial_pose.y, initial_pose.theta, map_coverage * 100.0);
+    }
+
     const Pose2D initial_guess = map_to_odom_offset_ * sync_odom_pose;
     
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -283,13 +380,8 @@ private:
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
 
-    const bool is_good_match = result.converged ||
-                               (result.inlier_rms < max_accepted_rms_ && result.inlier_count >= 10);
-
-    if (is_good_match) {
-      map_to_odom_offset_ =
-          result.corrected_pose * sync_odom_pose.inverse();
-
+    double map_coverage = 0.0;
+    if (result.converged) {
       // Transform scan points to map frame once
       std::vector<Point2D> transformed_scan;
       transformed_scan.reserve(scan_points.size());
@@ -314,14 +406,58 @@ private:
           covered_count++;
         }
       }
-      double map_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+      map_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+    }
+
+    const bool is_good_match = result.converged &&
+                               (result.inlier_rms < max_accepted_rms_ && map_coverage >= 0.70);
+
+    if (is_good_match) {
+      map_to_odom_offset_ =
+          result.corrected_pose * sync_odom_pose.inverse();
       double inlier_ratio = (double)result.inlier_count / scan_points.size();
 
       RCLCPP_INFO(get_logger(), "ICP alignment took %.3f ms (iters=%d) | Map Coverage: %.1f%% | Scan Inliers: %.1f%% | RMS: %.2f cm",
                   elapsed.count(), result.iterations, map_coverage * 100.0, inlier_ratio * 100.0, result.inlier_rms * 100.0);
     } else {
-      RCLCPP_WARN(get_logger(), "ICP did not converge/accept this scan (took %.3f ms, inliers=%d, rms=%.4f), keeping previous map->odom offset",
-                  elapsed.count(), result.inlier_count, result.inlier_rms);
+      RCLCPP_WARN(get_logger(), "ICP failed or coverage dropped below 70%% (converged=%d, coverage=%.1f%%, RMS=%.4f). Triggering fallback relocalization...",
+                  result.converged, map_coverage * 100.0, result.inlier_rms);
+
+      // Run relocalizer with the current sync odom pose as guess
+      Pose2D reloc_pose = relocalizer_->relocalize(scan_points, *matcher_, sync_odom_pose);
+      
+      // Calculate map coverage of the relocalized pose
+      std::vector<Point2D> transformed_scan;
+      transformed_scan.reserve(scan_points.size());
+      for (const auto &sp : scan_points) {
+        transformed_scan.push_back(reloc_pose.apply(sp));
+      }
+      int covered_count = 0;
+      const auto &map_pts = matcher_->mapPoints();
+      for (const auto &mp : map_pts) {
+        double min_dist_sq = std::numeric_limits<double>::max();
+        for (const auto &tp : transformed_scan) {
+          double dx = mp.x - tp.x;
+          double dy = mp.y - tp.y;
+          double dist_sq = dx*dx + dy*dy;
+          if (dist_sq < min_dist_sq) {
+            min_dist_sq = dist_sq;
+          }
+        }
+        if (min_dist_sq < 0.0225) {
+          covered_count++;
+        }
+      }
+      double reloc_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+
+      if (reloc_coverage > map_coverage) {
+        RCLCPP_INFO(get_logger(), "Fallback relocalization succeeded. Recovered pose: [%.3f, %.3f, %.3f], coverage: %.1f%%",
+                    reloc_pose.x, reloc_pose.y, reloc_pose.theta, reloc_coverage * 100.0);
+        map_to_odom_offset_ = reloc_pose * sync_odom_pose.inverse();
+      } else {
+        RCLCPP_ERROR(get_logger(), "Fallback relocalization did not find a better fit (reloc coverage=%.1f%%, original map coverage=%.1f%%). Keeping previous map->odom offset.",
+                     reloc_coverage * 100.0, map_coverage * 100.0);
+      }
     }
 
     const Pose2D corrected_pose = map_to_odom_offset_ * sync_odom_pose;
@@ -361,6 +497,7 @@ private:
   double max_accepted_rms_;
 
   // --- state ---
+  std::unique_ptr<GeometricRelocalizer> relocalizer_;
   std::unique_ptr<ScanToMapICP> matcher_;
   Pose2D map_to_odom_offset_;
   Pose2D current_odom_pose_;
@@ -374,16 +511,27 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr corrected_odom_pub_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr relocalize_srv_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+  bool trigger_global_relocalize_ = false;
+  bool active_ = false;
+  std::mutex reloc_mutex_;
+  std::condition_variable reloc_cv_;
+  bool reloc_done_ = false;
+  Pose2D reloc_result_pose_;
+  double reloc_result_confidence_ = 0.0;
 };
 
 int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
-  // Single-threaded executor: scan/odom callbacks never overlap, so the
-  // node code above needs no internal locking (see threading note up top).
-  rclcpp::spin(std::make_shared<ScanToMapICPNode>());
+  auto node = std::make_shared<ScanToMapICPNode>();
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(node);
+  executor.spin();
   rclcpp::shutdown();
   return 0;
 }
