@@ -26,6 +26,9 @@
 #include <limits>
 #include <stdexcept>
 #include <functional>
+#include <thread>
+#include <future>
+#include <std_srvs/srv/trigger.hpp>
 
 #include "controller_interface/helpers.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -637,6 +640,31 @@ CallbackReturn SwerveDriveController::on_activate(
     }
   }
   // End of module loop
+
+  // Call relocalize service in a background thread to prevent deadlocking the executor
+  std::thread([this]() {
+    auto client = get_node()->create_client<std_srvs::srv::Trigger>("relocalize");
+    RCLCPP_INFO(get_node()->get_logger(), "Swerve controller waiting for /relocalize service...");
+    if (!client->wait_for_service(std::chrono::seconds(10))) {
+      RCLCPP_ERROR(get_node()->get_logger(), "/relocalize service not available.");
+      return;
+    }
+    
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    auto future = client->async_send_request(request);
+    
+    RCLCPP_INFO(get_node()->get_logger(), "Swerve controller requesting /relocalize...");
+    if (future.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
+      auto response = future.get();
+      if (response->success) {
+        RCLCPP_INFO(get_node()->get_logger(), "Swerve controller startup relocalization succeeded: %s", response->message.c_str());
+      } else {
+        RCLCPP_WARN(get_node()->get_logger(), "Swerve controller startup relocalization failed: %s", response->message.c_str());
+      }
+    } else {
+      RCLCPP_ERROR(get_node()->get_logger(), "/relocalize service request timed out.");
+    }
+  }).detach();
 
   // ... (Final check and Activation successful log) ...
   return CallbackReturn::SUCCESS;
