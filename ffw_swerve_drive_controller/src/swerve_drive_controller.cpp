@@ -658,6 +658,31 @@ CallbackReturn SwerveDriveController::on_activate(
       auto response = future.get();
       if (response->success) {
         RCLCPP_INFO(get_node()->get_logger(), "Swerve controller startup relocalization succeeded: %s", response->message.c_str());
+        
+        // Parse x, y, theta from response message "x:<x>;y:<y>;theta:<theta>;confidence:<confidence>"
+        double reloc_x = 0.0, reloc_y = 0.0, reloc_theta = 0.0;
+        std::string msg = response->message;
+        try {
+          size_t pos_x = msg.find("x:");
+          size_t pos_y = msg.find(";y:");
+          size_t pos_theta = msg.find(";theta:");
+          size_t pos_conf = msg.find(";confidence:");
+          
+          if (pos_x != std::string::npos && pos_y != std::string::npos && pos_theta != std::string::npos) {
+            reloc_x = std::stod(msg.substr(pos_x + 2, pos_y - (pos_x + 2)));
+            reloc_y = std::stod(msg.substr(pos_y + 3, pos_theta - (pos_y + 3)));
+            if (pos_conf != std::string::npos) {
+              reloc_theta = std::stod(msg.substr(pos_theta + 7, pos_conf - (pos_theta + 7)));
+            } else {
+              reloc_theta = std::stod(msg.substr(pos_theta + 7));
+            }
+            
+            odometry_.setPose(reloc_x, reloc_y, reloc_theta);
+            RCLCPP_INFO(get_node()->get_logger(), "Swerve controller internal odometry successfully initialized to global pose: [%.3f, %.3f, %.3f]", reloc_x, reloc_y, reloc_theta);
+          }
+        } catch (const std::exception &e) {
+          RCLCPP_ERROR(get_node()->get_logger(), "Failed to parse relocalization message: %s", e.what());
+        }
       } else {
         RCLCPP_WARN(get_node()->get_logger(), "Swerve controller startup relocalization failed: %s", response->message.c_str());
       }

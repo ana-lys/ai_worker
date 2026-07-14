@@ -61,6 +61,12 @@ public:
   double getVy() const {return velocity_in_base_frame_linear_y_;}
   double getWz() const {return velocity_in_base_frame_angular_z_;}
 
+  void setPose(double x, double y, double yaw) {
+    position_x_odom_ = x;
+    position_y_odom_ = y;
+    orientation_yaw_odom_ = yaw;
+  }
+
   void setModuleParams(
     const std::vector<double> & module_x_offsets,
     const std::vector<double> & module_y_offsets,
