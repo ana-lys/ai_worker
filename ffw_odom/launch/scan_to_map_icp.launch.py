@@ -6,8 +6,16 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
-    # Retrieve default map path
-    default_map_path = '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt'
+    possible_paths = [
+        '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt',
+        '/root/ros2_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt',
+        '/root/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt',
+    ]
+    default_map_path = possible_paths[0]
+    for path in possible_paths:
+        if os.path.exists(path):
+            default_map_path = path
+            break
 
     # Declare launch arguments
     map_file_arg = DeclareLaunchArgument(

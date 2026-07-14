@@ -1,3 +1,4 @@
+import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -60,7 +61,16 @@ def generate_launch_description():
     )
 
     # scan_to_map_icp node
-    default_map_path = '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt'
+    possible_paths = [
+        '/home/lys/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt',
+        '/root/ros2_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt',
+        '/root/robotis_ws/src/ai_worker/ffw_mapping/all_walls_downsampled_rotated.txt',
+    ]
+    default_map_path = possible_paths[0]
+    for path in possible_paths:
+        if os.path.exists(path):
+            default_map_path = path
+            break
     scan_to_map_icp_node = Node(
         package='ffw_odom',
         executable='scan_to_map_icp',
