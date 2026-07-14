@@ -645,7 +645,7 @@ CallbackReturn SwerveDriveController::on_activate(
   std::thread([this]() {
     auto client = get_node()->create_client<std_srvs::srv::Trigger>("relocalize");
     RCLCPP_INFO(get_node()->get_logger(), "Swerve controller waiting for /relocalize service...");
-    if (!client->wait_for_service(std::chrono::seconds(10))) {
+    if (!client->wait_for_service(std::chrono::seconds(20))) {
       RCLCPP_ERROR(get_node()->get_logger(), "/relocalize service not available.");
       return;
     }
@@ -654,7 +654,7 @@ CallbackReturn SwerveDriveController::on_activate(
     auto future = client->async_send_request(request);
     
     RCLCPP_INFO(get_node()->get_logger(), "Swerve controller requesting /relocalize...");
-    if (future.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
+    if (future.wait_for(std::chrono::seconds(20)) == std::future_status::ready) {
       auto response = future.get();
       if (response->success) {
         RCLCPP_INFO(get_node()->get_logger(), "Swerve controller startup relocalization succeeded: %s", response->message.c_str());

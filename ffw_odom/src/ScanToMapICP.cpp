@@ -223,8 +223,8 @@ private:
     reloc_done_ = false;
     trigger_global_relocalize_ = true;
     
-    // Wait for scanCallback to solve the pose (timeout 5.0 seconds)
-    if (reloc_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return reloc_done_; })) {
+    // Wait for scanCallback to solve the pose (timeout 15.0 seconds)
+    if (reloc_cv_.wait_for(lock, std::chrono::seconds(15), [this]() { return reloc_done_; })) {
       response->success = true;
       // Format response message: x:<x>;y:<y>;theta:<theta>;confidence:<confidence>
       std::string msg = "x:" + std::to_string(reloc_result_pose_.x) +
@@ -454,7 +454,7 @@ private:
       }
       double reloc_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
 
-      if (reloc_coverage > map_coverage) {
+      if (reloc_coverage > map_coverage && reloc_coverage >= 0.70) {
         RCLCPP_INFO(get_logger(), "Fallback relocalization succeeded. Recovered pose: [%.3f, %.3f, %.3f], coverage: %.1f%%",
                     reloc_pose.x, reloc_pose.y, reloc_pose.theta, reloc_coverage * 100.0);
         map_to_odom_offset_ = reloc_pose * sync_odom_pose.inverse();
