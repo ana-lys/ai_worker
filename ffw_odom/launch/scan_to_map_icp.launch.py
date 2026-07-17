@@ -81,7 +81,7 @@ def generate_launch_description():
             'normal_k_neighbors': 8,
             'translation_eps': 1e-4,
             'rotation_eps': 1e-5,
-            'max_accepted_rms': 0.10,
+            'max_accepted_rms': 0.15,
             'verbose': False
         }]
     )

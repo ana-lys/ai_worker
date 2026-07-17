@@ -84,7 +84,7 @@ def generate_launch_description():
             'map_frame': 'map',
             'odom_frame': 'odom',
             'base_frame': 'base_link',
-            'max_accepted_rms': 0.10,
+            'max_accepted_rms': 0.15,
             'max_iterations': 30,
             'max_correspondence_dist': 0.4,
             'verbose': False

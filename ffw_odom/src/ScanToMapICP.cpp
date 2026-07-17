@@ -146,7 +146,7 @@ public:
     cfg.translation_eps = declare_parameter<double>("translation_eps", 1e-4);
     cfg.rotation_eps = declare_parameter<double>("rotation_eps", 1e-5);
     cfg.verbose = declare_parameter<bool>("verbose", false);
-    max_accepted_rms_ = declare_parameter<double>("max_accepted_rms", 0.10);
+    max_accepted_rms_ = declare_parameter<double>("max_accepted_rms", 0.15);
 
     if (map_file_.empty()) {
       RCLCPP_FATAL(get_logger(), "Required parameter 'map_file' is empty.");
