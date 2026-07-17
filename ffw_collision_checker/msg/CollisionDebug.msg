@@ -1,0 +1,11 @@
+string[] geom1_names
+string[] geom2_names
+string[] body1_names
+string[] body2_names
+float64[] distances
+float64[] p1_x
+float64[] p1_y
+float64[] p1_z
+float64[] p2_x
+float64[] p2_y
+float64[] p2_z

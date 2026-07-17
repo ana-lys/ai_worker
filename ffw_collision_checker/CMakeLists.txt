@@ -113,7 +113,10 @@ set_target_properties(mujoco PROPERTIES
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
     "srv/SolveCollisionNaive.srv"
+    "srv/ToggleJointGroup.srv"
+    "srv/SaveLoadPose.srv"
     "msg/CollisionCheck.msg"
+    "msg/CollisionDebug.msg"
 )
 
 # ---------------------------------------------------------------------------
@@ -197,6 +200,7 @@ target_link_libraries(ffw_ik_solver_teleop
     PkgConfig::GLFW
     OpenGL::GL
 )
+rosidl_target_interfaces(ffw_ik_solver_teleop ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 add_executable(ffw_workspace_explorer src/ffw_workspace_explorer.cpp)
 target_include_directories(ffw_workspace_explorer PUBLIC

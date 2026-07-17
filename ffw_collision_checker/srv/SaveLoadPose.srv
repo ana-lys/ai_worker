@@ -1,0 +1,5 @@
+string pose_name
+bool to_file
+---
+bool success
+string message

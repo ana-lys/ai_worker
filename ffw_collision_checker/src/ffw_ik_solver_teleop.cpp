@@ -14,6 +14,7 @@
 #include "ffw_ik_solver.h"
 
 #include <algorithm>
+#include <iomanip>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -36,7 +37,13 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "ffw_collision_checker/srv/toggle_joint_group.hpp"
+#include "ffw_collision_checker/srv/save_load_pose.hpp"
+#include "ffw_collision_checker/msg/collision_debug.hpp"
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
+#include <filesystem>
+#include <fstream>
+#include <map>
 #include <trajectory_msgs/msg/joint_trajectory_point.hpp>
 
 // ============================================================
@@ -303,9 +310,14 @@ private:
   std::vector<ffw_ik::ContactInfo> active_collisions_;
 };
 
-// ============================================================
-// TeleopNode
-// ============================================================
+struct PoseState {
+  Eigen::Vector3d target_l_pos;
+  Eigen::Matrix3d target_l_rot;
+  Eigen::Vector3d target_r_pos;
+  Eigen::Matrix3d target_r_rot;
+  double gripper_l_pos;
+  double gripper_r_pos;
+};
 
 using std::placeholders::_1;
 
@@ -333,9 +345,189 @@ public:
     this->declare_parameter("hardware_mode", true);
     hardware_mode_ = this->get_parameter("hardware_mode").as_bool();
 
+    // Dynamic joint group locking
+    this->declare_parameter<bool>("left_arm_enabled", true);
+    this->declare_parameter<bool>("right_arm_enabled", true);
+    this->declare_parameter<bool>("lift_enabled", true);
+    this->declare_parameter<bool>("collision_debug", true);
+
+    left_arm_enabled_ = true;
+    right_arm_enabled_ = true;
+    lift_enabled_ = true;
+    collision_debug_ = true;
+
+    parameter_callback_handle_ = this->add_on_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter> &parameters) {
+          rcl_interfaces::msg::SetParametersResult result;
+          result.successful = true;
+          for (const auto &param : parameters) {
+            if (param.get_name() == "left_arm_enabled") {
+              std::lock_guard<std::mutex> lock(pose_mutex_);
+              left_arm_enabled_ = param.as_bool();
+              RCLCPP_INFO(this->get_logger(), "left_arm_enabled set to %s", left_arm_enabled_ ? "true" : "false");
+            } else if (param.get_name() == "right_arm_enabled") {
+              std::lock_guard<std::mutex> lock(pose_mutex_);
+              right_arm_enabled_ = param.as_bool();
+              RCLCPP_INFO(this->get_logger(), "right_arm_enabled set to %s", right_arm_enabled_ ? "true" : "false");
+            } else if (param.get_name() == "lift_enabled") {
+              std::lock_guard<std::mutex> lock(pose_mutex_);
+              lift_enabled_ = param.as_bool();
+              RCLCPP_INFO(this->get_logger(), "lift_enabled set to %s", lift_enabled_ ? "true" : "false");
+            } else if (param.get_name() == "collision_debug") {
+              std::lock_guard<std::mutex> lock(pose_mutex_);
+              collision_debug_ = param.as_bool();
+              RCLCPP_INFO(this->get_logger(), "collision_debug set to %s", collision_debug_ ? "true" : "false");
+            }
+          }
+          return result;
+        });
+
+    collision_debug_pub_ = this->create_publisher<ffw_collision_checker::msg::CollisionDebug>(
+        "/ik_solver/collision_debug", 10);
+
     // If hardware_mode=false, base teleop is disabled, so there's no mode
     // switch. Default to ARM.
     current_mode_ = hardware_mode_ ? "BASE" : "ARM";
+
+    toggle_group_srv_ = this->create_service<ffw_collision_checker::srv::ToggleJointGroup>(
+        "/ik_solver/toggle_joint_group",
+        [this](const std::shared_ptr<ffw_collision_checker::srv::ToggleJointGroup::Request> req,
+               std::shared_ptr<ffw_collision_checker::srv::ToggleJointGroup::Response> res) {
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          std::string group = req->group_name;
+          if (group == "left_arm") {
+            left_arm_enabled_ = !left_arm_enabled_;
+            res->success = true;
+            res->message = "Left arm toggled. Now " + std::string(left_arm_enabled_ ? "ENABLED" : "DISABLED");
+          } else if (group == "right_arm") {
+            right_arm_enabled_ = !right_arm_enabled_;
+            res->success = true;
+            res->message = "Right arm toggled. Now " + std::string(right_arm_enabled_ ? "ENABLED" : "DISABLED");
+          } else if (group == "lift") {
+            lift_enabled_ = !lift_enabled_;
+            res->success = true;
+            res->message = "Lift toggled. Now " + std::string(lift_enabled_ ? "ENABLED" : "DISABLED");
+          } else {
+            res->success = false;
+            res->message = "Unknown group name: " + group + ". Valid groups: left_arm, right_arm, lift";
+          }
+          RCLCPP_INFO(this->get_logger(), "Toggle service: %s", res->message.c_str());
+        });
+
+    reset_to_home_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "/ik_solver/reset_to_home",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+          (void)req;
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          home_reset_requested_ = true;
+          res->success = true;
+          res->message = "Reset to home configuration requested.";
+          RCLCPP_INFO(this->get_logger(), "Home reset service triggered");
+        });
+
+    save_pose_srv_ = this->create_service<ffw_collision_checker::srv::SaveLoadPose>(
+        "/ik_solver/save_pose",
+        [this](const std::shared_ptr<ffw_collision_checker::srv::SaveLoadPose::Request> req,
+               std::shared_ptr<ffw_collision_checker::srv::SaveLoadPose::Response> res) {
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          std::string name = req->pose_name;
+          if (name.empty()) {
+            res->success = false;
+            res->message = "Pose name cannot be empty.";
+            return;
+          }
+
+          PoseState pose;
+          pose.target_l_pos = target_l_.translation();
+          pose.target_l_rot = target_l_.linear();
+          pose.target_r_pos = target_r_.translation();
+          pose.target_r_rot = target_r_.linear();
+          pose.gripper_l_pos = gripper_l_pos_;
+          pose.gripper_r_pos = gripper_r_pos_;
+
+          if (req->to_file) {
+            auto file_poses = read_poses_from_file();
+            file_poses[name] = pose;
+            if (write_poses_to_file(file_poses)) {
+              res->success = true;
+              res->message = "Pose '" + name + "' saved successfully to file.";
+              RCLCPP_INFO(this->get_logger(), "Pose '%s' saved to poses file.", name.c_str());
+            } else {
+              res->success = false;
+              res->message = "Failed to write to poses file.";
+            }
+          } else {
+            memory_poses_[name] = pose;
+            res->success = true;
+            res->message = "Pose saved successfully to memory as '" + name + "'";
+            RCLCPP_INFO(this->get_logger(), "Pose '%s' saved to memory.", name.c_str());
+          }
+        });
+
+    load_pose_srv_ = this->create_service<ffw_collision_checker::srv::SaveLoadPose>(
+        "/ik_solver/load_pose",
+        [this](const std::shared_ptr<ffw_collision_checker::srv::SaveLoadPose::Request> req,
+               std::shared_ptr<ffw_collision_checker::srv::SaveLoadPose::Response> res) {
+          std::string name = req->pose_name;
+          if (name.empty()) {
+            res->success = false;
+            res->message = "Pose name cannot be empty.";
+            return;
+          }
+
+          PoseState pose;
+          bool found = false;
+
+          if (req->to_file) {
+            auto file_poses = read_poses_from_file();
+            auto it = file_poses.find(name);
+            if (it != file_poses.end()) {
+              pose = it->second;
+              found = true;
+            } else {
+              res->success = false;
+              res->message = "Pose '" + name + "' not found in poses file.";
+              return;
+            }
+          } else {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            auto it = memory_poses_.find(name);
+            if (it != memory_poses_.end()) {
+              pose = it->second;
+              found = true;
+            } else {
+              res->success = false;
+              res->message = "Pose '" + name + "' not found in memory.";
+              return;
+            }
+          }
+
+          if (found) {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            target_to_load_ = pose;
+            active_pose_name_ = name;
+            pose_load_requested_ = true;
+            res->success = true;
+            res->message = "Pose '" + name + "' load requested safely.";
+            RCLCPP_INFO(this->get_logger(), "Pose load requested for '%s'", name.c_str());
+          }
+        });
+
+    list_saved_poses_srv_ = this->create_service<std_srvs::srv::Trigger>(
+        "/ik_solver/list_saved_poses",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+          (void)req;
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          std::string msg = "";
+          for (auto const& [name, val] : memory_poses_) {
+            if (!msg.empty()) msg += "\n";
+            msg += name;
+          }
+          res->success = true;
+          res->message = msg;
+        });
 
     mode_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
@@ -418,6 +610,8 @@ public:
     initial_r_ = r;
     target_l_ = l;
     target_r_ = r;
+    xml_home_l_ = l;
+    xml_home_r_ = r;
   }
 
   void get_targets(Eigen::Isometry3d &l, Eigen::Isometry3d &r) {
@@ -430,6 +624,9 @@ public:
                    const Eigen::Isometry3d &achieved_r, double max_dist = 0.01,
                    double max_angle = 0.1) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (solving_to_home_) {
+      return;
+    }
 
     // Left arm clipping
     Eigen::Vector3d err_l = target_l_.translation() - achieved_l.translation();
@@ -566,12 +763,17 @@ public:
 
     for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
       std::string name = latest_real_joints_.name[i];
-      if (name == "gripper_l_joint1")
+      if (name == "gripper_l_joint1") {
         gripper_l_pos_ = latest_real_joints_.position[i];
-      if (name == "gripper_r_joint1")
+        continue;
+      }
+      if (name == "gripper_r_joint1") {
         gripper_r_pos_ = latest_real_joints_.position[i];
-      if (name.find("gripper") != std::string::npos)
-        continue; // Skip grippers
+        continue;
+      }
+      if (name.find("gripper") != std::string::npos) {
+        continue; // Skip grippers from joint mapping since they have no joints in MuJoCo
+      }
 
       int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
       if (jnt_id >= 0) {
@@ -616,6 +818,17 @@ public:
     std::lock_guard<std::mutex> lock(pose_mutex_);
     int h1 = mj_name2id(m, mjOBJ_JOINT, "head_joint1");
     int h2 = mj_name2id(m, mjOBJ_JOINT, "head_joint2");
+
+    if (hardware_mode_) {
+      for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
+        if (latest_real_joints_.name[i] == "head_joint1") {
+          latest_head_pos_[0] = latest_real_joints_.position[i];
+        } else if (latest_real_joints_.name[i] == "head_joint2") {
+          latest_head_pos_[1] = latest_real_joints_.position[i];
+        }
+      }
+    }
+
     if (h1 >= 0) d->qpos[m->jnt_qposadr[h1]] = latest_head_pos_[0];
     if (h2 >= 0) d->qpos[m->jnt_qposadr[h2]] = latest_head_pos_[1];
   }
@@ -635,7 +848,179 @@ public:
 
   std::vector<std::string> get_frozen_joints() {
     std::lock_guard<std::mutex> lock(pose_mutex_);
-    return frozen_joints_;
+    std::vector<std::string> frozen = frozen_joints_;
+    if (!left_arm_enabled_) {
+      if (std::find(frozen.begin(), frozen.end(), "arm_l") == frozen.end()) {
+        frozen.push_back("arm_l");
+      }
+    }
+    if (!right_arm_enabled_) {
+      if (std::find(frozen.begin(), frozen.end(), "arm_r") == frozen.end()) {
+        frozen.push_back("arm_r");
+      }
+    }
+    if (!lift_enabled_) {
+      if (std::find(frozen.begin(), frozen.end(), "lift") == frozen.end()) {
+        frozen.push_back("lift");
+      }
+    }
+    if (std::find(frozen.begin(), frozen.end(), "head") == frozen.end()) {
+      frozen.push_back("head");
+    }
+    return frozen;
+  }
+
+  void apply_home_reset(mjModel *m, mjData *d) {
+    (void)m;
+    (void)d;
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (!home_reset_requested_)
+      return;
+
+    // 1. Re-enable all joint groups so they can move
+    left_arm_enabled_ = true;
+    right_arm_enabled_ = true;
+    lift_enabled_ = true;
+    solving_to_home_ = true;
+    homing_ticks_ = 0;
+
+    // 2. Reset targets, reference frames and accumulators to pure XML home poses
+    initial_l_ = xml_home_l_;
+    target_l_ = xml_home_l_;
+    accum_l_trans_.setZero();
+    accum_l_rot_.setIdentity();
+    first_msg_l_ = true;
+
+    initial_r_ = xml_home_r_;
+    target_r_ = xml_home_r_;
+    accum_r_trans_.setZero();
+    accum_r_rot_.setIdentity();
+    first_msg_r_ = true;
+
+    home_reset_requested_ = false;
+    RCLCPP_INFO(this->get_logger(), "Home reset triggered: re-enabled all groups and solving back to XML home posture safely!");
+  }
+
+  void apply_pose_load(mjModel *m, mjData *d) {
+    (void)m;
+    (void)d;
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (!pose_load_requested_)
+      return;
+
+    // 1. Re-enable all joint groups so they can move
+    left_arm_enabled_ = true;
+    right_arm_enabled_ = true;
+    lift_enabled_ = true;
+    solving_to_home_ = true;
+    homing_ticks_ = 0;
+
+    // 2. Set targets to the loaded pose
+    Eigen::Isometry3d loaded_l = Eigen::Isometry3d::Identity();
+    loaded_l.translation() = target_to_load_.target_l_pos;
+    loaded_l.linear() = target_to_load_.target_l_rot;
+
+    Eigen::Isometry3d loaded_r = Eigen::Isometry3d::Identity();
+    loaded_r.translation() = target_to_load_.target_r_pos;
+    loaded_r.linear() = target_to_load_.target_r_rot;
+
+    initial_l_ = loaded_l;
+    target_l_ = loaded_l;
+    accum_l_trans_.setZero();
+    accum_l_rot_.setIdentity();
+    first_msg_l_ = true;
+
+    initial_r_ = loaded_r;
+    target_r_ = loaded_r;
+    accum_r_trans_.setZero();
+    accum_r_rot_.setIdentity();
+    first_msg_r_ = true;
+
+    gripper_l_pos_ = target_to_load_.gripper_l_pos;
+    gripper_r_pos_ = target_to_load_.gripper_r_pos;
+
+    pose_load_requested_ = false;
+    RCLCPP_INFO(this->get_logger(), "Loaded pose '%s' safely! Homing solver started.", active_pose_name_.c_str());
+  }
+
+  void apply_gripper_sync(mjModel *m, mjData *d) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    
+    // Left gripper bodies
+    int gl_r1 = mj_name2id(m, mjOBJ_BODY, "gripper_l_rh_p12_rn_r1");
+    int gl_r2 = mj_name2id(m, mjOBJ_BODY, "gripper_l_rh_p12_rn_r2");
+    int gl_l1 = mj_name2id(m, mjOBJ_BODY, "gripper_l_rh_p12_rn_l1");
+    int gl_l2 = mj_name2id(m, mjOBJ_BODY, "gripper_l_rh_p12_rn_l2");
+
+    Eigen::Quaterniond q0(0.0, 0.0, 1.0, 0.0); // Default quat [0, 0, 1, 0]
+
+    if (gl_r1 >= 0) {
+      Eigen::Quaterniond q_local(Eigen::AngleAxisd(gripper_l_pos_, Eigen::Vector3d::UnitX()));
+      Eigen::Quaterniond q = q0 * q_local;
+      m->body_quat[4 * gl_r1 + 0] = q.w();
+      m->body_quat[4 * gl_r1 + 1] = q.x();
+      m->body_quat[4 * gl_r1 + 2] = q.y();
+      m->body_quat[4 * gl_r1 + 3] = q.z();
+    }
+    if (gl_r2 >= 0) {
+      Eigen::Quaterniond q = Eigen::Quaterniond(Eigen::AngleAxisd(-gripper_l_pos_, Eigen::Vector3d::UnitX()));
+      m->body_quat[4 * gl_r2 + 0] = q.w();
+      m->body_quat[4 * gl_r2 + 1] = q.x();
+      m->body_quat[4 * gl_r2 + 2] = q.y();
+      m->body_quat[4 * gl_r2 + 3] = q.z();
+    }
+    if (gl_l1 >= 0) {
+      Eigen::Quaterniond q_local(Eigen::AngleAxisd(-gripper_l_pos_, Eigen::Vector3d::UnitX()));
+      Eigen::Quaterniond q = q0 * q_local;
+      m->body_quat[4 * gl_l1 + 0] = q.w();
+      m->body_quat[4 * gl_l1 + 1] = q.x();
+      m->body_quat[4 * gl_l1 + 2] = q.y();
+      m->body_quat[4 * gl_l1 + 3] = q.z();
+    }
+    if (gl_l2 >= 0) {
+      Eigen::Quaterniond q = Eigen::Quaterniond(Eigen::AngleAxisd(gripper_l_pos_, Eigen::Vector3d::UnitX()));
+      m->body_quat[4 * gl_l2 + 0] = q.w();
+      m->body_quat[4 * gl_l2 + 1] = q.x();
+      m->body_quat[4 * gl_l2 + 2] = q.y();
+      m->body_quat[4 * gl_l2 + 3] = q.z();
+    }
+
+    // Right gripper bodies
+    int gr_r1 = mj_name2id(m, mjOBJ_BODY, "gripper_r_rh_p12_rn_r1");
+    int gr_r2 = mj_name2id(m, mjOBJ_BODY, "gripper_r_rh_p12_rn_r2");
+    int gr_l1 = mj_name2id(m, mjOBJ_BODY, "gripper_r_rh_p12_rn_l1");
+    int gr_l2 = mj_name2id(m, mjOBJ_BODY, "gripper_r_rh_p12_rn_l2");
+
+    if (gr_r1 >= 0) {
+      Eigen::Quaterniond q_local(Eigen::AngleAxisd(gripper_r_pos_, Eigen::Vector3d::UnitX()));
+      Eigen::Quaterniond q = q0 * q_local;
+      m->body_quat[4 * gr_r1 + 0] = q.w();
+      m->body_quat[4 * gr_r1 + 1] = q.x();
+      m->body_quat[4 * gr_r1 + 2] = q.y();
+      m->body_quat[4 * gr_r1 + 3] = q.z();
+    }
+    if (gr_r2 >= 0) {
+      Eigen::Quaterniond q = Eigen::Quaterniond(Eigen::AngleAxisd(-gripper_r_pos_, Eigen::Vector3d::UnitX()));
+      m->body_quat[4 * gr_r2 + 0] = q.w();
+      m->body_quat[4 * gr_r2 + 1] = q.x();
+      m->body_quat[4 * gr_r2 + 2] = q.y();
+      m->body_quat[4 * gr_r2 + 3] = q.z();
+    }
+    if (gr_l1 >= 0) {
+      Eigen::Quaterniond q_local(Eigen::AngleAxisd(-gripper_r_pos_, Eigen::Vector3d::UnitX()));
+      Eigen::Quaterniond q = q0 * q_local;
+      m->body_quat[4 * gr_l1 + 0] = q.w();
+      m->body_quat[4 * gr_l1 + 1] = q.x();
+      m->body_quat[4 * gr_l1 + 2] = q.y();
+      m->body_quat[4 * gr_l1 + 3] = q.z();
+    }
+    if (gr_l2 >= 0) {
+      Eigen::Quaterniond q = Eigen::Quaterniond(Eigen::AngleAxisd(gripper_r_pos_, Eigen::Vector3d::UnitX()));
+      m->body_quat[4 * gr_l2 + 0] = q.w();
+      m->body_quat[4 * gr_l2 + 1] = q.x();
+      m->body_quat[4 * gr_l2 + 2] = q.y();
+      m->body_quat[4 * gr_l2 + 3] = q.z();
+    }
   }
 
   void toggle_frozen_joint(const std::string& jname) {
@@ -674,8 +1059,98 @@ public:
   }
 
 private:
+  std::map<std::string, PoseState> read_poses_from_file() {
+    std::map<std::string, PoseState> file_poses;
+    std::string filepath = "/home/lys/robotis_ws/src/ai_worker/ffw_collision_checker/config/poses.txt";
+    std::ifstream in(filepath);
+    if (!in.is_open()) {
+      return file_poses;
+    }
+    std::string line;
+    std::string current_pose_name = "";
+    PoseState current_pose;
+    bool has_pose = false;
+
+    while (std::getline(in, line)) {
+      if (line.empty()) continue;
+      if (line[0] == '[' && line[line.size() - 1] == ']') {
+        if (has_pose && !current_pose_name.empty()) {
+          file_poses[current_pose_name] = current_pose;
+        }
+        current_pose_name = line.substr(1, line.size() - 2);
+        current_pose = PoseState();
+        has_pose = true;
+      } else {
+        std::stringstream ss(line);
+        std::string key;
+        ss >> key;
+        if (key == "target_l_pos") {
+          double x, y, z;
+          if (ss >> x >> y >> z) {
+            current_pose.target_l_pos = Eigen::Vector3d(x, y, z);
+          }
+        } else if (key == "target_l_rot") {
+          for (int i = 0; i < 9; ++i) {
+            ss >> current_pose.target_l_rot.data()[i];
+          }
+        } else if (key == "target_r_pos") {
+          double x, y, z;
+          if (ss >> x >> y >> z) {
+            current_pose.target_r_pos = Eigen::Vector3d(x, y, z);
+          }
+        } else if (key == "target_r_rot") {
+          for (int i = 0; i < 9; ++i) {
+            ss >> current_pose.target_r_rot.data()[i];
+          }
+        } else if (key == "gripper_l_pos") {
+          ss >> current_pose.gripper_l_pos;
+        } else if (key == "gripper_r_pos") {
+          ss >> current_pose.gripper_r_pos;
+        }
+      }
+    }
+    if (has_pose && !current_pose_name.empty()) {
+      file_poses[current_pose_name] = current_pose;
+    }
+    in.close();
+    return file_poses;
+  }
+
+  bool write_poses_to_file(const std::map<std::string, PoseState> &file_poses) {
+    std::string filepath = "/home/lys/robotis_ws/src/ai_worker/ffw_collision_checker/config/poses.txt";
+    try {
+      std::filesystem::path p(filepath);
+      if (p.has_parent_path()) {
+        std::filesystem::create_directories(p.parent_path());
+      }
+      std::ofstream out(filepath);
+      if (!out.is_open()) {
+        return false;
+      }
+      for (const auto &[name, pose] : file_poses) {
+        out << "[" << name << "]\n";
+        out << "target_l_pos " << pose.target_l_pos.x() << " " << pose.target_l_pos.y() << " " << pose.target_l_pos.z() << "\n";
+        out << "target_l_rot";
+        for (int i = 0; i < 9; ++i) out << " " << pose.target_l_rot.data()[i];
+        out << "\n";
+        out << "target_r_pos " << pose.target_r_pos.x() << " " << pose.target_r_pos.y() << " " << pose.target_r_pos.z() << "\n";
+        out << "target_r_rot";
+        for (int i = 0; i < 9; ++i) out << " " << pose.target_r_rot.data()[i];
+        out << "\n";
+        out << "gripper_l_pos " << pose.gripper_l_pos << "\n";
+        out << "gripper_r_pos " << pose.gripper_r_pos << "\n\n";
+      }
+      out.close();
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
   void pose_callback_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (solving_to_home_) {
+      return;
+    }
     Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
                           msg->pose.position.z);
     Eigen::Quaterniond rot(msg->pose.orientation.w, msg->pose.orientation.x,
@@ -703,6 +1178,9 @@ private:
 
   void pose_callback_r(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (solving_to_home_) {
+      return;
+    }
     Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
                           msg->pose.position.z);
     Eigen::Quaterniond rot(msg->pose.orientation.w, msg->pose.orientation.x,
@@ -818,7 +1296,14 @@ private:
   Eigen::Isometry3d initial_r_ = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d target_l_ = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d target_r_ = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d xml_home_l_ = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d xml_home_r_ = Eigen::Isometry3d::Identity();
   std::mutex pose_mutex_;
+
+  std::map<std::string, PoseState> memory_poses_;
+  std::atomic<bool> pose_load_requested_{false};
+  PoseState target_to_load_;
+  std::string active_pose_name_;
 
   bool first_msg_l_ = true;
   bool first_msg_r_ = true;
@@ -855,6 +1340,11 @@ private:
 
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr tree_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr list_srv_;
+  rclcpp::Service<ffw_collision_checker::srv::ToggleJointGroup>::SharedPtr toggle_group_srv_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_to_home_srv_;
+  rclcpp::Service<ffw_collision_checker::srv::SaveLoadPose>::SharedPtr save_pose_srv_;
+  rclcpp::Service<ffw_collision_checker::srv::SaveLoadPose>::SharedPtr load_pose_srv_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr list_saved_poses_srv_;
   std::function<std::string()> tree_cb_;
   std::function<std::string()> list_cb_;
 
@@ -864,12 +1354,22 @@ private:
       right_traj_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
       lift_traj_pub_;
+  rclcpp::Publisher<ffw_collision_checker::msg::CollisionDebug>::SharedPtr collision_debug_pub_;
 
   bool hardware_mode_ = true;
   std::atomic<bool> hardware_sync_requested_{false};
   std::string current_mode_ = "BASE";
   sensor_msgs::msg::JointState latest_real_joints_;
   int joint_msg_count_ = 0;
+
+  std::atomic<bool> home_reset_requested_{false};
+  std::atomic<bool> solving_to_home_{false};
+  std::atomic<int> homing_ticks_{0};
+  bool left_arm_enabled_ = true;
+  bool right_arm_enabled_ = true;
+  bool lift_enabled_ = true;
+  bool collision_debug_ = true;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
   std::vector<std::string> frozen_joints_{"head"};
   geometry_msgs::msg::PoseStamped latest_obstacle_pose_;
@@ -880,6 +1380,29 @@ public:
   bool is_hardware_mode() const { return hardware_mode_; }
   bool is_sync_requested() const { return hardware_sync_requested_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
+  bool is_solving_to_home() const { return solving_to_home_; }
+  void stop_solving_to_home() { solving_to_home_ = false; }
+  int get_homing_ticks() const { return homing_ticks_; }
+  void increment_homing_ticks() { homing_ticks_++; }
+  void reset_homing_ticks() { homing_ticks_ = 0; }
+
+  bool is_left_arm_enabled() {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    return left_arm_enabled_;
+  }
+  bool is_right_arm_enabled() {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    return right_arm_enabled_;
+  }
+
+  bool is_collision_debug_enabled() {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    return collision_debug_;
+  }
+
+  void publish_collision_debug(const ffw_collision_checker::msg::CollisionDebug &msg) {
+    collision_debug_pub_->publish(msg);
+  }
 
   int get_and_reset_joint_msg_count() {
     std::lock_guard<std::mutex> lock(pose_mutex_);
@@ -1075,6 +1598,8 @@ int main(int argc, char **argv) {
 
   while (viewer.enabled() && rclcpp::ok()) {
     solver_cfg.frozen_joints = node->get_frozen_joints();
+    solver_cfg.left_weight_scale = node->is_left_arm_enabled() ? 1.0 : 0.0;
+    solver_cfg.right_weight_scale = node->is_right_arm_enabled() ? 1.0 : 0.0;
 
     Eigen::Vector3d obs_pos;
     Eigen::Quaterniond obs_quat;
@@ -1086,10 +1611,19 @@ int main(int argc, char **argv) {
           d->mocap_pos[3 * mocap_id + 0] = obs_pos.x();
           d->mocap_pos[3 * mocap_id + 1] = obs_pos.y();
           d->mocap_pos[3 * mocap_id + 2] = obs_pos.z();
-          d->mocap_quat[4 * mocap_id + 0] = obs_quat.w();
-          d->mocap_quat[4 * mocap_id + 1] = obs_quat.x();
-          d->mocap_quat[4 * mocap_id + 2] = obs_quat.y();
-          d->mocap_quat[4 * mocap_id + 3] = obs_quat.z();
+          
+          double q_norm = obs_quat.norm();
+          if (std::abs(q_norm - 1.0) < 0.1) {
+            d->mocap_quat[4 * mocap_id + 0] = obs_quat.w();
+            d->mocap_quat[4 * mocap_id + 1] = obs_quat.x();
+            d->mocap_quat[4 * mocap_id + 2] = obs_quat.y();
+            d->mocap_quat[4 * mocap_id + 3] = obs_quat.z();
+          } else {
+            d->mocap_quat[4 * mocap_id + 0] = 1.0;
+            d->mocap_quat[4 * mocap_id + 1] = 0.0;
+            d->mocap_quat[4 * mocap_id + 2] = 0.0;
+            d->mocap_quat[4 * mocap_id + 3] = 0.0;
+          }
         }
       }
     }
@@ -1113,7 +1647,63 @@ int main(int argc, char **argv) {
         solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
                          col_cfg, err_hist, dist_hist);
 
+    if (node->is_solving_to_home()) {
+      node->increment_homing_ticks();
+      bool arrived = (res.error < 2.0 * solver_cfg.tolerance);
+
+      static int stall_counter = 0;
+      if (res.stalled) {
+        stall_counter++;
+      } else {
+        stall_counter = 0;
+      }
+
+      bool timeout = (node->get_homing_ticks() > 500); // 5 seconds timeout
+      bool stalled = (stall_counter > 50); // 0.5s solver stall/stagnation limit
+
+      if (arrived || timeout || stalled) {
+        node->stop_solving_to_home();
+        stall_counter = 0;
+        if (arrived) {
+          RCLCPP_INFO(node->get_logger(), "Robot has successfully arrived at target posture. Teleop resumed.");
+        } else if (timeout) {
+          RCLCPP_WARN(node->get_logger(), "Homing/Target-seeking timed out (5s limit). Resuming teleop at current state.");
+        } else {
+          RCLCPP_WARN(node->get_logger(), "Homing/Target-seeking stagnated/stalled. Resuming teleop at current state.");
+        }
+      }
+    }
+
     viewer.setCollisions(res.contacts.closest);
+
+    if (node->is_collision_debug_enabled()) {
+      ffw_collision_checker::msg::CollisionDebug debug_msg;
+      bool found_close_contact = false;
+      for (const auto &c : res.contacts.closest) {
+        if (c.dist < col_cfg.collision_margin * 1.5 && c.dist > -0.3) {
+          found_close_contact = true;
+          const char *g1_name = mj_id2name(m, mjOBJ_GEOM, c.geom1);
+          const char *g2_name = mj_id2name(m, mjOBJ_GEOM, c.geom2);
+          const char *b1_name = mj_id2name(m, mjOBJ_BODY, c.body1);
+          const char *b2_name = mj_id2name(m, mjOBJ_BODY, c.body2);
+          
+          debug_msg.geom1_names.push_back(g1_name ? g1_name : "unnamed");
+          debug_msg.geom2_names.push_back(g2_name ? g2_name : "unnamed");
+          debug_msg.body1_names.push_back(b1_name ? b1_name : "unnamed");
+          debug_msg.body2_names.push_back(b2_name ? b2_name : "unnamed");
+          debug_msg.distances.push_back(c.dist);
+          debug_msg.p1_x.push_back(c.p1.x());
+          debug_msg.p1_y.push_back(c.p1.y());
+          debug_msg.p1_z.push_back(c.p1.z());
+          debug_msg.p2_x.push_back(c.p2.x());
+          debug_msg.p2_y.push_back(c.p2.y());
+          debug_msg.p2_z.push_back(c.p2.z());
+        }
+      }
+      if (found_close_contact) {
+        node->publish_collision_debug(debug_msg);
+      }
+    }
 
     // Print solver status every 20 ticks or if stalled
     if (++step_counter % 20 == 0 || res.stalled) {
@@ -1122,8 +1712,14 @@ int main(int argc, char **argv) {
 
     node->update_grippers(m, d);
 
+    node->apply_home_reset(m, d);
+    node->apply_pose_load(m, d);
+
     // Process any hardware sync requests before mj_forward
     node->apply_hardware_sync(m, d);
+
+    // Sync grippers and mimics to MuJoCo qpos
+    node->apply_gripper_sync(m, d);
 
     // Ensure simulation state is updated for rendering
     mj_forward(m, d);

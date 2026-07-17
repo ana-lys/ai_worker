@@ -50,7 +50,7 @@ def generate_launch_description():
             'base_joy_topic': '/right/joy',
             'aux_joy_topic':  '/left/joy',
             'head_topic': '/leader/joystick_controller_left/joint_trajectory',
-            'max_linear_vel': 0.3,
+            'max_linear_vel': 0.6,
             'max_angular_vel': 0.5,
             'head_step': 0.03125,
             'axis_x': 1,
