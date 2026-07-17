@@ -1643,13 +1643,18 @@ int main(int argc, char **argv) {
 
     // Run one gradient step continuously in ALL modes.
     // In BASE mode, targets are stationary except for synchronized Z movement.
+    ffw_ik::SolverConfig active_cfg = solver_cfg;
+    if (node->is_solving_to_home()) {
+      active_cfg.joint_vel_limit = 0.5; // limit to 0.5 rad/s for slow/safe homing/solving
+    }
+
     ffw_ik::StepResult res =
-        solver.solveStep(d, current_target_l, current_target_r, solver_cfg,
+        solver.solveStep(d, current_target_l, current_target_r, active_cfg,
                          col_cfg, err_hist, dist_hist);
 
     if (node->is_solving_to_home()) {
       node->increment_homing_ticks();
-      bool arrived = (res.error < 2.0 * solver_cfg.tolerance);
+      bool arrived = (res.error < 2.0 * active_cfg.tolerance);
 
       static int stall_counter = 0;
       if (res.stalled) {
