@@ -22,8 +22,10 @@
     
     <!-- Dynamic Obstacle (Mocap body so it can be moved from C++ without physics) -->
     <!-- Size is half-extents: 0.5*2 = 1m X, 1.0*2 = 2m Y, 0.05*2 = 0.1m Z -->
+    <!--
     <body name="dynamic_obstacle" pos="1.0 0 1.0" mocap="true">
       <geom type="box" size="0.5 1.0 0.05" rgba="0.8 0.2 0.2 0.5"/>
     </body>
+    -->
   </worldbody>
 </mujoco>
