@@ -263,8 +263,9 @@ private:
             cal_offset_ms = ((t1_ms + t4_ms) / 2.0) - oakt;
             double rtt = t4_ms - t1_ms;
             RCLCPP_INFO(this->get_logger(),
-                        "[OAK-D] Calibration: RTT=%.1fms offset=%.1fms",
-                        rtt, cal_offset_ms);
+                        "[OAK-D] Calibration: RTT=%.3fms offset=%.1fms  "
+                        "t1=%.1f t4=%.1f oakt=%.1f",
+                        rtt, cal_offset_ms, t1_ms, t4_ms, oakt);
             break;
           }
         }
@@ -324,16 +325,28 @@ private:
       // Compute one-way latency using RTT-calibrated clock offset
       double receiver_now_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now().time_since_epoch()).count();
-      double latency = receiver_now_ms - (tw_ts + cal_offset_ms);
-      if (latency < 0.0) latency = 0.0;
-      int lat_int = static_cast<int>(std::round(latency));
+      double raw_latency = receiver_now_ms - (tw_ts + cal_offset_ms);
+      int lat_int = static_cast<int>(std::round(std::max(0.0, raw_latency)));
       last_oakd_latency_str_ = " | Latency: " + std::to_string(lat_int) + " ms";
+
+      // Debug: print raw values whenever latency clamps to 0
+      if (raw_latency <= 1.0) {
+        RCLCPP_INFO(this->get_logger(),
+          "LatDBG tw_ts=%.1f recv=%.1f cal_off=%.1f sum=%.1f raw=%.3f lat=%d",
+          tw_ts, receiver_now_ms, cal_offset_ms,
+          tw_ts + cal_offset_ms, raw_latency, lat_int);
+      }
+
       latest_telemetry_["OAK-D"] = std::string(buffer) + last_oakd_latency_str_;
     } else {
       // System info or uncalibrated: show the message + last known latency (if any)
       std::string enriched = buffer;
       if (!last_oakd_latency_str_.empty()) {
         enriched += last_oakd_latency_str_;
+      }
+      if (tw_ts < 0.0) {
+        RCLCPP_DEBUG(this->get_logger(),
+          "LatDBG no TW: field in: %s", buffer);
       }
       latest_telemetry_["OAK-D"] = enriched;
     }
