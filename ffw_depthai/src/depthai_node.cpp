@@ -106,6 +106,52 @@ int main(int argc, char **argv) {
   telemetry_addr.sin_port = htons(telemetry_port);
   inet_pton(AF_INET, dest_ip.c_str(), &telemetry_addr.sin_addr);
 
+  // ── RTT Calibration: bind telemetry socket to receive CAL_REQ ──────────
+  struct sockaddr_in local_telem_addr;
+  memset(&local_telem_addr, 0, sizeof(local_telem_addr));
+  local_telem_addr.sin_family = AF_INET;
+  local_telem_addr.sin_port = htons(telemetry_port);
+  local_telem_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (bind(telemetry_sock, (struct sockaddr*)&local_telem_addr,
+           sizeof(local_telem_addr)) < 0) {
+    RCLCPP_WARN(node->get_logger(), "Calibration bind failed — no RTT handshake");
+  }
+
+  // Receive timeout so the cal thread can check rclcpp::ok()
+  struct timeval cal_tv;
+  cal_tv.tv_sec = 1;
+  cal_tv.tv_usec = 0;
+  setsockopt(telemetry_sock, SOL_SOCKET, SO_RCVTIMEO, &cal_tv, sizeof(cal_tv));
+
+  // Latest OAK-D HW timestamp, shared with the calibration thread
+  std::atomic<double> latest_oakd_hw_ms{-1.0};
+
+  // Calibration listener thread (non-blocking, detached)
+  std::thread cal_thread([&]() {
+    char buf[256];
+    struct sockaddr_in from_addr;
+    socklen_t from_len;
+    while (rclcpp::ok()) {
+      from_len = sizeof(from_addr);
+      int n = recvfrom(telemetry_sock, buf, sizeof(buf) - 1, 0,
+                       (struct sockaddr*)&from_addr, &from_len);
+      if (n > 0) {
+        buf[n] = '\0';
+        if (strncmp(buf, "CAL_REQ", 7) == 0) {
+          double oakt = latest_oakd_hw_ms.load();
+          if (oakt >= 0.0) {
+            char resp[256];
+            int rn = snprintf(resp, sizeof(resp),
+                              "CAL_RES oakt=%.3f", oakt);
+            sendto(telemetry_sock, resp, rn, 0,
+                   (struct sockaddr*)&from_addr, sizeof(from_addr));
+          }
+        }
+      }
+    }
+  });
+  cal_thread.detach();
+
   // ── GStreamer Pipeline ───────────────────────────────────────────────────
   GError *error = nullptr;
   std::string gst_pipeline_str;
@@ -199,8 +245,11 @@ int main(int argc, char **argv) {
 
       frame_count++;
 
-      // Telemetry: track worst inter-frame gap
+      // Publish latest OAK-D HW timestamp for the calibration thread
       double hw_ts = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6;
+      latest_oakd_hw_ms.store(hw_ts);
+
+      // Telemetry: track worst inter-frame gap
       if (last_frame_ts >= 0.0) {
         double gap = hw_ts - last_frame_ts;
         if (gap > worst_delay_ms) worst_delay_ms = gap;
@@ -215,7 +264,8 @@ int main(int argc, char **argv) {
         std::ostringstream ss;
         ss << "[OAK-D] FPS: " << std::fixed << std::setprecision(1) << fps_val
            << " | Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay_ms << " ms"
-           << " | Codec: " << (use_h264 ? "H264-Baseline" : "MJPEG");
+           << " | Codec: " << (use_h264 ? "H264-Baseline" : "MJPEG")
+           << " | HW:" << std::fixed << std::setprecision(1) << hw_ts;
         sendUdpText(telemetry_sock, telemetry_addr, ss.str());
         last_reported_count = frame_count;
         last_report_time = now_tp;

@@ -12,6 +12,7 @@
 #include <atomic>
 #include <ctime>
 #include <cstdlib>
+#include <cstring>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -76,9 +77,9 @@ public:
     int rs_telemetry_port = base_port + 200;
     threads_.emplace_back(&RealsenseUDPReceiver::telemetryReceiverLoop, this, "RS", rs_telemetry_port);
 
-    // OAK-D (depthai) telemetry on depthai_video_port + 200
+    // OAK-D (depthai) telemetry on depthai_video_port + 200 (bidirectional — RTT calibration)
     int depthai_telemetry_port = depthai_video_port + 200;
-    threads_.emplace_back(&RealsenseUDPReceiver::telemetryReceiverLoop, this, "OAK-D", depthai_telemetry_port);
+    threads_.emplace_back(&RealsenseUDPReceiver::oakdTelemetryLoop, this, depthai_telemetry_port);
   }
 
   ~RealsenseUDPReceiver() {
@@ -183,6 +184,155 @@ private:
       }
     }
     close(sock);
+  }
+
+  void oakdTelemetryLoop(int port) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return;
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+      close(sock);
+      return;
+    }
+
+    RCLCPP_INFO(this->get_logger(),
+                "[Telemetry/OAK-D] Listening on UDP %d (RTT calibration enabled)", port);
+
+    char buffer[1024];
+    struct sockaddr_in sender_addr;
+    socklen_t sender_len;
+    bool have_sender = false;
+
+    // Calibration state
+    double cal_offset_ms = 0.0;
+    auto last_cal_req = std::chrono::steady_clock::now();
+    const auto cal_interval = std::chrono::seconds(30);
+
+    while (running_ && rclcpp::ok()) {
+      auto now = std::chrono::steady_clock::now();
+
+      // ── Periodic RTT calibration ─────────────────────────────────────
+      if (have_sender && (now - last_cal_req) >= cal_interval) {
+        auto t1 = std::chrono::steady_clock::now();
+        sendto(sock, "CAL_REQ", 7, 0,
+               (struct sockaddr*)&sender_addr, sizeof(sender_addr));
+
+        // Tight timeout for the response (200 ms)
+        struct timeval cal_tv;
+        cal_tv.tv_sec = 0;
+        cal_tv.tv_usec = 200000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &cal_tv, sizeof(cal_tv));
+
+        // Retry up to 5 times in case a telemetry packet arrives first
+        for (int attempt = 0; attempt < 5; ++attempt) {
+          struct sockaddr_in from;
+          socklen_t from_len = sizeof(from);
+          char resp[256];
+          int n = recvfrom(sock, resp, sizeof(resp) - 1, 0,
+                           (struct sockaddr*)&from, &from_len);
+          if (n <= 0) break;  // timeout → give up
+
+          resp[n] = '\0';
+
+          // If telemetry arrived during the cal window, consume it normally
+          if (strncmp(resp, "[OAK-D]", 7) == 0) {
+            processOakdTelemetry(resp, cal_offset_ms);
+            continue;  // try recvfrom again for CAL_RES
+          }
+
+          double oakt = -1.0;
+          if (sscanf(resp, "CAL_RES oakt=%lf", &oakt) == 1 && oakt >= 0.0) {
+            auto t4 = std::chrono::steady_clock::now();
+            double t1_ms = std::chrono::duration<double, std::milli>(
+                               t1.time_since_epoch()).count();
+            double t4_ms = std::chrono::duration<double, std::milli>(
+                               t4.time_since_epoch()).count();
+            // offset = receiver_steady_time - oakd_hw_time
+            // Use midpoint of (T1, T4) to cancel out symmetric RTT
+            cal_offset_ms = ((t1_ms + t4_ms) / 2.0) - oakt;
+            double rtt = t4_ms - t1_ms;
+            RCLCPP_INFO(this->get_logger(),
+                        "[OAK-D] Calibration: RTT=%.1fms offset=%.1fms",
+                        rtt, cal_offset_ms);
+            break;
+          }
+        }
+
+        // Restore normal 1s timeout
+        struct timeval long_tv;
+        long_tv.tv_sec = 1;
+        long_tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &long_tv, sizeof(long_tv));
+
+        last_cal_req = now;
+        continue;
+      }
+
+      // ── Normal telemetry receive ─────────────────────────────────────
+      sender_len = sizeof(sender_addr);
+      int n = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
+                       (struct sockaddr*)&sender_addr, &sender_len);
+      if (n > 0) {
+        buffer[n] = '\0';
+
+        // Skip stray CAL_RES (shouldn't happen outside request window)
+        if (strncmp(buffer, "CAL_RES", 7) == 0) continue;
+
+        // First packet from a new sender? Save address for calibration.
+        if (!have_sender) {
+          have_sender = true;
+          // Trigger first calibration in ~5 seconds
+          last_cal_req = std::chrono::steady_clock::now() - cal_interval
+                       + std::chrono::seconds(5);
+          char ip_str[INET_ADDRSTRLEN];
+          inet_ntop(AF_INET, &sender_addr.sin_addr, ip_str, sizeof(ip_str));
+          RCLCPP_INFO(this->get_logger(),
+                      "[OAK-D] Sender identified: %s:%d",
+                      ip_str, ntohs(sender_addr.sin_port));
+        }
+
+        processOakdTelemetry(buffer, cal_offset_ms);
+      }
+    }
+    close(sock);
+  }
+
+  void processOakdTelemetry(const char *buffer, double cal_offset_ms) {
+    if (!buffer || !*buffer) return;
+
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+
+    // Parse HW:<ts> from the telemetry string
+    double hw_ts = -1.0;
+    const char *hw_pos = strstr(buffer, "HW:");
+    if (hw_pos) {
+      hw_ts = std::atof(hw_pos + 3);
+    }
+
+    // Build enriched telemetry string with computed latency
+    std::string enriched = buffer;
+    if (hw_ts >= 0.0 && cal_offset_ms >= 0.0) {
+      double receiver_now_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      double latency = receiver_now_ms - (hw_ts + cal_offset_ms);
+      if (latency < 0.0) latency = 0.0;  // clamp negative due to clock drift
+      enriched += " | Latency: " + std::to_string(static_cast<int>(std::round(latency))) + " ms";
+    } else {
+      enriched += " | Latency: N/A (calibrating...)";
+    }
+
+    latest_telemetry_["OAK-D"] = enriched;
   }
 
   void zedStreamLoop(int port) {
