@@ -773,7 +773,7 @@ public:
 
     trajectory_msgs::msg::JointTrajectoryPoint point;
     point.time_from_start.sec = 0;
-    point.time_from_start.nanosec = 0;
+    point.time_from_start.nanosec = 20000000; // 20 ms
 
     for (const auto &name : joint_names) {
       traj.joint_names.push_back(name);
@@ -876,7 +876,17 @@ public:
     int h1 = mj_name2id(m, mjOBJ_JOINT, "head_joint1");
     int h2 = mj_name2id(m, mjOBJ_JOINT, "head_joint2");
 
-    if (hardware_mode_ && joint_msg_count_ > 0 && !solving_to_home_) {
+    if (solving_to_home_) {
+      for (int i = 0; i < 2; ++i) {
+        double diff = head_target_pos_[i] - latest_head_pos_[i];
+        double max_step = 0.01; // 1.0 rad/s at 100Hz
+        if (std::abs(diff) > max_step) {
+          latest_head_pos_[i] += (diff > 0 ? max_step : -max_step);
+        } else {
+          latest_head_pos_[i] = head_target_pos_[i];
+        }
+      }
+    } else if (hardware_mode_ && joint_msg_count_ > 0) {
       double diff1 = 0.0;
       double diff2 = 0.0;
       bool found_h1 = false;
@@ -970,7 +980,7 @@ public:
     accum_r_rot_.setIdentity();
     first_msg_r_ = true;
 
-    latest_head_pos_ = {0.0, 0.0};
+    head_target_pos_ = {0.0, 0.0};
 
     home_reset_requested_ = false;
     RCLCPP_INFO(this->get_logger(), "Home reset triggered: re-enabled all groups and solving back to XML home posture safely!");
@@ -1014,8 +1024,8 @@ public:
     gripper_l_pos_ = target_to_load_.gripper_l_pos;
     gripper_r_pos_ = target_to_load_.gripper_r_pos;
 
-    latest_head_pos_[0] = target_to_load_.head_joint1_pos;
-    latest_head_pos_[1] = target_to_load_.head_joint2_pos;
+    head_target_pos_[0] = target_to_load_.head_joint1_pos;
+    head_target_pos_[1] = target_to_load_.head_joint2_pos;
 
     pose_load_requested_ = false;
     RCLCPP_INFO(this->get_logger(), "Loaded pose '%s' safely! Homing solver started.", active_pose_name_.c_str());
@@ -1461,6 +1471,7 @@ private:
   geometry_msgs::msg::PoseStamped latest_obstacle_pose_;
   bool obstacle_pose_received_{false};
   std::vector<double> latest_head_pos_{0.0, 0.0};
+  std::vector<double> head_target_pos_{0.0, 0.0};
 
 public:
   bool is_hardware_mode() const { return hardware_mode_; }
