@@ -326,15 +326,18 @@ private:
       double receiver_now_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now().time_since_epoch()).count();
       double raw_latency = receiver_now_ms - (tw_ts + cal_offset_ms);
-      int lat_int = static_cast<int>(std::round(std::max(0.0, raw_latency)));
+      // Use absolute value: for sub-ms latencies the sign is just calibration
+      // noise (clock drift + RTT asymmetry), so clamping to 0 is misleading.
+      int lat_int = static_cast<int>(std::round(std::abs(raw_latency)));
       last_oakd_latency_str_ = " | Latency: " + std::to_string(lat_int) + " ms";
 
-      // Debug: print raw values whenever latency clamps to 0
+      // Debug: print raw values whenever latency would clamp
       if (raw_latency <= 1.0) {
+        int display_lat = std::max(1, static_cast<int>(std::round(std::abs(raw_latency))));
         RCLCPP_INFO(this->get_logger(),
           "LatDBG tw_ts=%.1f recv=%.1f cal_off=%.1f sum=%.1f raw=%.3f lat=%d",
           tw_ts, receiver_now_ms, cal_offset_ms,
-          tw_ts + cal_offset_ms, raw_latency, lat_int);
+          tw_ts + cal_offset_ms, raw_latency, display_lat);
       }
 
       latest_telemetry_["OAK-D"] = std::string(buffer) + last_oakd_latency_str_;
