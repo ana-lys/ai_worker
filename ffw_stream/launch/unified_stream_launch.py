@@ -19,6 +19,11 @@ def generate_launch_description():
         default_value='d435',
         description='RGB camera source: d435, zedm, or oakd_lite'
     )
+    use_h264_arg = DeclareLaunchArgument(
+        'use_h264',
+        default_value='true',
+        description='OAK-D codec: true=H264 Baseline (default), false=MJPEG'
+    )
 
     def launch_setup(context, *args, **kwargs):
         dest_ip = LaunchConfiguration('dest_ip').perform(context)
@@ -66,7 +71,8 @@ def generate_launch_description():
                     executable='depthai_udp_streamer',
                     name='depthai_udp_streamer',
                     output='screen',
-                    arguments=[dest_ip, base_port, fps]
+                    arguments=[dest_ip, base_port, fps],
+                    parameters=[{'use_h264': LaunchConfiguration('use_h264')}]
                 )
             )
         elif rgb_source != 'd435':
@@ -82,5 +88,6 @@ def generate_launch_description():
         fps_arg,
         enable_d405s_arg,
         rgb_source_arg,
+        use_h264_arg,
         OpaqueFunction(function=launch_setup)
     ])

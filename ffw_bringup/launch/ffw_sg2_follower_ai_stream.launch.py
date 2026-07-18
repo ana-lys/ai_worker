@@ -74,6 +74,8 @@ def generate_launch_description():
                               description='Destination IP for UDP Streamer'),
         DeclareLaunchArgument('base_port', default_value='9000',
                               description='Base UDP port for UDP Streamer'),
+        DeclareLaunchArgument('use_h264', default_value='true',
+                              description='OAK-D codec: true=H264 Baseline (default), false=MJPEG'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -91,6 +93,7 @@ def generate_launch_description():
     launch_rf2o = LaunchConfiguration('launch_rf2o')
     dest_ip = LaunchConfiguration('dest_ip')
     base_port = LaunchConfiguration('base_port')
+    use_h264 = LaunchConfiguration('use_h264')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -304,6 +307,7 @@ def generate_launch_description():
             'dest_ip': dest_ip,
             'base_port': base_port,
             'rgb_source': 'oakd_lite',
+            'use_h264': use_h264,
         }.items(),
         condition=IfCondition(launch_cameras)
     )
