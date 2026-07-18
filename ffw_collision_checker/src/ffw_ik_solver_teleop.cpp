@@ -678,7 +678,6 @@ public:
     publish_arm_trajectory(m, d, "l");
     publish_arm_trajectory(m, d, "r");
     publish_lift_trajectory(m, d);
-    publish_head_trajectory(m, d);
   }
 
   void publish_arm_trajectory(mjModel *m, mjData *d,
@@ -876,40 +875,17 @@ public:
     int h1 = mj_name2id(m, mjOBJ_JOINT, "head_joint1");
     int h2 = mj_name2id(m, mjOBJ_JOINT, "head_joint2");
 
-    if (solving_to_home_) {
-      for (int i = 0; i < 2; ++i) {
-        double diff = head_target_pos_[i] - latest_head_pos_[i];
-        double max_step = 0.01; // 1.0 rad/s at 100Hz
-        if (std::abs(diff) > max_step) {
-          latest_head_pos_[i] += (diff > 0 ? max_step : -max_step);
-        } else {
-          latest_head_pos_[i] = head_target_pos_[i];
-        }
-      }
-    } else if (hardware_mode_ && joint_msg_count_ > 0) {
-      double diff1 = 0.0;
-      double diff2 = 0.0;
-      bool found_h1 = false;
-      bool found_h2 = false;
+    if (hardware_mode_ && joint_msg_count_ > 0) {
       for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
         if (latest_real_joints_.name[i] == "head_joint1") {
-          diff1 = std::abs(latest_real_joints_.position[i] - latest_head_pos_[0]);
-          found_h1 = true;
+          latest_head_pos_[0] = latest_real_joints_.position[i];
         } else if (latest_real_joints_.name[i] == "head_joint2") {
-          diff2 = std::abs(latest_real_joints_.position[i] - latest_head_pos_[1]);
-          found_h2 = true;
+          latest_head_pos_[1] = latest_real_joints_.position[i];
         }
       }
-      bool head_arrived = (!found_h1 || diff1 < 0.05) && (!found_h2 || diff2 < 0.05);
-      if (head_arrived) {
-        for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
-          if (latest_real_joints_.name[i] == "head_joint1") {
-            latest_head_pos_[0] = latest_real_joints_.position[i];
-          } else if (latest_real_joints_.name[i] == "head_joint2") {
-            latest_head_pos_[1] = latest_real_joints_.position[i];
-          }
-        }
-      }
+    } else {
+      latest_head_pos_[0] = head_target_pos_[0];
+      latest_head_pos_[1] = head_target_pos_[1];
     }
 
     if (h1 >= 0) d->qpos[m->jnt_qposadr[h1]] = latest_head_pos_[0];
@@ -982,6 +958,19 @@ public:
 
     head_target_pos_ = {0.0, 0.0};
 
+    // Publish a single trajectory message to move head to home slowly (1.5s)
+    trajectory_msgs::msg::JointTrajectory traj;
+    traj.joint_names = {"head_joint1", "head_joint2"};
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.positions = {0.0, 0.0};
+    point.velocities = {0.0, 0.0};
+    point.time_from_start.sec = 1;
+    point.time_from_start.nanosec = 500000000; // 1.5s
+    traj.points.push_back(point);
+    if (head_traj_pub_) {
+      head_traj_pub_->publish(traj);
+    }
+
     home_reset_requested_ = false;
     RCLCPP_INFO(this->get_logger(), "Home reset triggered: re-enabled all groups and solving back to XML home posture safely!");
   }
@@ -1026,6 +1015,19 @@ public:
 
     head_target_pos_[0] = target_to_load_.head_joint1_pos;
     head_target_pos_[1] = target_to_load_.head_joint2_pos;
+
+    // Publish a single trajectory message to move head to loaded pose slowly (1.5s)
+    trajectory_msgs::msg::JointTrajectory traj;
+    traj.joint_names = {"head_joint1", "head_joint2"};
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.positions = {target_to_load_.head_joint1_pos, target_to_load_.head_joint2_pos};
+    point.velocities = {0.0, 0.0};
+    point.time_from_start.sec = 1;
+    point.time_from_start.nanosec = 500000000; // 1.5s
+    traj.points.push_back(point);
+    if (head_traj_pub_) {
+      head_traj_pub_->publish(traj);
+    }
 
     pose_load_requested_ = false;
     RCLCPP_INFO(this->get_logger(), "Loaded pose '%s' safely! Homing solver started.", active_pose_name_.c_str());
