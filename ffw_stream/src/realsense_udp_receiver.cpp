@@ -320,22 +320,23 @@ private:
       tw_ts = std::atof(tw_pos + 3);
     }
 
-    // Build enriched telemetry string with computed latency
-    std::string enriched = buffer;
     if (tw_ts >= 0.0 && cal_offset_ms >= 0.0) {
+      // Compute one-way latency using RTT-calibrated clock offset
       double receiver_now_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now().time_since_epoch()).count();
-      // latency = receiver_now - sender_tw_mapped_to_receiver_clock
-      // offset = receiver_time_at_cal - sender_time_at_cal
-      // mapped_sender_time = tw_ts + offset
       double latency = receiver_now_ms - (tw_ts + cal_offset_ms);
       if (latency < 0.0) latency = 0.0;
-      enriched += " | Latency: " + std::to_string(static_cast<int>(std::round(latency))) + " ms";
+      int lat_int = static_cast<int>(std::round(latency));
+      last_oakd_latency_str_ = " | Latency: " + std::to_string(lat_int) + " ms";
+      latest_telemetry_["OAK-D"] = std::string(buffer) + last_oakd_latency_str_;
     } else {
-      enriched += " | Latency: N/A (calibrating...)";
+      // System info or uncalibrated: show the message + last known latency (if any)
+      std::string enriched = buffer;
+      if (!last_oakd_latency_str_.empty()) {
+        enriched += last_oakd_latency_str_;
+      }
+      latest_telemetry_["OAK-D"] = enriched;
     }
-
-    latest_telemetry_["OAK-D"] = enriched;
   }
 
   void zedStreamLoop(int port) {
@@ -577,6 +578,7 @@ private:
 
   std::mutex telemetry_mutex_;
   std::map<std::string, std::string> latest_telemetry_;
+  std::string last_oakd_latency_str_;
 
   std::vector<std::thread> threads_;
   std::thread display_thread_;
