@@ -162,6 +162,9 @@ private:
       if (latest_phys_head_[0] != 0.0 || latest_phys_head_[1] != 0.0) {
         head_initialized_ = true;
       }
+    } else if (!was_moving_head_) {
+      current_head_pos_[0] = latest_phys_head_[0];
+      current_head_pos_[1] = latest_phys_head_[1];
     }
   }
 
@@ -248,6 +251,7 @@ private:
 
     std::lock_guard<std::mutex> lock(joint_mutex_);
 
+    bool publish_needed = false;
     if (is_moving) {
       double pan_cubed = pan * pan * pan;
       double pitch_cubed = pitch * pitch * pitch;
@@ -258,6 +262,7 @@ private:
           std::clamp(current_head_pos_[1] + (pan_cubed * head_step),
                      head_lower_limits_[1], head_upper_limits_[1]);
       was_moving_head_ = true;
+      publish_needed = true;
     } else if (was_moving_head_) {
       // Dead stop: snap target to actual physical position to instantly zero
       // out tracking error (only in hardware mode where physical states exist)
@@ -266,16 +271,19 @@ private:
         current_head_pos_[1] = latest_phys_head_[1];
       }
       was_moving_head_ = false;
+      publish_needed = true;
     }
 
-    trajectory_msgs::msg::JointTrajectory traj;
-    traj.joint_names = {"head_joint1", "head_joint2"};
-    trajectory_msgs::msg::JointTrajectoryPoint pt;
-    pt.time_from_start.nanosec = 50000000; // 50 ms
-    pt.positions = {current_head_pos_[0], current_head_pos_[1]};
-    pt.velocities = {0.0, 0.0};
-    traj.points.push_back(pt);
-    head_pub_->publish(traj);
+    if (publish_needed) {
+      trajectory_msgs::msg::JointTrajectory traj;
+      traj.joint_names = {"head_joint1", "head_joint2"};
+      trajectory_msgs::msg::JointTrajectoryPoint pt;
+      pt.time_from_start.nanosec = 50000000; // 50 ms
+      pt.positions = {current_head_pos_[0], current_head_pos_[1]};
+      pt.velocities = {0.0, 0.0};
+      traj.points.push_back(pt);
+      head_pub_->publish(traj);
+    }
   }
 
   // ── Members

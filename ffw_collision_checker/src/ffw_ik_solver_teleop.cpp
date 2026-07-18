@@ -311,12 +311,14 @@ private:
 };
 
 struct PoseState {
-  Eigen::Vector3d target_l_pos;
-  Eigen::Matrix3d target_l_rot;
-  Eigen::Vector3d target_r_pos;
-  Eigen::Matrix3d target_r_rot;
-  double gripper_l_pos;
-  double gripper_r_pos;
+  Eigen::Vector3d target_l_pos = Eigen::Vector3d::Zero();
+  Eigen::Matrix3d target_l_rot = Eigen::Matrix3d::Identity();
+  Eigen::Vector3d target_r_pos = Eigen::Vector3d::Zero();
+  Eigen::Matrix3d target_r_rot = Eigen::Matrix3d::Identity();
+  double gripper_l_pos = 0.0;
+  double gripper_r_pos = 0.0;
+  double head_joint1_pos = 0.0;
+  double head_joint2_pos = 0.0;
 };
 
 using std::placeholders::_1;
@@ -445,6 +447,8 @@ public:
           pose.target_r_rot = target_r_.linear();
           pose.gripper_l_pos = gripper_l_pos_;
           pose.gripper_r_pos = gripper_r_pos_;
+          pose.head_joint1_pos = latest_head_pos_[0];
+          pose.head_joint2_pos = latest_head_pos_[1];
 
           if (req->to_file) {
             auto file_poses = read_poses_from_file();
@@ -561,6 +565,9 @@ public:
     lift_traj_pub_ =
         this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
             "/leader/joystick_controller_right/joint_trajectory", 10);
+    head_traj_pub_ =
+        this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+            "/leader/joystick_controller_left/joint_trajectory", 10);
 
     locks_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/teleop_locks", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
@@ -590,6 +597,7 @@ public:
         "/leader/joystick_controller_left/joint_trajectory", 10,
         [this](const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
             std::lock_guard<std::mutex> lock(pose_mutex_);
+            if (solving_to_home_) return;
             if (!msg->points.empty()) {
                 for (size_t i = 0; i < msg->joint_names.size() && i < msg->points[0].positions.size(); ++i) {
                     if (msg->joint_names[i] == "head_joint1") latest_head_pos_[0] = msg->points[0].positions[i];
@@ -670,6 +678,7 @@ public:
     publish_arm_trajectory(m, d, "l");
     publish_arm_trajectory(m, d, "r");
     publish_lift_trajectory(m, d);
+    publish_head_trajectory(m, d);
   }
 
   void publish_arm_trajectory(mjModel *m, mjData *d,
@@ -756,6 +765,54 @@ public:
     }
   }
 
+  void publish_head_trajectory(mjModel *m, mjData *d) {
+    trajectory_msgs::msg::JointTrajectory traj;
+    traj.header.stamp = rclcpp::Time(0); // instant execution
+
+    std::vector<std::string> joint_names = {"head_joint1", "head_joint2"};
+
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.time_from_start.sec = 0;
+    point.time_from_start.nanosec = 0;
+
+    for (const auto &name : joint_names) {
+      traj.joint_names.push_back(name);
+      int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
+      if (jnt_id >= 0) {
+        point.positions.push_back(d->qpos[m->jnt_qposadr[jnt_id]]);
+      } else {
+        if (name == "head_joint1") {
+          point.positions.push_back(latest_head_pos_[0]);
+        } else {
+          point.positions.push_back(latest_head_pos_[1]);
+        }
+      }
+      point.velocities.push_back(0.0);
+    }
+
+    static std::vector<double> prev_head_positions;
+    bool changed = false;
+    if (prev_head_positions.size() != point.positions.size()) {
+      changed = true;
+    } else {
+      for (size_t i = 0; i < point.positions.size(); ++i) {
+        if (std::abs(point.positions[i] - prev_head_positions[i]) > 1e-4) {
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    if (!changed)
+      return;
+    prev_head_positions = point.positions;
+
+    traj.points.push_back(point);
+    if (head_traj_pub_) {
+      head_traj_pub_->publish(traj);
+    }
+  }
+
   void apply_hardware_sync(mjModel *m, mjData *d) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
     if (!hardware_sync_requested_)
@@ -819,12 +876,28 @@ public:
     int h1 = mj_name2id(m, mjOBJ_JOINT, "head_joint1");
     int h2 = mj_name2id(m, mjOBJ_JOINT, "head_joint2");
 
-    if (hardware_mode_) {
+    if (hardware_mode_ && joint_msg_count_ > 0 && !solving_to_home_) {
+      double diff1 = 0.0;
+      double diff2 = 0.0;
+      bool found_h1 = false;
+      bool found_h2 = false;
       for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
         if (latest_real_joints_.name[i] == "head_joint1") {
-          latest_head_pos_[0] = latest_real_joints_.position[i];
+          diff1 = std::abs(latest_real_joints_.position[i] - latest_head_pos_[0]);
+          found_h1 = true;
         } else if (latest_real_joints_.name[i] == "head_joint2") {
-          latest_head_pos_[1] = latest_real_joints_.position[i];
+          diff2 = std::abs(latest_real_joints_.position[i] - latest_head_pos_[1]);
+          found_h2 = true;
+        }
+      }
+      bool head_arrived = (!found_h1 || diff1 < 0.05) && (!found_h2 || diff2 < 0.05);
+      if (head_arrived) {
+        for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
+          if (latest_real_joints_.name[i] == "head_joint1") {
+            latest_head_pos_[0] = latest_real_joints_.position[i];
+          } else if (latest_real_joints_.name[i] == "head_joint2") {
+            latest_head_pos_[1] = latest_real_joints_.position[i];
+          }
         }
       }
     }
@@ -897,6 +970,8 @@ public:
     accum_r_rot_.setIdentity();
     first_msg_r_ = true;
 
+    latest_head_pos_ = {0.0, 0.0};
+
     home_reset_requested_ = false;
     RCLCPP_INFO(this->get_logger(), "Home reset triggered: re-enabled all groups and solving back to XML home posture safely!");
   }
@@ -938,6 +1013,9 @@ public:
 
     gripper_l_pos_ = target_to_load_.gripper_l_pos;
     gripper_r_pos_ = target_to_load_.gripper_r_pos;
+
+    latest_head_pos_[0] = target_to_load_.head_joint1_pos;
+    latest_head_pos_[1] = target_to_load_.head_joint2_pos;
 
     pose_load_requested_ = false;
     RCLCPP_INFO(this->get_logger(), "Loaded pose '%s' safely! Homing solver started.", active_pose_name_.c_str());
@@ -1106,6 +1184,10 @@ private:
           ss >> current_pose.gripper_l_pos;
         } else if (key == "gripper_r_pos") {
           ss >> current_pose.gripper_r_pos;
+        } else if (key == "head_joint1_pos") {
+          ss >> current_pose.head_joint1_pos;
+        } else if (key == "head_joint2_pos") {
+          ss >> current_pose.head_joint2_pos;
         }
       }
     }
@@ -1138,7 +1220,9 @@ private:
         for (int i = 0; i < 9; ++i) out << " " << pose.target_r_rot.data()[i];
         out << "\n";
         out << "gripper_l_pos " << pose.gripper_l_pos << "\n";
-        out << "gripper_r_pos " << pose.gripper_r_pos << "\n\n";
+        out << "gripper_r_pos " << pose.gripper_r_pos << "\n";
+        out << "head_joint1_pos " << pose.head_joint1_pos << "\n";
+        out << "head_joint2_pos " << pose.head_joint2_pos << "\n\n";
       }
       out.close();
       return true;
@@ -1354,6 +1438,8 @@ private:
       right_traj_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
       lift_traj_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+      head_traj_pub_;
   rclcpp::Publisher<ffw_collision_checker::msg::CollisionDebug>::SharedPtr collision_debug_pub_;
 
   bool hardware_mode_ = true;
