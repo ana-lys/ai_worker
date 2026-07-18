@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
   } else {
     // MJPEG sender (unchanged)
     gst_pipeline_str =
-      "appsrc name=src is-live=true format=3 do-timestamp=true block=true ! "
+      "appsrc name=src is-live=true format=3 do-timestamp=true block=false ! "
       "image/jpeg,framerate=30/1,width=1920,height=1080 ! "
       "rtpjpegpay ! "
       "udpsink host=192.168.0.241 port=9100 sync=false async=false";

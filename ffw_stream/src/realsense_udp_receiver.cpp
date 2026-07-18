@@ -198,12 +198,9 @@ private:
         //   - avdec_h264 max-threads=1: single-thread decode avoids thread-sync overhead
         //   - queue leaky=downstream: if decode is slow, drop old frames not new ones
         pipeline = "udpsrc port=" + std::to_string(port) +
-          " caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96\" ! "
-          "rtpjitterbuffer latency=0 ! "
-          "rtph264depay ! "
-          "h264parse ! "
-          "avdec_h264 max-threads=1 ! "
-          "videoconvert ! "
+          " buffer-size=2147483647 "
+          "caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+          "rtpjitterbuffer latency=20 ! rtph264depay ! decodebin ! videoconvert ! "
           "queue max-size-buffers=1 leaky=downstream ! "
           "appsink drop=true sync=false async=false max-buffers=1";
         RCLCPP_INFO(this->get_logger(), "[OAK-D] Using H264-Baseline receiver pipeline");
