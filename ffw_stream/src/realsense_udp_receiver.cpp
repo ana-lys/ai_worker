@@ -313,20 +313,23 @@ private:
 
     std::lock_guard<std::mutex> lock(telemetry_mutex_);
 
-    // Parse HW:<ts> from the telemetry string
-    double hw_ts = -1.0;
-    const char *hw_pos = strstr(buffer, "HW:");
-    if (hw_pos) {
-      hw_ts = std::atof(hw_pos + 3);
+    // Parse TW:<sender_host_ms> from the telemetry string (sender's steady_clock)
+    double tw_ts = -1.0;
+    const char *tw_pos = strstr(buffer, "TW:");
+    if (tw_pos) {
+      tw_ts = std::atof(tw_pos + 3);
     }
 
     // Build enriched telemetry string with computed latency
     std::string enriched = buffer;
-    if (hw_ts >= 0.0 && cal_offset_ms >= 0.0) {
+    if (tw_ts >= 0.0 && cal_offset_ms >= 0.0) {
       double receiver_now_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now().time_since_epoch()).count();
-      double latency = receiver_now_ms - (hw_ts + cal_offset_ms);
-      if (latency < 0.0) latency = 0.0;  // clamp negative due to clock drift
+      // latency = receiver_now - sender_tw_mapped_to_receiver_clock
+      // offset = receiver_time_at_cal - sender_time_at_cal
+      // mapped_sender_time = tw_ts + offset
+      double latency = receiver_now_ms - (tw_ts + cal_offset_ms);
+      if (latency < 0.0) latency = 0.0;
       enriched += " | Latency: " + std::to_string(static_cast<int>(std::round(latency))) + " ms";
     } else {
       enriched += " | Latency: N/A (calibrating...)";

@@ -547,3 +547,7 @@ install/
 log/
 build/
 
+# Mapping dataset artifacts (large mcap/csv scan files)
+ffw_mapping/scan_*/
+ffw_mapping/*_dataset/
+

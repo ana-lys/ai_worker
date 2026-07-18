@@ -245,19 +245,21 @@ int main(int argc, char **argv) {
 
       frame_count++;
 
-      // Publish latest OAK-D HW timestamp for the calibration thread
-      double hw_ts = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6;
-      latest_oakd_hw_ms.store(hw_ts);
+      // Sample sender host time for latency measurement (steady_clock, ms since boot)
+      auto send_now = std::chrono::steady_clock::now();
+      double send_host_ms = std::chrono::duration<double, std::milli>(
+          send_now.time_since_epoch()).count();
+      latest_oakd_hw_ms.store(send_host_ms);
 
       // Telemetry: track worst inter-frame gap
+      double hw_ts = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6;
       if (last_frame_ts >= 0.0) {
         double gap = hw_ts - last_frame_ts;
         if (gap > worst_delay_ms) worst_delay_ms = gap;
       }
       last_frame_ts = hw_ts;
 
-      auto now_tp = std::chrono::steady_clock::now();
-      double elapsed = std::chrono::duration<double>(now_tp - last_report_time).count();
+      double elapsed = std::chrono::duration<double>(send_now - last_report_time).count();
       if (elapsed >= 5.0) {
         int delta = frame_count - last_reported_count;
         double fps_val = delta / elapsed;
@@ -265,10 +267,10 @@ int main(int argc, char **argv) {
         ss << "[OAK-D] FPS: " << std::fixed << std::setprecision(1) << fps_val
            << " | Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay_ms << " ms"
            << " | Codec: " << (use_h264 ? "H264-Baseline" : "MJPEG")
-           << " | HW:" << std::fixed << std::setprecision(1) << hw_ts;
+           << " | TW:" << std::fixed << std::setprecision(1) << send_host_ms;
         sendUdpText(telemetry_sock, telemetry_addr, ss.str());
         last_reported_count = frame_count;
-        last_report_time = now_tp;
+        last_report_time = send_now;
         worst_delay_ms = 0.0;
       }
     }
