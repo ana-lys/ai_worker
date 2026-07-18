@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <atomic>
 
 void sendUdpText(int sock, const struct sockaddr_in &addr, const std::string &msg) {
   if (sock >= 0) {
@@ -39,6 +40,10 @@ int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<rclcpp::Node>("depthai_mjpeg_udp_node");
 
+  // ── ROS parameter: select codec ──────────────────────────────────────────
+  node->declare_parameter<bool>("use_h264", false);
+  const bool use_h264 = node->get_parameter("use_h264").as_bool();
+
   gst_init(nullptr, nullptr);
 
   std::shared_ptr<dai::Device> device;
@@ -50,7 +55,9 @@ int main(int argc, char **argv) {
     return -1;
   }
 
-  RCLCPP_INFO(node->get_logger(), "USB Speed: %d", static_cast<int>(device->getUsbSpeed()));
+  RCLCPP_INFO(node->get_logger(), "USB Speed: %d  |  codec: %s",
+              static_cast<int>(device->getUsbSpeed()),
+              use_h264 ? "H264-Baseline" : "MJPEG");
 
   dai::Pipeline pipeline(device);
 
@@ -62,11 +69,24 @@ int main(int argc, char **argv) {
   auto *videoOut = cam->requestOutput({1920, 1080}, dai::ImgFrame::Type::NV12);
 
   auto videoEnc = pipeline.create<dai::node::VideoEncoder>();
-  videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::MJPEG);
-  videoEnc->setQuality(90);
+
+  if (use_h264) {
+    // ── H264 Baseline: no B-frames → strictly linear PTS order ───────────
+    videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::H264_BASELINE);
+    videoEnc->setNumBFrames(0);           // explicitly disable B-frames (safety)
+    videoEnc->setKeyframeFrequency(30);   // IDR every 1s → fast recovery on packet loss
+    videoEnc->setBitrateKbps(8000);       // ~8 Mbps for 1080p30 (good quality)
+    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
+  } else {
+    // ── MJPEG fallback (original settings) ───────────────────────────────
+    videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::MJPEG);
+    videoEnc->setQuality(90);
+  }
 
   videoOut->link(videoEnc->input);
-  auto videoQueue = videoEnc->bitstream.createOutputQueue(8, false);
+
+  // Queue depth = 1, blocking = false → always drop oldest, never accumulate latency
+  auto videoQueue = videoEnc->bitstream.createOutputQueue(1, false);
 
   auto sysLog = pipeline.create<dai::node::SystemLogger>();
   sysLog->setRate(0.2f);
@@ -74,7 +94,7 @@ int main(int argc, char **argv) {
 
   pipeline.start();
 
-  // ==================== Telemetry UDP Socket ====================
+  // ── Telemetry UDP Socket ─────────────────────────────────────────────────
   const std::string dest_ip = "192.168.0.241";
   const int video_port = 9100;
   const int telemetry_port = video_port + 200; // 9300
@@ -86,15 +106,35 @@ int main(int argc, char **argv) {
   telemetry_addr.sin_port = htons(telemetry_port);
   inet_pton(AF_INET, dest_ip.c_str(), &telemetry_addr.sin_addr);
 
-  // ==================== GStreamer Pipeline ====================
+  // ── GStreamer Pipeline ───────────────────────────────────────────────────
   GError *error = nullptr;
-  GstElement *gst_pipeline = gst_parse_launch(
+  std::string gst_pipeline_str;
+
+  if (use_h264) {
+    // H264 RTP sender:
+    //   - video/x-h264 caps tell GStreamer the format before h264parse
+    //   - stream-format=byte-stream + alignment=au = one complete AU per buffer
+    //   - h264parse reframes NALs correctly for RTP payloading
+    //   - config-interval=1 sends SPS/PPS with every keyframe → receiver can
+    //     recover from late join or packet loss every IDR period (1s)
+    //   - block=false: if GStreamer can't keep up, we drop frames rather than stall
+    gst_pipeline_str =
+      "appsrc name=src is-live=true format=3 do-timestamp=false block=false "
+      "caps=\"video/x-h264,stream-format=byte-stream,alignment=au,"
+      "framerate=30/1,width=1920,height=1080,profile=baseline\" ! "
+      "h264parse ! "
+      "rtph264pay config-interval=1 pt=96 ! "
+      "udpsink host=192.168.0.241 port=9100 sync=false async=false";
+  } else {
+    // MJPEG sender (unchanged)
+    gst_pipeline_str =
       "appsrc name=src is-live=true format=3 do-timestamp=true block=true ! "
       "image/jpeg,framerate=30/1,width=1920,height=1080 ! "
       "rtpjpegpay ! "
-      "udpsink host=192.168.0.241 port=9100 sync=false async=false",
-      &error);
+      "udpsink host=192.168.0.241 port=9100 sync=false async=false";
+  }
 
+  GstElement *gst_pipeline = gst_parse_launch(gst_pipeline_str.c_str(), &error);
   if (error) {
     RCLCPP_ERROR(node->get_logger(), "GStreamer error: %s", error->message);
     g_error_free(error);
@@ -105,17 +145,21 @@ int main(int argc, char **argv) {
   GstElement *appsrc = gst_bin_get_by_name(GST_BIN(gst_pipeline), "src");
   gst_element_set_state(gst_pipeline, GST_STATE_PLAYING);
 
-  RCLCPP_INFO(node->get_logger(), "Streaming MJPEG over UDP to %s:%d, telemetry -> %s:%d",
+  RCLCPP_INFO(node->get_logger(), "Streaming %s over UDP to %s:%d, telemetry -> %s:%d",
+              use_h264 ? "H264-Baseline" : "MJPEG",
               dest_ip.c_str(), video_port, dest_ip.c_str(), telemetry_port);
 
+  // ── Frame loop ───────────────────────────────────────────────────────────
   int frame_count = 0;
   int last_reported_count = 0;
   auto last_report_time = std::chrono::steady_clock::now();
-  double last_frame_ts = -1.0; // hardware timestamp of last frame (ms)
+  double last_frame_ts = -1.0;
   double worst_delay_ms = 0.0;
 
+  // For H264 monotonic PTS: track first OAK-D hardware timestamp as baseline
+  double       hw_base_ms   = -1.0;
+
   while (rclcpp::ok() && pipeline.isRunning()) {
-    // Fixed: Use the correct get() overload
     bool hasTimedOut = false;
     auto videoFrame = videoQueue->get<dai::ImgFrame>(std::chrono::milliseconds(500), hasTimedOut);
 
@@ -129,8 +173,24 @@ int main(int argc, char **argv) {
         gst_buffer_unmap(buffer, &map);
       }
 
-      GST_BUFFER_PTS(buffer) = GST_CLOCK_TIME_NONE;
-      GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+      if (use_h264) {
+        // Set monotonic PTS from OAK-D hardware timestamp so GStreamer has a
+        // proper, strictly-increasing timeline. This is the key fix that
+        // prevents the decoder from getting confused about frame order.
+        double hw_ms = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6;
+        if (hw_base_ms < 0.0) {
+          hw_base_ms = hw_ms;
+        }
+        double elapsed_ms = hw_ms - hw_base_ms;
+        GstClockTime pts = (GstClockTime)(elapsed_ms * 1e6); // ms -> ns
+        GST_BUFFER_PTS(buffer) = pts;
+        GST_BUFFER_DTS(buffer) = pts;
+        GST_BUFFER_DURATION(buffer) = GST_SECOND / 30; // 1/30s in ns
+      } else {
+        // MJPEG: let do-timestamp=true handle it
+        GST_BUFFER_PTS(buffer) = GST_CLOCK_TIME_NONE;
+        GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+      }
 
       GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc), buffer);
       if (ret != GST_FLOW_OK) {
@@ -139,15 +199,14 @@ int main(int argc, char **argv) {
 
       frame_count++;
 
-      // Track hardware timestamp for delay reporting
-      double hw_ts = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6; // ms
+      // Telemetry: track worst inter-frame gap
+      double hw_ts = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6;
       if (last_frame_ts >= 0.0) {
         double gap = hw_ts - last_frame_ts;
         if (gap > worst_delay_ms) worst_delay_ms = gap;
       }
       last_frame_ts = hw_ts;
 
-      // Every 5 seconds: send FPS + worst delay, same format as realsense
       auto now_tp = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(now_tp - last_report_time).count();
       if (elapsed >= 5.0) {
@@ -155,7 +214,8 @@ int main(int argc, char **argv) {
         double fps_val = delta / elapsed;
         std::ostringstream ss;
         ss << "[OAK-D] FPS: " << std::fixed << std::setprecision(1) << fps_val
-           << " | Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay_ms << " ms";
+           << " | Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay_ms << " ms"
+           << " | Codec: " << (use_h264 ? "H264-Baseline" : "MJPEG");
         sendUdpText(telemetry_sock, telemetry_addr, ss.str());
         last_reported_count = frame_count;
         last_report_time = now_tp;
@@ -172,9 +232,7 @@ int main(int argc, char **argv) {
   }
 
   sendUdpText(telemetry_sock, telemetry_addr, "[OAK-D] Shutting down");
-  if (telemetry_sock >= 0) {
-    close(telemetry_sock);
-  }
+  if (telemetry_sock >= 0) close(telemetry_sock);
   gst_element_set_state(gst_pipeline, GST_STATE_NULL);
   gst_object_unref(appsrc);
   gst_object_unref(gst_pipeline);

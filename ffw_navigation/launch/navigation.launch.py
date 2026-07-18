@@ -70,7 +70,7 @@ def generate_launch_description():
         default_value=os.path.join(
             pkg_navigation,
             'config',
-            'navigation_mppi.yaml'
+            'navigation.yaml'
         ),
         description='Full path to the Nav2 params file (navigation + localization)'
     )

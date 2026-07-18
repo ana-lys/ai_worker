@@ -25,12 +25,14 @@ public:
     this->declare_parameter<bool>("enable_d405s", true);
     this->declare_parameter<int>("depthai_video_port", 9100);
     this->declare_parameter<std::string>("rgb_source", "zedm");
+    this->declare_parameter<std::string>("oakd_codec", "mjpeg"); // "mjpeg" or "h264"
     
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
     bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
     int depthai_video_port = this->get_parameter("depthai_video_port").as_int();
     rgb_source_ = this->get_parameter("rgb_source").as_string();
+    oakd_codec_ = this->get_parameter("oakd_codec").as_string();
 
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
@@ -188,13 +190,33 @@ private:
     std::string pipeline;
 
     if (rgb_source_ == "oakd_lite") {
-      // OAK-D streams MJPEG-over-RTP (rtpjpegpay on sender side)
-      // caps match the working: gst-launch-1.0 udpsrc port=9100 caps="application/x-rtp, media=video, encoding-name=JPEG, payload=26"
       feed_name = "OAK-D";
-      pipeline = "udpsrc port=" + std::to_string(port) +
-        " caps=\"application/x-rtp, media=video, encoding-name=JPEG, payload=26\" ! "
-        "rtpjpegdepay ! jpegdec ! videoconvert ! "
-        "appsink drop=true sync=false max-buffers=1";
+      if (oakd_codec_ == "h264") {
+        // H264-Baseline receiver:
+        //   - latency=0 on jitter buffer: no deliberate buffering, display ASAP
+        //   - h264parse: reframes the Baseline bitstream for avdec_h264
+        //   - avdec_h264 max-threads=1: single-thread decode avoids thread-sync overhead
+        //   - queue leaky=downstream: if decode is slow, drop old frames not new ones
+        pipeline = "udpsrc port=" + std::to_string(port) +
+          " caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96\" ! "
+          "rtpjitterbuffer latency=0 ! "
+          "rtph264depay ! "
+          "h264parse ! "
+          "avdec_h264 max-threads=1 ! "
+          "videoconvert ! "
+          "queue max-size-buffers=1 leaky=downstream ! "
+          "appsink drop=true sync=false async=false max-buffers=1";
+        RCLCPP_INFO(this->get_logger(), "[OAK-D] Using H264-Baseline receiver pipeline");
+      } else {
+        // MJPEG fallback (original)
+        // caps match: gst-launch-1.0 udpsrc port=9100 caps="application/x-rtp, media=video, encoding-name=JPEG, payload=26"
+        pipeline = "udpsrc port=" + std::to_string(port) +
+          " caps=\"application/x-rtp, media=video, encoding-name=JPEG, payload=26\" ! "
+          "rtpjpegdepay ! jpegdec ! videoconvert ! "
+          "queue max-size-buffers=1 leaky=downstream ! "
+          "appsink drop=true sync=false max-buffers=1";
+        RCLCPP_INFO(this->get_logger(), "[OAK-D] Using MJPEG receiver pipeline (fallback)");
+      }
     } else {
       // ZED / D435 stream H264-over-RTP
       feed_name = "ZED";
@@ -376,7 +398,7 @@ private:
         }
       }
 
-      cv::resize(dashboard, dashboard, cv::Size(), 0.5, 0.5);
+      cv::resize(dashboard, dashboard, cv::Size(), 1.0, 1.0);
       drawTelemetryOverlay(dashboard);
       static int imshow_counter = 0;
       if (++imshow_counter == 1) {
@@ -393,6 +415,7 @@ private:
 
   int num_cameras_;
   std::string rgb_source_;
+  std::string oakd_codec_;
   
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_depth_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_ir_;

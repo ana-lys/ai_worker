@@ -8,6 +8,8 @@ def generate_launch_description():
         DeclareLaunchArgument('rgb_source', default_value='oakd_lite',
                               description='RGB source: zedm, d435, or oakd_lite'),
         DeclareLaunchArgument('headless', default_value='false'),
+        DeclareLaunchArgument('oakd_codec', default_value='mjpeg',
+                              description='OAK-D codec: mjpeg (fallback) or h264 (low-latency)'),
         # Unified receiver: auto-opens the known ports and displays whatever streams are present.
         Node(
             package='ffw_stream',
@@ -17,6 +19,7 @@ def generate_launch_description():
             parameters=[{
                 'headless': LaunchConfiguration('headless'),
                 'rgb_source': LaunchConfiguration('rgb_source'),
+                'oakd_codec': LaunchConfiguration('oakd_codec'),
             }],
             output='screen'
         )
