@@ -103,10 +103,10 @@ No arguments—the receiver automatically detects and displays all streams on th
 All ports are relative to `base_port` (default: 9000):
 
 ```
-base_port + 0   → Camera 0 Depth (RealSense)
-base_port + 1   → Camera 0 IR (RealSense)
-base_port + 2   → Camera 1 Depth (RealSense)
-base_port + 3   → Camera 1 IR (RealSense)
+base_port + 0   → Camera 0 Depth (Left D405)
+base_port + 1   → Camera 0 IR (Left D405)
+base_port + 2   → Camera 1 Depth (Right D405)
+base_port + 3   → Camera 1 RGB (Right D405, 480×270)
 base_port + 100 → Primary RGB (D435 / ZED / OAK)
 base_port + 200 → Telemetry / Status
 ```
@@ -121,16 +121,17 @@ All streams use **H.264 RTP over UDP** at the application layer:
 - **Encapsulation**: RTP (RFC 3984)
 - **Protocol**: UDP
 - **Packet size**: 1316 bytes (optimized for IP fragmentation)
-- **Bitrate**: ~30 Mbps (H.264 Main profile, keyframe every 1 sec)
+- **Bitrate**: ~16 Mbps (H.264 Main profile, keyframe every 1 sec, VBR)
 
 ---
 
 ## Codec Details
 
-### D435 / D405 RGB (if applicable)
-- Encoded via `ffmpeg -c:v libx264` (software)
+### D435 / D405 RGB
+- Encoded via GStreamer appsrc → x264enc (software)
 - Preset: `ultrafast` (lowest latency)
 - Tune: `zerolatency`
+- In-process, no subprocess overhead
 
 ### ZED M
 - Encoded via `ffmpeg -c:v libx264` with NVIDIA JPEG preload (Jetson)

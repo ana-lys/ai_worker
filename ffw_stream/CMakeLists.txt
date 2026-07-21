@@ -14,6 +14,9 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
+# GStreamer for in-process H264 encoding (realsense_udp_streamer)
+pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0)
+
 # ────────────────────────────────────────────────────────────────
 # RealSense streamer (all platforms)
 # ────────────────────────────────────────────────────────────────
@@ -24,9 +27,12 @@ target_include_directories(realsense_udp_streamer PUBLIC
 )
 target_compile_features(realsense_udp_streamer PUBLIC c_std_99 cxx_std_17)
 ament_target_dependencies(realsense_udp_streamer rclcpp)
+target_include_directories(realsense_udp_streamer PRIVATE ${GST_INCLUDE_DIRS})
+target_compile_options(realsense_udp_streamer PRIVATE ${GST_CFLAGS_OTHER})
 target_link_libraries(realsense_udp_streamer
   realsense2::realsense2
   pthread
+  ${GST_LIBRARIES}
 )
 install(TARGETS realsense_udp_streamer
   DESTINATION lib/${PROJECT_NAME})

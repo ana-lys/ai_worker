@@ -26,8 +26,8 @@ public:
     this->declare_parameter<bool>("enable_d405s", true);
     this->declare_parameter<int>("depthai_video_port", 9100);
     this->declare_parameter<std::string>("rgb_source", "zedm");
-    this->declare_parameter<std::string>("oakd_codec", "mjpeg"); // "mjpeg" or "h264"
-    
+    this->declare_parameter<std::string>("oakd_codec", "h264");
+
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
     bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
@@ -43,7 +43,7 @@ public:
 
       for (int i = 0; i < num_cameras_; ++i) {
         std::string ns = "camera_" + std::to_string(i);
-        
+
         pub_depth_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/depth/image_rect_raw", 10);
         pub_ir_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/infra1/image_rect_raw", 10);
 
@@ -72,7 +72,7 @@ public:
 
     int zed_port = base_port + 100;
     threads_.emplace_back(&RealsenseUDPReceiver::zedStreamLoop, this, zed_port);
-    
+
     // Realsense telemetry on base_port + 200
     int rs_telemetry_port = base_port + 200;
     threads_.emplace_back(&RealsenseUDPReceiver::telemetryReceiverLoop, this, "RS", rs_telemetry_port);
@@ -94,17 +94,20 @@ public:
 
 private:
   void streamLoop(int cam_index, const std::string& type, int port, rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub) {
-    std::string pipeline = "udpsrc port=" + std::to_string(port) + 
+    // Camera 1 (right D405) sends RGB on the "IR" port (base+3) instead of IR
+    bool is_rgb = (cam_index == 1 && type == "IR");
+
+    std::string pipeline = "udpsrc port=" + std::to_string(port) +
       " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
       "rtpjitterbuffer latency=10 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
-    
+
     std::string feed_name = "Cam" + std::to_string(cam_index) + "_" + type;
-    
+
     RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
 
     while (running_ && rclcpp::ok()) {
       cv::VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
-      
+
       if (!cap.isOpened()) {
         RCLCPP_WARN(this->get_logger(), "[%s] Failed to open UDP stream, retrying in 2s...", feed_name.c_str());
         std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -125,16 +128,30 @@ private:
 
         header.stamp = this->now();
 
-        cv::Mat gray;
-        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-        cv::rotate(gray, gray, cv::ROTATE_90_COUNTERCLOCKWISE);
-        
-        sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(header, "mono8", gray).toImageMsg();
-        pub->publish(*msg);
+        if (is_rgb) {
+          // Right D405 RGB stream: rotate and store as BGR (OpenCV native) for color display
+          cv::rotate(frame, frame, cv::ROTATE_90_COUNTERCLOCKWISE);
 
-        {
-          std::lock_guard<std::mutex> lock(img_mutex_);
-          latest_images_[feed_name] = gray.clone();
+          sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(header, "bgr8", frame).toImageMsg();
+          pub->publish(*msg);
+
+          {
+            std::lock_guard<std::mutex> lock(img_mutex_);
+            latest_images_[feed_name] = frame.clone();
+          }
+        } else {
+          // Depth or left IR: convert to grayscale, rotate, publish as mono8
+          cv::Mat gray;
+          cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+          cv::rotate(gray, gray, cv::ROTATE_90_COUNTERCLOCKWISE);
+
+          sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(header, "mono8", gray).toImageMsg();
+          pub->publish(*msg);
+
+          {
+            std::lock_guard<std::mutex> lock(img_mutex_);
+            latest_images_[feed_name] = gray.clone();
+          }
         }
 
         frames_received_[feed_name]++;
@@ -416,7 +433,7 @@ private:
           std::lock_guard<std::mutex> lock(img_mutex_);
           latest_images_[feed_name] = frame.clone();
         }
-        
+
         frames_received_[feed_name]++;
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(now - fps_timers_[feed_name]).count();
@@ -451,7 +468,7 @@ private:
 
     int padding = 10;
     cv::Rect bg_rect(0, 0, dashboard.cols, text_size.height + padding * 2);
-    
+
     cv::Mat overlay;
     dashboard.copyTo(overlay);
     cv::rectangle(overlay, bg_rect, cv::Scalar(0, 0, 0), cv::FILLED);
@@ -474,7 +491,7 @@ private:
           std::lock_guard<std::mutex> lock(img_mutex_);
           std::string depth_key = "Cam" + std::to_string(i) + "_Depth";
           std::string ir_key = "Cam" + std::to_string(i) + "_IR";
-          
+
           if (latest_images_.count(depth_key)) depth = latest_images_[depth_key].clone();
           if (latest_images_.count(ir_key)) ir = latest_images_[ir_key].clone();
         }
@@ -483,8 +500,8 @@ private:
           static cv::Mat custom_lut;
           if (custom_lut.empty()) {
             custom_lut = cv::Mat(256, 1, CV_8UC3);
-            custom_lut.at<cv::Vec3b>(0, 0) = cv::Vec3b(0, 0, 0); 
-            for (int i = 1; i <= 255; ++i) { 
+            custom_lut.at<cv::Vec3b>(0, 0) = cv::Vec3b(0, 0, 0);
+            for (int i = 1; i <= 255; ++i) {
               float x = i / 255.0f;
               if (x < 0.08f) { custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(0, 0, 0); continue; }
               float base_b = 255.0f - (127.0f * x);
@@ -501,12 +518,16 @@ private:
           }
           cv::applyColorMap(depth, depth, custom_lut);
         }
-        if (!ir.empty() && ir.channels() == 1) {
+
+        // Camera 1's "IR" stream is now RGB — skip grayscale processing
+        if (i == 1) {
+          // Already BGR from streamLoop, display as-is
+        } else if (!ir.empty() && ir.channels() == 1) {
           ir.convertTo(ir, -1, 1.5, 30);
           cv::cvtColor(ir, ir, cv::COLOR_GRAY2BGR);
         }
 
-        int w = 270, h = 480; 
+        int w = 270, h = 480;
         if (!depth.empty()) { w = depth.cols; h = depth.rows; }
         else if (!ir.empty()) { w = ir.cols; h = ir.rows; }
 
@@ -514,8 +535,9 @@ private:
         if (depth.empty()) depth = blank.clone();
         if (ir.empty()) ir = blank.clone();
 
+        std::string second_label = (i == 1) ? "RGB" : "IR";
         cv::putText(depth, "Cam " + std::to_string(i) + " Depth", cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2);
-        cv::putText(ir, "Cam " + std::to_string(i) + " IR", cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2);
+        cv::putText(ir, "Cam " + std::to_string(i) + " " + second_label, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2);
 
         cv::Mat cam_grid;
         cv::vconcat(ir, depth, cam_grid);
@@ -583,7 +605,7 @@ private:
   int num_cameras_;
   std::string rgb_source_;
   std::string oakd_codec_;
-  
+
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_depth_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_ir_;
 
