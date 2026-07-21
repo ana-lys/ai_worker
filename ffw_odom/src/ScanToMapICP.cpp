@@ -138,9 +138,9 @@ public:
 
     ICPConfig cfg;
     cfg.max_correspondence_dist =
-        declare_parameter<double>("max_correspondence_dist", 0.4);
+        declare_parameter<double>("max_correspondence_dist", 0.15);
     cfg.huber_delta = declare_parameter<double>("huber_delta", 0.10);
-    cfg.max_iterations = declare_parameter<int>("max_iterations", 30);
+    cfg.max_iterations = declare_parameter<int>("max_iterations", 50);
     cfg.min_inlier_ratio = declare_parameter<double>("min_inlier_ratio", 0.25);
     cfg.normal_k_neighbors = declare_parameter<int>("normal_k_neighbors", 8);
     cfg.translation_eps = declare_parameter<double>("translation_eps", 1e-4);

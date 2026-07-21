@@ -65,7 +65,7 @@ public:
     }
 
     if (best_score < 0.0) {
-      return candidates[0];
+      return initial_guess.has_value() ? *initial_guess : candidates[0];
     }
 
     return best_pose;
