@@ -182,8 +182,14 @@ private:
 
     if (need_reloc_) {
       RCLCPP_INFO(get_logger(), "Running global geometric relocalization...");
-      active_pose = relocalizer_->relocalize(scan_points, *matcher_);
-      
+      auto reloc_result = relocalizer_->relocalize(scan_points, *matcher_);
+      if (!reloc_result.has_value()) {
+        RCLCPP_WARN(get_logger(), "Relocalization returned no match - keeping current pose");
+        need_reloc_ = false;
+        return;
+      }
+      active_pose = *reloc_result;
+
       guess_pose = active_pose;
       auto scan_segs_raw = relocalizer_->extractSegmentsFromScan(scan_points);
       auto map_segs_raw = relocalizer_->extractSegmentsFromMap();

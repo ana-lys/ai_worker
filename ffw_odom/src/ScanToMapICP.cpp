@@ -37,6 +37,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <optional>
@@ -147,6 +148,10 @@ public:
     cfg.rotation_eps = declare_parameter<double>("rotation_eps", 1e-5);
     cfg.verbose = declare_parameter<bool>("verbose", false);
     max_accepted_rms_ = declare_parameter<double>("max_accepted_rms", 0.15);
+    fallback_hysteresis_ = declare_parameter<int>("fallback_hysteresis", 3);
+    scan_to_scan_hysteresis_ = declare_parameter<int>("scan_to_scan_hysteresis", 2);
+    bool start_active = declare_parameter<bool>("start_active", false);
+    active_ = start_active;
 
     if (map_file_.empty()) {
       RCLCPP_FATAL(get_logger(), "Required parameter 'map_file' is empty.");
@@ -240,8 +245,11 @@ private:
   }
 
   void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-    current_odom_pose_ = poseFromOdomMsg(*msg);
-    current_odom_twist_ = msg->twist;
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      current_odom_pose_ = poseFromOdomMsg(*msg);
+      current_odom_twist_ = msg->twist;
+    }
     have_odom_ = true;
   }
 
@@ -305,7 +313,10 @@ private:
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                            "Failed to look up time-synchronized odom pose at scan timestamp: %s. Falling back to latest.",
                            ex.what());
-      sync_odom_pose = current_odom_pose_;
+      {
+        std::lock_guard<std::mutex> lock(odom_mutex_);
+        sync_odom_pose = current_odom_pose_;
+      }
     }
 
     // --- convert scan to Point2D in base_frame_ ---
@@ -332,10 +343,24 @@ private:
     if (trigger_global_relocalize_) {
       RCLCPP_INFO(get_logger(), "Running global geometric relocalization...");
       auto start_reloc = std::chrono::high_resolution_clock::now();
-      // Pass the current sync odom pose as the initial guess to help guide the search
-      Pose2D initial_pose = relocalizer_->relocalize(scan_points, *matcher_, sync_odom_pose);
+      // Pass the current map-frame pose as the initial guess to help guide the search
+      auto reloc_result = relocalizer_->relocalize(scan_points, *matcher_, map_to_odom_offset_ * sync_odom_pose);
       auto end_reloc = std::chrono::high_resolution_clock::now();
       std::chrono::duration<double, std::milli> elapsed_reloc = end_reloc - start_reloc;
+
+      if (!reloc_result.has_value()) {
+        RCLCPP_ERROR(get_logger(), "Global relocalization found no geometric match at all — keeping current offset.");
+        {
+          std::lock_guard<std::mutex> lock(reloc_mutex_);
+          reloc_result_pose_ = Pose2D{0.0, 0.0, 0.0};
+          reloc_result_confidence_ = 0.0;
+          reloc_done_ = true;
+          trigger_global_relocalize_ = false;
+        }
+        reloc_cv_.notify_all();
+        return; // don't process this scan — no valid pose
+      }
+      Pose2D initial_pose = *reloc_result;
       
       map_to_odom_offset_ = initial_pose * sync_odom_pose.inverse();
 
@@ -413,6 +438,7 @@ private:
     const bool is_good_match = (result.inlier_rms < max_accepted_rms_ && map_coverage >= 0.70 && result.inlier_count >= 5);
 
     if (is_good_match) {
+      consecutive_failures_ = 0;
       map_to_odom_offset_ =
           result.corrected_pose * sync_odom_pose.inverse();
       double inlier_ratio = (double)result.inlier_count / scan_points.size();
@@ -420,50 +446,150 @@ private:
       RCLCPP_DEBUG(get_logger(), "ICP alignment took %.3f ms (iters=%d) | Map Coverage: %.1f%% | Scan Inliers: %.1f%% | RMS: %.2f cm",
                    elapsed.count(), result.iterations, map_coverage * 100.0, inlier_ratio * 100.0, result.inlier_rms * 100.0);
     } else {
-      RCLCPP_WARN(get_logger(), "ICP failed or coverage dropped below 70%% (converged=%d, coverage=%.1f%%, RMS=%.4f). Triggering fallback relocalization...",
-                  result.converged, map_coverage * 100.0, result.inlier_rms);
+      consecutive_failures_++;
+      RCLCPP_WARN(get_logger(), "ICP failed (fail #%d/%d): converged=%d, coverage=%.1f%%, RMS=%.4f. %s",
+                  consecutive_failures_, fallback_hysteresis_,
+                  result.converged, map_coverage * 100.0, result.inlier_rms,
+                  consecutive_failures_ >= fallback_hysteresis_
+                      ? "Triggering fallback relocalization..."
+                      : "Skipping fallback — waiting for more consecutive failures.");
 
-      // Run relocalizer with the current sync odom pose as guess
-      Pose2D reloc_pose = relocalizer_->relocalize(scan_points, *matcher_, sync_odom_pose);
-      
-      // Calculate map coverage of the relocalized pose
-      std::vector<Point2D> transformed_scan;
-      transformed_scan.reserve(scan_points.size());
-      for (const auto &sp : scan_points) {
-        transformed_scan.push_back(reloc_pose.apply(sp));
-      }
-      int covered_count = 0;
-      const auto &map_pts = matcher_->mapPoints();
-      for (const auto &mp : map_pts) {
-        double min_dist_sq = std::numeric_limits<double>::max();
-        for (const auto &tp : transformed_scan) {
-          double dx = mp.x - tp.x;
-          double dy = mp.y - tp.y;
-          double dist_sq = dx*dx + dy*dy;
-          if (dist_sq < min_dist_sq) {
-            min_dist_sq = dist_sq;
+      bool offset_updated = false;
+
+      if (consecutive_failures_ >= fallback_hysteresis_) {
+        // --- Tier 1 fallback: geometric relocalization against the static map ---
+        const Pose2D map_frame_initial_guess = map_to_odom_offset_ * sync_odom_pose;
+        auto reloc_result = relocalizer_->relocalize(scan_points, *matcher_, map_frame_initial_guess);
+
+        if (!reloc_result.has_value()) {
+          RCLCPP_ERROR(get_logger(), "Fallback relocalization found no match at all - keeping previous map->odom offset.");
+        } else {
+          Pose2D reloc_pose = *reloc_result;
+          // Calculate map coverage of the relocalized pose
+          std::vector<Point2D> transformed_scan;
+          transformed_scan.reserve(scan_points.size());
+          for (const auto &sp : scan_points) {
+            transformed_scan.push_back(reloc_pose.apply(sp));
+          }
+          int covered_count = 0;
+          const auto &map_pts = matcher_->mapPoints();
+          for (const auto &mp : map_pts) {
+            double min_dist_sq = std::numeric_limits<double>::max();
+            for (const auto &tp : transformed_scan) {
+              double dx = mp.x - tp.x;
+              double dy = mp.y - tp.y;
+              double dist_sq = dx*dx + dy*dy;
+              if (dist_sq < min_dist_sq) {
+                min_dist_sq = dist_sq;
+              }
+            }
+            if (min_dist_sq < 0.0225) {
+              covered_count++;
+            }
+          }
+          double reloc_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
+
+          if (reloc_coverage > map_coverage && reloc_coverage >= 0.70) {
+            RCLCPP_INFO(get_logger(), "Fallback relocalization succeeded. Recovered pose: [%.3f, %.3f, %.3f], coverage: %.1f%%",
+                        reloc_pose.x, reloc_pose.y, reloc_pose.theta, reloc_coverage * 100.0);
+            map_to_odom_offset_ = reloc_pose * sync_odom_pose.inverse();
+            map_coverage = reloc_coverage;
+            consecutive_failures_ = 0;
+            offset_updated = true;
+          } else {
+            RCLCPP_ERROR(get_logger(), "Fallback relocalization did not find a better fit (reloc coverage=%.1f%%, original map coverage=%.1f%%). Keeping previous map->odom offset.",
+                         reloc_coverage * 100.0, map_coverage * 100.0);
           }
         }
-        if (min_dist_sq < 0.0225) {
-          covered_count++;
-        }
       }
-      double reloc_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
 
-      if (reloc_coverage > map_coverage && reloc_coverage >= 0.70) {
-        RCLCPP_INFO(get_logger(), "Fallback relocalization succeeded. Recovered pose: [%.3f, %.3f, %.3f], coverage: %.1f%%",
-                    reloc_pose.x, reloc_pose.y, reloc_pose.theta, reloc_coverage * 100.0);
-        map_to_odom_offset_ = reloc_pose * sync_odom_pose.inverse();
-        map_coverage = reloc_coverage;
-      } else {
-        RCLCPP_ERROR(get_logger(), "Fallback relocalization did not find a better fit (reloc coverage=%.1f%%, original map coverage=%.1f%%). Keeping previous map->odom offset.",
-                     reloc_coverage * 100.0, map_coverage * 100.0);
+      // --- Tier 2 fallback: scan-to-scan ICP against the previous frame ---
+      // When both map-based ICP and geometric relocalization fail, use
+      // point-to-point ICP between consecutive scans to maintain the relative
+      // displacement. Works particularly well when the robot is static
+      // (consecutive scans are nearly identical).
+      if (!offset_updated && have_prev_scan_ && prev_scan_points_.size() >= 10 &&
+          consecutive_failures_ >= scan_to_scan_hysteresis_) {
+
+        auto s2s_start = std::chrono::high_resolution_clock::now();
+
+        ICPConfig s2s_cfg;
+        s2s_cfg.max_correspondence_dist = 0.5;
+        s2s_cfg.max_iterations = 20;
+        s2s_cfg.min_inlier_ratio = 0.15;
+        s2s_cfg.huber_delta = 0.10;
+        s2s_cfg.normal_k_neighbors = 5;
+        s2s_cfg.translation_eps = 1e-4;
+        s2s_cfg.rotation_eps = 1e-5;
+        s2s_cfg.verbose = false;
+
+        try {
+          // Build a temporary point-to-line ICP using the PREVIOUS scan as "map"
+          ScanToMapICP s2s_matcher(prev_scan_points_, s2s_cfg);
+
+          // initial_guess: odometry-predicted relative displacement from
+          // previous to current base_link frame
+          Pose2D s2s_initial_guess = prev_odom_pose_.inverse() * sync_odom_pose;
+          ICPResult s2s_result = s2s_matcher.align(scan_points, s2s_initial_guess);
+
+          auto s2s_end = std::chrono::high_resolution_clock::now();
+          std::chrono::duration<double, std::milli> s2s_elapsed = s2s_end - s2s_start;
+
+          if (s2s_result.inlier_rms < max_accepted_rms_ && s2s_result.inlier_count >= 10) {
+            // The corrected_pose is the ICP-refined pose of the current scan
+            // in the previous scan's frame — i.e. the relative displacement.
+            Pose2D rel_delta = s2s_result.corrected_pose;
+
+            // Previous scan's corrected pose in map frame
+            Pose2D prev_map_pose = map_to_odom_offset_ * prev_odom_pose_;
+
+            // Current map pose = previous map pose composed with relative displacement
+            Pose2D current_map_pose = prev_map_pose * rel_delta;
+
+            map_to_odom_offset_ = current_map_pose * sync_odom_pose.inverse();
+            consecutive_failures_ = 0;
+            offset_updated = true;
+
+            RCLCPP_INFO(get_logger(),
+                        "Scan-to-scan ICP fallback succeeded in %.2f ms: "
+                        "rel=[%.3f, %.3f, %.3f], rms=%.4f, inliers=%d",
+                        s2s_elapsed.count(),
+                        rel_delta.x, rel_delta.y, rel_delta.theta,
+                        s2s_result.inlier_rms, s2s_result.inlier_count);
+
+            // Recompute map_coverage for the accuracy representation below
+            int cov_count = 0;
+            for (const auto &mp : map_pts) {
+              double min_dist_sq = std::numeric_limits<double>::max();
+              for (const auto &sp : scan_points) {
+                Point2D tp = current_map_pose.apply(sp);
+                double dx = mp.x - tp.x;
+                double dy = mp.y - tp.y;
+                double dist_sq = dx*dx + dy*dy;
+                if (dist_sq < min_dist_sq) min_dist_sq = dist_sq;
+              }
+              if (min_dist_sq < 0.0225) cov_count++;
+            }
+            map_coverage = map_pts.empty() ? 0.0 : (double)cov_count / map_pts.size();
+          } else {
+            RCLCPP_DEBUG(get_logger(), "Scan-to-scan ICP fell through: rms=%.4f, inliers=%d (%.1f ms)",
+                         s2s_result.inlier_rms, s2s_result.inlier_count, s2s_elapsed.count());
+          }
+        } catch (const std::exception &e) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                               "Scan-to-scan ICP exception: %s", e.what());
+        }
       }
     }
 
     const Pose2D corrected_pose = map_to_odom_offset_ * sync_odom_pose;
     publishCorrectedOdom(msg->header.stamp, corrected_pose, map_coverage);
     broadcastMapToOdom(msg->header.stamp);
+
+    // Store scan for next frame's scan-to-scan ICP fallback
+    have_prev_scan_ = true;
+    prev_scan_points_ = std::move(scan_points);
+    prev_odom_pose_ = sync_odom_pose;
   }
 
   void publishCorrectedOdom(const rclcpp::Time &stamp, const Pose2D &pose, double map_coverage) {
@@ -475,8 +601,11 @@ private:
     out.pose.pose.position.y = pose.y;
     out.pose.pose.position.z = 0.0;
     out.pose.pose.orientation = yawToQuaternion(pose.theta);
-    out.twist = current_odom_twist_; // pass wheel-odometry-derived velocity
-                                     // through unchanged
+    {
+      std::lock_guard<std::mutex> lock(odom_mutex_);
+      out.twist = current_odom_twist_; // pass wheel-odometry-derived velocity
+                                       // through unchanged
+    }
 
     // Scale covariance based on map coverage (accuracy representation)
     double var = 0.001 / (map_coverage * map_coverage + 1e-4);
@@ -510,6 +639,8 @@ private:
   std::string map_file_, scan_topic_, odom_topic_, corrected_odom_topic_;
   std::string map_frame_, odom_frame_, base_frame_;
   double max_accepted_rms_;
+  int fallback_hysteresis_;
+  int scan_to_scan_hysteresis_;
 
   // --- state ---
   std::unique_ptr<GeometricRelocalizer> relocalizer_;
@@ -518,6 +649,12 @@ private:
   Pose2D current_odom_pose_;
   geometry_msgs::msg::TwistWithCovariance current_odom_twist_;
   bool have_odom_ = false;
+  int consecutive_failures_ = 0;
+
+  // --- scan-to-scan ICP fallback state ---
+  std::vector<Point2D> prev_scan_points_;
+  Pose2D prev_odom_pose_;
+  bool have_prev_scan_ = false;
 
   std::optional<Pose2D> laser_to_base_;
   std::string cached_scan_frame_;
@@ -533,9 +670,10 @@ private:
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
-  bool trigger_global_relocalize_ = false;
-  bool active_ = false;
+  std::atomic<bool> trigger_global_relocalize_{false};
+  std::atomic<bool> active_{false};
   std::mutex reloc_mutex_;
+  std::mutex odom_mutex_;
   std::condition_variable reloc_cv_;
   bool reloc_done_ = false;
   Pose2D reloc_result_pose_;

@@ -87,6 +87,9 @@ def generate_launch_description():
             'max_accepted_rms': 0.15,
             'max_iterations': 50,
             'max_correspondence_dist': 0.15,
+            'start_active': True,
+            'fallback_hysteresis': 3,
+            'scan_to_scan_hysteresis': 2,
             'verbose': False
         }]
     )

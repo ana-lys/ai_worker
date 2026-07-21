@@ -35,9 +35,9 @@ public:
                 map_segs_.size());
   }
 
-  Pose2D relocalize(const std::vector<Point2D> &scan_points,
-                    const ScanToMapICP &matcher,
-                    const std::optional<Pose2D> &initial_guess = std::nullopt) const {
+  std::optional<Pose2D> relocalize(const std::vector<Point2D> &scan_points,
+                                    const ScanToMapICP &matcher,
+                                    const std::optional<Pose2D> &initial_guess = std::nullopt) const {
     std::vector<LineSegment> scan_segs = extractSegmentsFromScan(scan_points);
 
     std::vector<double> theta_hypotheses = searchRotation(scan_segs, map_segs_);
@@ -51,8 +51,9 @@ public:
     Pose2D best_pose{0.0, 0.0, 0.0};
     double best_score = -1.0;
 
+    // No geometric candidates AND no initial guess — truly no information
     if (candidates.empty()) {
-      return Pose2D{0.0, 0.0, 0.0};
+      return std::nullopt;
     }
 
     for (const auto &cand : candidates) {
@@ -65,7 +66,9 @@ public:
     }
 
     if (best_score < 0.0) {
-      return initial_guess.has_value() ? *initial_guess : candidates[0];
+      // None of the candidates converged in ICP — return the initial guess
+      // as a degraded prior (it was pushed into candidates so we know it exists).
+      return initial_guess;
     }
 
     return best_pose;
