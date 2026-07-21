@@ -29,6 +29,9 @@ from ffw_collision_checker.srv import SaveLoadPose, ToggleJointGroup
 from std_srvs.srv import Trigger
 from std_msgs.msg import String
 
+# Absolute path to the poses file — must match ffw_ik_solver_teleop.cpp
+POSES_FILE = "/home/lys/robotis_ws/src/ai_worker/ffw_collision_checker/config/poses.txt"
+
 
 # ── Terminal helpers ──────────────────────────────────────────────────
 
@@ -112,11 +115,6 @@ class IKSolverCLI(Node):
 
     def __init__(self):
         super().__init__('ik_solver_cli')
-        self.config_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            '..', 'config'
-        )
-
         # ── Clients ────────────────────────────────────────────────
         self.list_joints_client = self.create_client(
             Trigger, '/ik_solver/list_joints')
@@ -354,7 +352,7 @@ class IKSolverCLI(Node):
 
         if from_file:
             # List poses from poses.txt
-            filepath = os.path.join(self.config_dir, "poses.txt")
+            filepath = POSES_FILE
             if not os.path.exists(filepath):
                 print(f"\nNo saved poses found ({filepath} does not exist).")
                 press_enter()
@@ -397,7 +395,7 @@ class IKSolverCLI(Node):
             print("  (none)")
 
         print("\n=== Poses in File ===\n")
-        filepath = os.path.join(self.config_dir, "poses.txt")
+        filepath = POSES_FILE
         if os.path.exists(filepath):
             file_poses = []
             with open(filepath, 'r') as f:
