@@ -270,7 +270,7 @@ install(PROGRAMS
     explore/plot_pareto_voxels.py
     explore/plot_pareto.py
     explore/process_workspace.py
-    scripts/ik_cli.py
+    scripts/ik_solver_cli.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
