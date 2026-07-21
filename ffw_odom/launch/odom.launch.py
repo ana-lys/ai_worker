@@ -85,8 +85,8 @@ def generate_launch_description():
             'odom_frame': 'odom',
             'base_frame': 'base_link',
             'max_accepted_rms': 0.15,
-            'max_iterations': 30,
-            'max_correspondence_dist': 0.4,
+            'max_iterations': 50,
+            'max_correspondence_dist': 0.15,
             'verbose': False
         }]
     )
