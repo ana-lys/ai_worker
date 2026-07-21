@@ -74,7 +74,7 @@ def generate_launch_description():
             'map_frame': LaunchConfiguration('map_frame'),
             'odom_frame': LaunchConfiguration('odom_frame'),
             'base_frame': LaunchConfiguration('base_frame'),
-            'max_correspondence_dist': 0.4,
+            'max_correspondence_dist': 0.15,
             'huber_delta': 0.10,
             'max_iterations': 30,
             'min_inlier_ratio': 0.25,

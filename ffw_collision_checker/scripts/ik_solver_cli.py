@@ -60,7 +60,14 @@ def clear_screen():
 
 def select_menu(options, title="Select an option:", allow_custom=False,
                 custom_label="Custom input"):
-    """Arrow-key navigable menu. Returns index or None (cancel).
+    """Arrow-key navigable menu with number shortcuts.
+    Returns index or None (cancel).
+    - Number keys 1-9 → select that option immediately (1-indexed)
+    - Left arrow   → cancel/back
+    - Right arrow  → confirm (same as Enter)
+    - Up/Down arrows → navigate
+    - Enter → confirm
+    - q / Esc → cancel
     If allow_custom=True and the last option is selected, returns the
     user's typed input string instead of an index.
     """
@@ -71,31 +78,56 @@ def select_menu(options, title="Select an option:", allow_custom=False,
         clear_screen()
         sys.stdout.write(f"=== {title} ===\n\n")
         for idx, opt in enumerate(options):
+            prefix = f"\033[36m{idx+1}\033[0m " if idx < 9 else "  "
             if idx == selected:
-                sys.stdout.write(f"\033[36m➔  {opt}\033[0m\n")
+                sys.stdout.write(f"\033[36m➔  {opt}\033[0m    [{idx+1}]\n")
             else:
-                sys.stdout.write(f"   {opt}\n")
+                sys.stdout.write(f"   {prefix}{opt}\n")
         sys.stdout.write(
-            "\nUse [Up/Down] arrows to move, [Enter] to select, "
-            "[q]/[Esc]/[Ctrl+C] to return/exit.\n"
+            "\n[↑↓=navigate  ←=back  →/Enter=select  1-9=shortcut  q=exit]\n"
         )
         sys.stdout.flush()
 
         ch = getch()
-        if ch == '\x1b[A':
+        if ch == '\x1b[A':       # Up
             selected = (selected - 1) % len(options)
-        elif ch == '\x1b[B':
+        elif ch == '\x1b[B':     # Down
             selected = (selected + 1) % len(options)
-        elif ch in ('\r', '\n'):
+        elif ch == '\x1b[C':     # Right → confirm (same as Enter)
             if allow_custom and selected == len(options) - 1:
                 try:
-                    sys.stdout.write("\n\033[?25h")  # show cursor
+                    sys.stdout.write("\n\033[?25h")
                     sys.stdout.flush()
                     val = input(f"\n{custom_label}: ").strip()
                     return val if val else None
                 except (KeyboardInterrupt, EOFError):
                     return None
             return selected
+        elif ch == '\x1b[D':     # Left → cancel
+            return None
+        elif ch in ('\r', '\n'): # Enter → confirm
+            if allow_custom and selected == len(options) - 1:
+                try:
+                    sys.stdout.write("\n\033[?25h")
+                    sys.stdout.flush()
+                    val = input(f"\n{custom_label}: ").strip()
+                    return val if val else None
+                except (KeyboardInterrupt, EOFError):
+                    return None
+            return selected
+        elif ch.isdigit() and '1' <= ch <= '9':
+            num = int(ch)
+            if 1 <= num <= len(options):
+                if allow_custom and num == len(options):
+                    # Last option with allow_custom → custom input
+                    try:
+                        sys.stdout.write("\n\033[?25h")
+                        sys.stdout.flush()
+                        val = input(f"\n{custom_label}: ").strip()
+                        return val if val else None
+                    except (KeyboardInterrupt, EOFError):
+                        return None
+                return num - 1
         elif ch.lower() == 'q' or ch == '\x1b' or ch == '\x03':
             return None
 
@@ -159,7 +191,10 @@ class IKSolverCLI(Node):
         req = Trigger.Request()
         future = self.list_joints_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
-        msg = future.result().message
+        res = future.result()
+        if res is None:
+            return "(service unavailable)", []
+        msg = res.message
 
         joints = []
         for line in msg.split('\n'):
@@ -179,6 +214,8 @@ class IKSolverCLI(Node):
         future = self.save_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
         res = future.result()
+        if res is None:
+            return False, "Service call timed out or failed"
         return res.success, res.message
 
     def call_load(self, name, to_file):
@@ -188,6 +225,8 @@ class IKSolverCLI(Node):
         future = self.load_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
         res = future.result()
+        if res is None:
+            return False, "Service call timed out or failed"
         return res.success, res.message
 
     def call_list_memory(self):
@@ -195,7 +234,7 @@ class IKSolverCLI(Node):
         future = self.list_poses_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
         res = future.result()
-        if not res.success or not res.message.strip():
+        if res is None or not res.success or not res.message.strip():
             return []
         return [line.strip() for line in res.message.split('\n') if line.strip()]
 
@@ -214,90 +253,90 @@ class IKSolverCLI(Node):
         req = Trigger.Request()
         future = self.tree_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
+        res = future.result()
         clear_screen()
         print("=== Kinematic Tree ===\n")
-        print(future.result().message)
+        print(res.message if res else "(service unavailable)")
         press_enter()
 
     def action_toggle_joint(self):
-        """Toggle lock on individual joints via /teleop_locks."""
-        _, joints = self.get_joints_raw()
-        clear_screen()
-        print("Current joints:")
-        for jname, locked in joints:
-            status = "\033[31mLOCKED\033[0m" if locked else "\033[32mFREE\033[0m"
-            print(f"  {status}  {jname}")
+        """Toggle lock on individual joints via /teleop_locks. Arrow-key menu with live status."""
+        while True:
+            _, joints = self.get_joints_raw()
+            if not joints:
+                print("No joints available.")
+                press_enter()
+                return
 
-        print("\n--- Toggle Joint Lock ---")
-        try:
-            raw = input(
-                "\nEnter joint names or prefixes (space/comma separated, "
-                "e.g. 'arm_l' or 'arm_l_joint3'): "
-            ).strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nCancelled.")
-            press_enter()
-            return
-        if not raw:
-            return
+            options = []
+            for jname, locked in joints:
+                status = "\033[31mLOCKED\033[0m" if locked else "\033[32mFREE\033[0m"
+                options.append(f"{status}  {jname}")
 
-        tokens = [t.strip() for t in re.split(r'[,\s]+', raw) if t.strip()]
-        _, all_joints = self.get_joints_raw()
-        matched = []
-        for t in tokens:
-            for jname, _ in all_joints:
-                if jname.startswith(t) or t == jname:
-                    if jname not in matched:
-                        matched.append(jname)
+            options.append("\033[90m← Back\033[0m")
 
-        if not matched:
-            print("No joints matched your input.")
-            press_enter()
-            return
+            idx = select_menu(options, "Toggle Joint Lock  [1-9=shortcut  ←=back]")
+            if idx is None or idx == len(options) - 1:
+                return
 
-        print("\nThe following joints will be toggled:")
-        for j in matched:
-            print(f"  - {j}")
-
-        try:
-            confirm = input("\nConfirm? (y/n) > ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            print("\nCancelled.")
-            press_enter()
-            return
-
-        if confirm == 'y':
-            for jname in matched:
-                msg = String()
-                msg.data = jname
-                self.lock_pub.publish(msg)
-            print("Sent toggle requests!")
-        else:
-            print("Cancelled.")
-        press_enter()
+            jname = joints[idx][0]
+            # Toggle it — publish to /teleop_locks
+            msg = String()
+            msg.data = jname
+            self.lock_pub.publish(msg)
+            # Let the node process
+            rclpy.spin_once(self, timeout_sec=0.1)
+            # Show updated state immediately
+            clear_screen()
+            print(f"Toggled: {jname}\n")
 
     def action_toggle_group(self):
-        """Toggle enable/disable of arm groups."""
-        options = [
-            "left_arm  — toggle left arm on/off",
-            "right_arm — toggle right arm on/off",
-            "lift      — toggle lift on/off",
-        ]
-        idx = select_menu(options, "Toggle Joint Group")
-        if idx is None:
-            return
+        """Toggle enable/disable of arm groups. Arrow-key menu with live status."""
+        while True:
+            _, joints = self.get_joints_raw()
 
-        group_map = {0: "left_arm", 1: "right_arm", 2: "lift"}
-        group_name = group_map[idx]
+            arm_l_joints = [n for n, _ in joints if n.startswith('arm_l')]
+            arm_r_joints = [n for n, _ in joints if n.startswith('arm_r')]
+            lift_joints  = [n for n, _ in joints if n.startswith('lift')]
 
-        req = ToggleJointGroup.Request()
-        req.group_name = group_name
-        future = self.toggle_group_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future)
-        res = future.result()
-        print(f"\nResult: {'SUCCESS' if res.success else 'FAILED'}")
-        print(res.message)
-        press_enter()
+            def fmt_group(group_joints, label):
+                total = len(group_joints)
+                if total == 0:
+                    return f"\033[90m?\033[0m  {label}"
+                locked = sum(1 for n, l in joints if n in group_joints and l)
+                if locked == total:
+                    return f"\033[31mDISABLED\033[0m  {label}  ({total}/{total} locked)"
+                elif locked == 0:
+                    return f"\033[32mENABLED\033[0m   {label}  (0/{total} locked)"
+                else:
+                    return f"\033[33mPARTIAL\033[0m  {label}  ({locked}/{total} locked)"
+
+            options = [
+                fmt_group(arm_l_joints, "Left arm"),
+                fmt_group(arm_r_joints, "Right arm"),
+                fmt_group(lift_joints,  "Lift"),
+                "\033[90m← Back\033[0m",
+            ]
+
+            idx = select_menu(options, "Toggle Joint Group  [1-3=toggle  Enter=toggle  ←=back]")
+            if idx is None or idx >= 3:
+                return
+
+            group_map = {0: "left_arm", 1: "right_arm", 2: "lift"}
+            group_name = group_map[idx]
+
+            req = ToggleJointGroup.Request()
+            req.group_name = group_name
+            future = self.toggle_group_client.call_async(req)
+            rclpy.spin_until_future_complete(self, future)
+            res = future.result()
+            clear_screen()
+            if res is None:
+                print(f"Toggled {group_name}: FAILED — service timed out")
+            else:
+                print(f"Toggled {group_name}: {'SUCCESS' if res.success else 'FAILED'}")
+                print(res.message)
+            print()
 
     def action_show_status(self):
         """Show which arm groups are enabled/disabled."""
@@ -433,8 +472,11 @@ class IKSolverCLI(Node):
         future = self.reset_home_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
         res = future.result()
-        print(f"\nResult: {'SUCCESS' if res.success else 'FAILED'}")
-        print(res.message)
+        if res is None:
+            print("\nResult: FAILED — service call timed out")
+        else:
+            print(f"\nResult: {'SUCCESS' if res.success else 'FAILED'}")
+            print(res.message)
         press_enter()
 
     # ── Main loop ──────────────────────────────────────────────────
@@ -490,9 +532,17 @@ def main(args=None):
         cli.run()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"\nError: {e}")
     finally:
-        cli.destroy_node()
-        rclpy.shutdown()
+        try:
+            cli.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
