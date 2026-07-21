@@ -62,9 +62,9 @@ int main(int argc, char **argv) {
   dai::Pipeline pipeline(device);
 
   auto cam = pipeline.create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_A);
-  cam->initialControl.setSharpness(4);
-  cam->initialControl.setLumaDenoise(1);
-  cam->initialControl.setChromaDenoise(3);
+  cam->initialControl.setSharpness(6);     // 6/8 — crisper edges, compensates for encode softness
+  cam->initialControl.setLumaDenoise(1);   // minimal luma denoise, preserves fine detail
+  cam->initialControl.setChromaDenoise(1); // mild chroma denoise (was 3 — was blurring colored edges)
 
   auto *videoOut = cam->requestOutput({1920, 1080}, dai::ImgFrame::Type::NV12);
 
@@ -75,8 +75,8 @@ int main(int argc, char **argv) {
     videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::H264_BASELINE);
     videoEnc->setNumBFrames(0);           // explicitly disable B-frames (safety)
     videoEnc->setKeyframeFrequency(30);   // IDR every 1s → fast recovery on packet loss
-    videoEnc->setBitrateKbps(8000);       // ~8 Mbps for 1080p30 (good quality)
-    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
+    videoEnc->setBitrateKbps(16000);       // ~16 Mbps for 1080p30 — VBR gives headroom on motion
+    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::VBR);
   } else {
     // ── MJPEG fallback (original settings) ───────────────────────────────
     videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::MJPEG);

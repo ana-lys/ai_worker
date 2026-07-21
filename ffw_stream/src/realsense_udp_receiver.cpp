@@ -231,10 +231,21 @@ private:
     socklen_t sender_len;
     bool have_sender = false;
 
-    // Calibration state
+    // Calibration state — drift-compensated clock offset
     double cal_offset_ms = 0.0;
+    double last_cal_time_ms = 0.0;        // receiver steady_clock (ms) of last calibration
+    double last_cal_offset_ms = 0.0;      // offset at that time
+    double drift_rate_ppms = 0.0;         // ms of offset change per ms of receiver time
     auto last_cal_req = std::chrono::steady_clock::now();
     const auto cal_interval = std::chrono::seconds(30);
+
+    // Helper: compute time-varying offset accounting for clock drift
+    auto interpolated_offset = [&]() -> double {
+      double t_now_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      double dt = t_now_ms - last_cal_time_ms;
+      return last_cal_offset_ms + drift_rate_ppms * dt;
+    };
 
     while (running_ && rclcpp::ok()) {
       auto now = std::chrono::steady_clock::now();
@@ -264,7 +275,7 @@ private:
 
           // If telemetry arrived during the cal window, consume it normally
           if (strncmp(resp, "[OAK-D]", 7) == 0) {
-            processOakdTelemetry(resp, cal_offset_ms);
+            processOakdTelemetry(resp, interpolated_offset());
             continue;  // try recvfrom again for CAL_RES
           }
 
@@ -278,11 +289,22 @@ private:
             // offset = receiver_steady_time - oakd_hw_time
             // Use midpoint of (T1, T4) to cancel out symmetric RTT
             cal_offset_ms = ((t1_ms + t4_ms) / 2.0) - oakt;
+
+            // Update drift tracking — two-machine steady_clocks drift apart
+            if (last_cal_time_ms > 0.0) {
+              double dt = t4_ms - last_cal_time_ms;
+              if (dt > 1.0) {
+                drift_rate_ppms = (cal_offset_ms - last_cal_offset_ms) / dt;
+              }
+            }
+            last_cal_offset_ms = cal_offset_ms;
+            last_cal_time_ms = t4_ms;
             double rtt = t4_ms - t1_ms;
             RCLCPP_INFO(this->get_logger(),
-                        "[OAK-D] Calibration: RTT=%.3fms offset=%.1fms  "
-                        "t1=%.1f t4=%.1f oakt=%.1f",
-                        rtt, cal_offset_ms, t1_ms, t4_ms, oakt);
+                        "[OAK-D] Calibration: RTT=%.3fms offset=%.1fms "
+                        "drift=%.3fppms  t1=%.1f t4=%.1f oakt=%.1f",
+                        rtt, cal_offset_ms, drift_rate_ppms * 1000.0,
+                        t1_ms, t4_ms, oakt);
             break;
           }
         }
@@ -320,7 +342,7 @@ private:
                       ip_str, ntohs(sender_addr.sin_port));
         }
 
-        processOakdTelemetry(buffer, cal_offset_ms);
+        processOakdTelemetry(buffer, interpolated_offset());
       }
     }
     close(sock);
