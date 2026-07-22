@@ -328,7 +328,7 @@
         <param name="Min Position Limit">-151875</param>
       </gpio>
       <!-- XM430-W350 gripper (replaces RH-P12-RN-A at ID 8) -->
-      <!-- Hardware registers already burned: OpMode=5, CurrentLimit=350mA,
+      <!-- Hardware registers already burned [OpMode=5, CurrentLimit=350mA,
            MaxPos=1024, MinPos=0, HomingOffset=240 — software values must match
            so the DynamixelHardware plugin is a no-op at init. -->
       <gpio name="dxl130">
