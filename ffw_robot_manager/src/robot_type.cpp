@@ -67,10 +67,39 @@ std::vector<BatteryInfo> FfwSg2Rev1RobotType::get_battery_configurations() const
   return batteries;
 }
 
+FfwSg2SmtmRobotType::FfwSg2SmtmRobotType()
+{
+  // Battery monitoring is not supported on the SMTM variant
+}
+
+std::string FfwSg2SmtmRobotType::get_type_name() const
+{
+  return "ffw_sg2_smtm";
+}
+
+bool FfwSg2SmtmRobotType::is_battery_monitoring_enabled() const
+{
+  return false;
+}
+
+std::shared_ptr<BatteryModel> FfwSg2SmtmRobotType::get_battery_model() const
+{
+  return nullptr;
+}
+
+std::vector<BatteryInfo> FfwSg2SmtmRobotType::get_battery_configurations() const
+{
+  return {};
+}
+
 std::shared_ptr<RobotType> create_robot_type(const std::string & type_name)
 {
   if (type_name == "ffw_sg2_rev1") {
     return std::make_shared<FfwSg2Rev1RobotType>();
+  }
+
+  if (type_name == "ffw_sg2_smtm") {
+    return std::make_shared<FfwSg2SmtmRobotType>();
   }
 
   return nullptr;  // Type not found

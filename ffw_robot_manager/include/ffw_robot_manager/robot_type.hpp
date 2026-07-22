@@ -92,6 +92,24 @@ private:
 };
 
 /**
+ * @brief FFW SG2 SMTM robot type implementation
+ *
+ * The SMTM variant replaces the RH-P12-RN-A gripper on the right arm with
+ * an XM430-W350 and does not support battery monitoring.
+ */
+class FfwSg2SmtmRobotType : public RobotType
+{
+public:
+  FfwSg2SmtmRobotType();
+  ~FfwSg2SmtmRobotType() override = default;
+
+  std::string get_type_name() const override;
+  bool is_battery_monitoring_enabled() const override;
+  std::shared_ptr<BatteryModel> get_battery_model() const override;
+  std::vector<BatteryInfo> get_battery_configurations() const override;
+};
+
+/**
  * @brief Factory function to create robot types
  * @param type_name Name of the robot type
  * @return Shared pointer to robot type, nullptr if type not found
