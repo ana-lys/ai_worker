@@ -19,6 +19,12 @@ def generate_launch_description():
         description='If true, enables base teleop, mode switching, and hardware/Gazebo sync.'
     )
 
+    robot_model_arg = DeclareLaunchArgument(
+        'robot_model',
+        default_value='bg2',
+        description='Robot model variant: bg2 (RH-P12-RN-A grippers) or smtm (XM430 right gripper).'
+    )
+
     left_device_id_arg = DeclareLaunchArgument('left_device_id', default_value='0')
     right_device_id_arg = DeclareLaunchArgument('right_device_id', default_value='1')
 
@@ -76,7 +82,8 @@ def generate_launch_description():
         name='ffw_ik_solver_teleop',
         output='screen',
         parameters=[{
-            'hardware_mode': LaunchConfiguration('hardware_mode')
+            'hardware_mode': LaunchConfiguration('hardware_mode'),
+            'robot_model': LaunchConfiguration('robot_model')
         }]
     )
 
@@ -93,6 +100,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         hardware_mode_arg,
+        robot_model_arg,
         left_device_id_arg,
         right_device_id_arg,
         left_mapper,

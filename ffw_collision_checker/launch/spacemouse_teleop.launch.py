@@ -98,7 +98,8 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 {'rate_hz': 50.0},
-                {'hardware_mode': PythonExpression(["'", LaunchConfiguration('sim_only'), "' != 'true'"])}
+                {'hardware_mode': PythonExpression(["'", LaunchConfiguration('sim_only'), "' != 'true'"])},
+                {'robot_model': 'bg2'}
             ]
         )
     ])

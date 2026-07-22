@@ -3,14 +3,14 @@
 
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:macro name="rh_p12_rn_a" params="prefix parent *origin">
+  <xacro:macro name="rh_p12_rn_a" params="prefix parent origin_xyz origin_rpy">
 
     <xacro:property
       name="meshes_file_direction"
       value="package://ffw_description/meshes/common/rh_p12_rn_a"/>
 
     <joint name="${prefix}joint" type="fixed">
-      <xacro:insert_block name="origin" />
+      <origin xyz="${origin_xyz}" rpy="${origin_rpy}"/>
       <parent link="${parent}"/>
       <child link="${prefix}rh_p12_rn_base" />
     </joint>

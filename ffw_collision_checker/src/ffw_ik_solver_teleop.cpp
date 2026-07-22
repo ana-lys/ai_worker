@@ -353,6 +353,9 @@ public:
     this->declare_parameter<bool>("lift_enabled", true);
     this->declare_parameter<bool>("collision_debug", true);
 
+    this->declare_parameter<std::string>("robot_model", "bg2");
+    robot_model_ = this->get_parameter("robot_model").as_string();
+
     left_arm_enabled_ = true;
     right_arm_enabled_ = true;
     lift_enabled_ = true;
@@ -828,7 +831,10 @@ public:
         continue;
       }
       if (name.find("gripper") != std::string::npos) {
-        continue; // Skip grippers from joint mapping since they have no joints in MuJoCo
+        int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
+        if (jnt_id < 0) {
+          continue; // Skip grippers with no MuJoCo joint (BG2 model)
+        }
       }
 
       int jnt_id = mj_name2id(m, mjOBJ_JOINT, name.c_str());
@@ -1110,6 +1116,13 @@ public:
       m->body_quat[4 * gr_l2 + 1] = q.x();
       m->body_quat[4 * gr_l2 + 2] = q.y();
       m->body_quat[4 * gr_l2 + 3] = q.z();
+    }
+
+    // Right gripper joint (XM430-W350) - directly set qpos if joint exists
+    // in the MuJoCo model (SMTM variant only; BG2 returns -1 harmlessly)
+    int gr_jnt = mj_name2id(m, mjOBJ_JOINT, "gripper_r_joint1");
+    if (gr_jnt >= 0) {
+      d->qpos[m->jnt_qposadr[gr_jnt]] = gripper_r_pos_;
     }
   }
 
@@ -1455,6 +1468,7 @@ private:
   rclcpp::Publisher<ffw_collision_checker::msg::CollisionDebug>::SharedPtr collision_debug_pub_;
 
   bool hardware_mode_ = true;
+  std::string robot_model_ = "bg2";
   std::atomic<bool> hardware_sync_requested_{false};
   std::string current_mode_ = "BASE";
   sensor_msgs::msg::JointState latest_real_joints_;
@@ -1478,6 +1492,7 @@ private:
 public:
   bool is_hardware_mode() const { return hardware_mode_; }
   bool is_sync_requested() const { return hardware_sync_requested_; }
+  const std::string &get_robot_model() const { return robot_model_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
   bool is_solving_to_home() const { return solving_to_home_; }
   void stop_solving_to_home() { solving_to_home_ = false; }
@@ -1551,9 +1566,13 @@ int main(int argc, char **argv) {
   auto node = std::make_shared<TeleopNode>();
 
   using ament_index_cpp::get_package_share_directory;
+  const std::string model = node->get_robot_model();
+  const std::string scene_file = (model == "smtm")
+      ? "scene_inverse_kinematic_smtm.xml"
+      : "scene_inverse_kinematic.xml";
   const std::string xml_path =
       get_package_share_directory("ffw_collision_checker") +
-      "/3rd_party/robotis_ffw/scene_inverse_kinematic.xml";
+      "/3rd_party/robotis_ffw/" + scene_file;
 
   char error[1000];
   mjModel *m = mj_loadXML(xml_path.c_str(), nullptr, error, sizeof(error));
