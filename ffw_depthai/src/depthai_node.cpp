@@ -75,8 +75,8 @@ int main(int argc, char **argv) {
     videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::H264_BASELINE);
     videoEnc->setNumBFrames(0);           // explicitly disable B-frames (safety)
     videoEnc->setKeyframeFrequency(30);   // IDR every 1s → fast recovery on packet loss
-    videoEnc->setBitrateKbps(16000);       // ~16 Mbps for 1080p30 — VBR gives headroom on motion
-    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::VBR);
+    videoEnc->setBitrateKbps(8000);        // ~8 Mbps for 1080p30 — CBR keeps encoder at steady 30fps
+    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
   } else {
     // ── MJPEG fallback (original settings) ───────────────────────────────
     videoEnc->setDefaultProfilePreset(30, dai::VideoEncoderProperties::Profile::MJPEG);
