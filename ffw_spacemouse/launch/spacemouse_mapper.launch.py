@@ -62,6 +62,7 @@ def generate_launch_description():
                 'invert_roll': False,
                 'invert_pitch': False,
                 'invert_yaw': False,
+                'ee_orientation_slack_deg': 1.0,
                 **joint_limits,
             }]
         ),

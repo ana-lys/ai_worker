@@ -575,18 +575,23 @@ public:
     locks_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/teleop_locks", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
           std::lock_guard<std::mutex> lock(pose_mutex_);
-          frozen_joints_.clear();
           std::stringstream ss(msg->data);
           std::string item;
           while (std::getline(ss, item, ',')) {
             item.erase(item.begin(), std::find_if(item.begin(), item.end(), [](unsigned char ch) { return !std::isspace(ch); }));
             item.erase(std::find_if(item.rbegin(), item.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(), item.end());
-            if (!item.empty()) frozen_joints_.push_back(item);
+            if (item.empty()) continue;
+            // Toggle soft lock: add if not present, remove if present
+            auto it = std::find(soft_locked_joints_.begin(), soft_locked_joints_.end(), item);
+            if (it != soft_locked_joints_.end()) {
+              soft_locked_joints_.erase(it);
+            } else {
+              soft_locked_joints_.push_back(item);
+            }
           }
-          if (std::find(frozen_joints_.begin(), frozen_joints_.end(), "head") == frozen_joints_.end()) {
-             frozen_joints_.push_back("head"); // always lock head
-          }
-          RCLCPP_INFO(this->get_logger(), "Updated locked joints: %s", msg->data.c_str());
+          // Capture center positions on next apply_soft_joint_locks call
+          soft_lock_capture_pending_ = true;
+          RCLCPP_INFO(this->get_logger(), "Updated soft-locked joints: %s", msg->data.c_str());
         });
 
     obstacle_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -1143,7 +1148,7 @@ public:
   void register_callbacks(std::function<std::string()> tree_cb, std::function<std::string()> list_cb) {
     tree_cb_ = tree_cb;
     list_cb_ = list_cb;
-    tree_srv_ = this->create_service<std_srvs::srv::Trigger>("/ik_solver/get_tree", 
+    tree_srv_ = this->create_service<std_srvs::srv::Trigger>("/ik_solver/get_tree",
         [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
             if (tree_cb_) {
@@ -1151,7 +1156,7 @@ public:
                 res->message = "\n" + tree_cb_();
             }
         });
-    list_srv_ = this->create_service<std_srvs::srv::Trigger>("/ik_solver/list_joints", 
+    list_srv_ = this->create_service<std_srvs::srv::Trigger>("/ik_solver/list_joints",
         [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
             if (list_cb_) {
@@ -1159,6 +1164,49 @@ public:
                 res->message = "\n" + list_cb_();
             }
         });
+  }
+
+  // ── Soft locking helpers ─────────────────────────────────────────
+
+  /** Return the current set of soft-locked joint names. */
+  const std::vector<std::string>& get_soft_locked_joints() const {
+    return soft_locked_joints_;
+  }
+
+  /** Apply soft joint locks by projecting joint positions back within
+   *  the slack deadband from their locked center positions.
+   *  Called after solver.solveStep() in the main loop. */
+  void apply_soft_joint_locks(mjModel *m, mjData *d) {
+    if (soft_locked_joints_.empty()) return;
+
+    // Capture center positions on first call after lock engagement
+    if (soft_lock_capture_pending_) {
+      for (const auto &jname : soft_locked_joints_) {
+        int jnt_id = mj_name2id(m, mjOBJ_JOINT, jname.c_str());
+        if (jnt_id >= 0) {
+          soft_locked_joint_centers_[jname] = d->qpos[m->jnt_qposadr[jnt_id]];
+        }
+      }
+      soft_lock_capture_pending_ = false;
+    }
+
+    // Apply deadband clamping
+    for (const auto &jname : soft_locked_joints_) {
+      int jnt_id = mj_name2id(m, mjOBJ_JOINT, jname.c_str());
+      if (jnt_id < 0) continue;
+      int qposadr = m->jnt_qposadr[jnt_id];
+      auto it = soft_locked_joint_centers_.find(jname);
+      if (it == soft_locked_joint_centers_.end()) continue;
+      double center = it->second;
+      double slack = (jname.find("lift") != std::string::npos) ? lift_soft_slack_ : joint_soft_slack_;
+
+      double diff = d->qpos[qposadr] - center;
+      if (diff > slack) {
+        d->qpos[qposadr] = center + slack;
+      } else if (diff < -slack) {
+        d->qpos[qposadr] = center - slack;
+      }
+    }
   }
 
 private:
@@ -1484,6 +1532,14 @@ private:
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
   std::vector<std::string> frozen_joints_{"head"};
+
+  // Soft locking — individual joints with slack deadband
+  std::vector<std::string> soft_locked_joints_;
+  std::map<std::string, double> soft_locked_joint_centers_;
+  bool soft_lock_capture_pending_ = false;
+  double joint_soft_slack_ = 3.0 * M_PI / 180.0;  // ±3 degrees for arm joints
+  double lift_soft_slack_ = 0.05;                   // ±5 cm for lift joint
+
   geometry_msgs::msg::PoseStamped latest_obstacle_pose_;
   bool obstacle_pose_received_{false};
   std::vector<double> latest_head_pos_{0.0, 0.0};
@@ -1646,6 +1702,7 @@ int main(int argc, char **argv) {
     [&solver, node_ptr = node.get()]() {
        auto joints = solver.getJointNames();
        auto frozen = node_ptr->get_frozen_joints();
+       auto &soft = node_ptr->get_soft_locked_joints();
        std::stringstream ss;
        ss << "=== Joints ===\n";
        for (size_t i = 0; i < joints.size(); ++i) {
@@ -1653,9 +1710,15 @@ int main(int argc, char **argv) {
           for (const auto& f : frozen) {
              if (joints[i].find(f) != std::string::npos) is_frozen = true;
           }
-          ss << "[" << (i+1) << "] " << (is_frozen ? "[LOCKED] " : "[      ] ") << joints[i] << "\n";
+          bool is_soft = false;
+          for (const auto& s : soft) {
+             if (joints[i].find(s) != std::string::npos) is_soft = true;
+          }
+          std::string status = is_frozen ? "[LOCKED] " : (is_soft ? "[SOFT  ] " : "[      ] ");
+          ss << "[" << (i+1) << "] " << status << joints[i] << "\n";
        }
-       ss << "\nTo toggle a joint, publish its name to /teleop_locks (e.g. ros2 topic pub /teleop_locks std_msgs/String \"{data: 'arm_l'}\" -1)";
+       ss << "\nLOCKED = hard-frozen (group), SOFT = soft-locked (individual, ±3° slack)";
+       ss << "\nTo toggle a joint, publish its name to /teleop_locks";
        return ss.str();
     }
   );
@@ -1769,6 +1832,9 @@ int main(int argc, char **argv) {
     ffw_ik::StepResult res =
         solver.solveStep(d, current_target_l, current_target_r, active_cfg,
                          col_cfg, err_hist, dist_hist);
+
+    // Apply soft joint locks (project joints within slack deadband)
+    node->apply_soft_joint_locks(m, d);
 
     if (node->is_solving_to_home()) {
       node->increment_homing_ticks();

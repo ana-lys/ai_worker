@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -22,15 +23,15 @@ public:
     this->declare_parameter("publish_rate_hz", 100.0);
     this->declare_parameter("trans_sensitivity", 1.5);
     this->declare_parameter("rot_sensitivity", 1.0);
-    
+
     // Axes mapping for SpaceMouse
     this->declare_parameter("reference_frame", "global"); // "global" or "local"
-    this->declare_parameter("axis_x", 1); 
-    this->declare_parameter("axis_y", 0); 
-    this->declare_parameter("axis_z", 2); 
-    this->declare_parameter("axis_roll", 3);  
-    this->declare_parameter("axis_pitch", 4); 
-    this->declare_parameter("axis_yaw", 5);   
+    this->declare_parameter("axis_x", 1);
+    this->declare_parameter("axis_y", 0);
+    this->declare_parameter("axis_z", 2);
+    this->declare_parameter("axis_roll", 3);
+    this->declare_parameter("axis_pitch", 4);
+    this->declare_parameter("axis_yaw", 5);
 
     // Invert flags
     this->declare_parameter("invert_x", false);
@@ -40,7 +41,9 @@ public:
     this->declare_parameter("invert_pitch", false);
     this->declare_parameter("invert_yaw", false);
     this->declare_parameter("target_arm", "arm");
+    this->declare_parameter("ee_orientation_slack_deg", 1.0);
     target_arm_ = this->get_parameter("target_arm").as_string();
+    ee_orientation_slack_ = this->get_parameter("ee_orientation_slack_deg").as_double() * M_PI / 180.0;
 
     std::string topic_name = "/spacemouse/" + target_arm_ + "/ee_target_pose";
     pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(topic_name, 10);
@@ -58,6 +61,77 @@ public:
           precision_mode_ = msg->data;
       });
 
+    // ── EE lock subscription ──────────────────────────────────────
+    ee_lock_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/ik_solver/ee_lock", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(ee_lock_mutex_);
+        std::string data = msg->data;
+        // Parse: "lock roll_l", "lock yaw_l", "unlock roll_r", "toggle yaw_r"
+        std::stringstream ss(data);
+        std::string action, axis_arm;
+        ss >> action >> axis_arm;
+        if (action.empty() || axis_arm.empty()) {
+          RCLCPP_WARN(this->get_logger(),
+            "Invalid ee_lock format: '%s' — expected '<action> <axis>_<arm>'", data.c_str());
+          return;
+        }
+
+        // Check if this command is for this mapper's arm
+        // target_arm_ is "left" or "right" (from launch), axis_arm suffix is "_l" or "_r" (from CLI)
+        bool matches_my_arm = false;
+        if (target_arm_ == "left" && axis_arm.find("_l") != std::string::npos)
+          matches_my_arm = true;
+        else if (target_arm_ == "right" && axis_arm.find("_r") != std::string::npos)
+          matches_my_arm = true;
+        if (!matches_my_arm) return;
+
+        // Determine which lock flag to toggle
+        bool *lock_flag = nullptr;
+        double *locked_value = nullptr;
+        if (axis_arm.find("roll") != std::string::npos) {
+          lock_flag = &soft_lock_ee_roll_;
+          locked_value = &soft_locked_roll_;
+        } else if (axis_arm.find("yaw") != std::string::npos) {
+          lock_flag = &soft_lock_ee_yaw_;
+          locked_value = &soft_locked_yaw_;
+        } else {
+          RCLCPP_WARN(this->get_logger(), "Unknown ee_lock axis: '%s'", axis_arm.c_str());
+          return;
+        }
+
+        bool new_state;
+        if (action == "lock") new_state = true;
+        else if (action == "unlock") new_state = false;
+        else if (action == "toggle") new_state = !(*lock_flag);
+        else {
+          RCLCPP_WARN(this->get_logger(), "Unknown ee_lock action: '%s'", action.c_str());
+          return;
+        }
+
+        // If engaging lock, capture current EE orientation
+        bool was_locked = *lock_flag;
+        *lock_flag = new_state;
+        if (!was_locked && new_state) {
+          // Extract RPY from current ee_goal_ (extrinsic XYZ: Rx*Ry*Rz)
+          const Eigen::Matrix3d &R = ee_goal_.linear();
+          double sin_pitch = -R(0, 2);
+          double pitch, yaw;
+          (void)pitch;
+          if (std::abs(sin_pitch) >= 0.9999999) {
+            pitch = std::copysign(M_PI / 2.0, sin_pitch);
+            yaw = 0.0;
+          } else {
+            pitch = std::asin(sin_pitch);
+            yaw = std::atan2(-R(0, 1), R(0, 0));
+          }
+          double roll = std::atan2(-R(1, 2), R(2, 2));
+          if (lock_flag == &soft_lock_ee_roll_) *locked_value = roll;
+          if (lock_flag == &soft_lock_ee_yaw_) *locked_value = yaw;
+          RCLCPP_INFO(this->get_logger(), "EE %s locked at %.3f rad for %s",
+            (lock_flag == &soft_lock_ee_roll_ ? "roll" : "yaw"), *locked_value, target_arm_.c_str());
+        }
+      });
+
     // Initialize pose at origin
     ee_goal_ = Eigen::Isometry3d::Identity();
 
@@ -66,11 +140,47 @@ public:
     control_timer_ = this->create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(command_dt_)),
       std::bind(&SpaceMouseMapper::control_timer_callback, this));
-      
+
     RCLCPP_INFO(this->get_logger(), "SpaceMouse pose mapper started. Publishing to /spacemouse/ee_target_pose");
   }
 
 private:
+  // ── EE lock helpers ─────────────────────────────────────────────
+
+  static Eigen::Vector3d extract_rpy(const Eigen::Matrix3d &R) {
+    // Extrinsic XYZ Euler: R = Rx(roll) * Ry(pitch) * Rz(yaw)
+    double pitch = std::asin(std::clamp(R(0, 2), -1.0, 1.0));
+    double yaw = std::atan2(-R(0, 1), R(0, 0));
+    double roll = std::atan2(-R(1, 2), R(2, 2));
+    return Eigen::Vector3d(roll, pitch, yaw);
+  }
+
+  void apply_ee_locks() {
+    // Clamp locked roll/yaw axes within slack of their locked centers
+    if (!soft_lock_ee_roll_ && !soft_lock_ee_yaw_)
+      return;
+
+    Eigen::Vector3d rpy = extract_rpy(ee_goal_.linear());
+    double roll = rpy.x();
+    double pitch = rpy.y();
+    double yaw = rpy.z();
+
+    if (soft_lock_ee_roll_)
+      roll = std::clamp(roll, soft_locked_roll_ - ee_orientation_slack_,
+                              soft_locked_roll_ + ee_orientation_slack_);
+    if (soft_lock_ee_yaw_)
+      yaw = std::clamp(yaw, soft_locked_yaw_ - ee_orientation_slack_,
+                             soft_locked_yaw_ + ee_orientation_slack_);
+
+    // Reconstruct: R = Rx(roll) * Ry(pitch) * Rz(yaw)
+    Eigen::Matrix3d Rx = Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()).toRotationMatrix();
+    Eigen::Matrix3d Ry = Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()).toRotationMatrix();
+    Eigen::Matrix3d Rz = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    ee_goal_.linear() = Rx * Ry * Rz;
+  }
+
+  // ── Callbacks ───────────────────────────────────────────────────
+
   void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(joy_mutex_);
@@ -156,11 +266,11 @@ private:
     } else {
       ee_goal_.translation() += trans_delta;
     }
-    
+
     // Map straight to angle axis for quaternion
     Eigen::Vector3d rot_axis(drx, dry, drz);
     double angle = rot_axis.norm() * rot_step;
-    
+
     Eigen::Quaterniond q_delta = Eigen::Quaterniond::Identity();
     if (angle > 1e-6) {
       q_delta = Eigen::Quaterniond(Eigen::AngleAxisd(angle, rot_axis.normalized()));
@@ -169,15 +279,21 @@ private:
     // Multiply old quat vs this for the new value
     Eigen::Quaterniond q_old(ee_goal_.linear());
     Eigen::Quaterniond q_new;
-    
+
     if (ref_frame == "local") {
       q_new = q_old * q_delta;
     } else {
       q_new = q_delta * q_old;
     }
-    
+
     q_new.normalize();
     ee_goal_.linear() = q_new.toRotationMatrix();
+
+    // Apply EE orientation locks (clamp yaw/roll after integrating spacemouse delta)
+    {
+      std::lock_guard<std::mutex> lock(ee_lock_mutex_);
+      apply_ee_locks();
+    }
 
     publish_pose();
   }
@@ -186,7 +302,7 @@ private:
   {
     geometry_msgs::msg::PoseStamped msg;
     msg.header.stamp = this->now();
-    msg.header.frame_id = "map"; 
+    msg.header.frame_id = "map";
     msg.pose.position.x = ee_goal_.translation().x();
     msg.pose.position.y = ee_goal_.translation().y();
     msg.pose.position.z = ee_goal_.translation().z();
@@ -198,9 +314,12 @@ private:
     pose_pub_->publish(msg);
   }
 
+  // ── Subscriptions & publishers ──────────────────────────────────
+
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr precision_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ee_lock_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
 
@@ -212,8 +331,16 @@ private:
 
   Eigen::Isometry3d ee_goal_;
   double command_dt_ {0.01};
-  
+
   bool precision_mode_ {false};
+
+  // ── EE lock state ───────────────────────────────────────────────
+  std::mutex ee_lock_mutex_;
+  bool soft_lock_ee_roll_ {false};
+  bool soft_lock_ee_yaw_ {false};
+  double soft_locked_roll_ {0.0};
+  double soft_locked_yaw_ {0.0};
+  double ee_orientation_slack_ {0.0};  // set from parameter ee_orientation_slack_deg
 };
 
 int main(int argc, char * argv[])
