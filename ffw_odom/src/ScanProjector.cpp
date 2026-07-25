@@ -52,7 +52,7 @@ public:
 
     // --- subscribers ---
     scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
-        scan_topic_, 10,
+        scan_topic_, rclcpp::SensorDataQoS(),
         std::bind(&ScanProjectorNode::scanCallback, this, std::placeholders::_1));
 
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(

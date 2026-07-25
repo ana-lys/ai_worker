@@ -7,6 +7,7 @@ import rclpy
 from rclpy.serialization import deserialize_message
 import rosbag2_py
 from rosidl_runtime_py.utilities import get_message
+from sensor_msgs.point_cloud2 import read_points
 
 def quaternion_to_yaw(q):
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
@@ -60,7 +61,10 @@ def convert_bag(bag_path):
     conf_file = open(os.path.join(dataset_dir, "confidence.csv"), "w")
     conf_file.write("timestamp_ns,confidence\n")
 
-    counts = {"/scan": 0, "/odom": 0, "/ekf_odom": 0, "/icp_pose_raw": 0, "/scan_to_map_icp/confidence": 0}
+    map_scan_file = open(os.path.join(dataset_dir, "map_scan.csv"), "w")
+    map_scan_file.write("timestamp_ns,num_points,points\n")
+
+    counts = {"/scan": 0, "/odom": 0, "/ekf_odom": 0, "/icp_pose_raw": 0, "/scan_to_map_icp/confidence": 0, "/map_scan": 0}
 
     while reader.has_next():
         (topic, data, t) = reader.read_next()
@@ -95,12 +99,21 @@ def convert_bag(bag_path):
         elif topic == '/scan_to_map_icp/confidence':
             conf_file.write(f"{t},{msg.data:.6f}\n")
 
+        elif topic == '/map_scan':
+            # PointCloud2 — extract x,y for each point
+            pts = []
+            for p in read_points(msg, field_names=("x", "y"), skip_nans=True):
+                pts.append(f"{p[0]:.4f},{p[1]:.4f}")
+            points_str = ";".join(pts)
+            map_scan_file.write(f"{t},{len(pts)},{points_str}\n")
+
     # Close all files
     scan_file.close()
     odom_file.close()
     ekf_file.close()
     icp_file.close()
     conf_file.close()
+    map_scan_file.close()
 
     print("Conversion complete!")
     print("Messages processed:")

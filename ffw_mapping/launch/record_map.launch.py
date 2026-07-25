@@ -31,6 +31,7 @@ def generate_launch_description():
             '/ekf_odom',
             '/icp_pose_raw',
             '/scan_to_map_icp/confidence',
+            '/map_scan',
             '/tf',
             '/tf_static'
         ],
