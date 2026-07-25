@@ -152,11 +152,15 @@ protected:
   std::vector<double> module_steering_limit_upper_;
   std::vector<double> module_wheel_speed_limit_lower_;
   std::vector<double> module_wheel_speed_limit_upper_;
-  bool enabled_steering_flip_;
+  // 180° Rule: Smooth direction reversal state tracking per module
+  // Reversal phases: DECEL → STEERING → ACCEL
+  enum class ReversalPhase { NORMAL, DECELERATING, STEERING, ACCELERATING };
+  std::vector<ReversalPhase> reversal_phase_;              // Current phase per module
+  std::vector<double> previous_wheel_rotation_direction_;  // Previous direction per module
+  std::vector<double> wheel_speed_scale_;                  // Speed scale during reversal (0.0~1.0)
+  std::vector<double> reversal_target_steering_angle_;     // Target steering angle after reversal
   bool enabled_steering_angular_velocity_limit_;
-  bool enabled_steering_angular_limit_;
   bool enabled_open_loop_;
-  uint is_rotation_direction_;
   std::vector<double> previoud_steering_commands_;
   double steering_angular_velocity_limit_;
   double steering_alignment_angle_error_threshold_;
@@ -167,7 +171,6 @@ protected:
   std::string odom_solver_method_str_;
 
   std::string cmd_vel_topic_;
-  bool use_stamped_cmd_vel_;
   double cmd_vel_timeout_;
   rclcpp::Duration ref_timeout_;
 
@@ -239,6 +242,12 @@ protected:
   static constexpr double kPiHalf = M_PI * 0.5;
   static constexpr double kTwoPi = 2.0 * M_PI;
   static constexpr double kEpsilon = 1e-9;
+
+  // Reversal constants
+  static constexpr double kReversalDecelRate = 7.0;
+  static constexpr double kReversalAccelRate = 5.0;
+  static constexpr double kReversalThreshold = 0.05;
+  static constexpr double kSteeringTolerance = 0.1;
 
   SpeedLimiter limiter_linear_x_;
   SpeedLimiter limiter_linear_y_;
