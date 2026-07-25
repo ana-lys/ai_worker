@@ -252,6 +252,14 @@ protected:
   // Open Loop ctrl
   std::vector<double> previous_wheel_directions_;
 
+  // Pre-allocated vectors for update() to avoid heap allocation in real-time loop
+  std::vector<double> current_wheel_velocities_;
+  std::vector<double> corrected_steering_positions_;
+  std::vector<double> final_steering_commands_;
+  std::vector<double> final_wheel_velocity_commands_;
+  std::vector<double> robot_frame_steering_angles_for_viz_;
+  std::vector<double> wheel_linear_vels_for_viz_;
+
   /**
    * @brief Normalize angle to be within the range [-pi, pi].
    */

@@ -345,6 +345,14 @@ CallbackReturn SwerveDriveController::on_configure(
     return CallbackReturn::ERROR;
   }
 
+  // Pre-allocate RT-loop vectors to avoid heap allocation at runtime
+  current_wheel_velocities_.resize(num_modules_);
+  corrected_steering_positions_.resize(num_modules_);
+  final_steering_commands_.resize(num_modules_);
+  final_wheel_velocity_commands_.resize(num_modules_);
+  robot_frame_steering_angles_for_viz_.resize(num_modules_);
+  wheel_linear_vels_for_viz_.resize(num_modules_);
+
   // --- Setup Subscriber ---
   cmd_vel_subscriber_ = get_node()->create_subscription<CmdVelMsg>(
     cmd_vel_topic_, rclcpp::SystemDefaultsQoS(),
@@ -893,11 +901,6 @@ controller_interface::return_type SwerveDriveController::update(
 
   // --- 2. align the steering w.r.t offset and set the value ---
   double current_steering_positions;
-  std::vector<double> current_wheel_velocities;
-  std::vector<double> corrected_steering_positions;
-
-  current_wheel_velocities.reserve(num_modules_);
-  corrected_steering_positions.reserve(num_modules_);
   bool all_states_read = true;
   RCLCPP_DEBUG_THROTTLE(
     get_node()->get_logger(),
@@ -925,9 +928,9 @@ controller_interface::return_type SwerveDriveController::update(
         current_steering_positions = cur_steering_get_val.value();
       }
 
-      corrected_steering_positions.push_back(
-        current_steering_positions + module_handles_[i].angle_offset);
-      current_wheel_velocities.push_back(cur_wheel_get_val.value());
+      corrected_steering_positions_[i] =
+        current_steering_positions + module_handles_[i].angle_offset;
+      current_wheel_velocities_[i] = cur_wheel_get_val.value();
     } catch (const std::exception & e) {
       RCLCPP_ERROR_THROTTLE(
         get_node()->get_logger(),
@@ -953,7 +956,7 @@ controller_interface::return_type SwerveDriveController::update(
       }
     } else if (odom_source_ == "feedback") {
       // calcuate the odometry using the kinematics from the steering and wheel velocities
-      if (!odometry_.update(corrected_steering_positions, current_wheel_velocities, dt)) {
+      if (!odometry_.update(corrected_steering_positions_, current_wheel_velocities_, dt)) {
         RCLCPP_WARN_THROTTLE(
           get_node()->get_logger(),
           *get_node()->get_clock(), 1000, "Odometry update failed, dt might be too small (%.6f).",
@@ -976,9 +979,10 @@ controller_interface::return_type SwerveDriveController::update(
   // --- 4. calculate the wheel velocities and steering angles based on the inverse kinematics ---
   bool is_steering_aligned = false;
 
-  std::vector<double> final_steering_commands(num_modules_);
-  std::vector<double> final_wheel_velocity_commands(num_modules_);
   for (size_t i = 0; i < num_modules_; ++i) {
+    // reset pre-allocated vectors to safe defaults
+    final_steering_commands_[i] = 0.0;
+    final_wheel_velocity_commands_[i] = 0.0;
     // Check if module_handles_ is populated correctly
     if (module_handles_.empty() || i >= module_handles_.size()) {
       RCLCPP_ERROR_THROTTLE(
@@ -1193,8 +1197,8 @@ controller_interface::return_type SwerveDriveController::update(
         i, optimized_steering_angle, final_wheel_vel_cmd);
 
       // joints commands
-      final_steering_commands[i] = optimized_steering_angle;
-      final_wheel_velocity_commands[i] = final_wheel_vel_cmd;
+      final_steering_commands_[i] = optimized_steering_angle;
+      final_wheel_velocity_commands_[i] = final_wheel_vel_cmd;
     } catch (const std::exception & e) {
       RCLCPP_ERROR_THROTTLE(
         get_node()->get_logger(),
@@ -1214,8 +1218,8 @@ controller_interface::return_type SwerveDriveController::update(
         }
 
         // joints commands
-        final_steering_commands[i] = current_steering_angle;
-        final_wheel_velocity_commands[i] = 0.0;
+        final_steering_commands_[i] = current_steering_angle;
+        final_wheel_velocity_commands_[i] = 0.0;
       } catch (...) {
       }
       continue;
@@ -1252,12 +1256,8 @@ controller_interface::return_type SwerveDriveController::update(
             module_handles_[i].wheel_cmd_vel.get().get_name().c_str());
         }
 
-        if (i < final_steering_commands.size()) {
-          final_steering_commands[i] = current_steering_angle_for_hold;
-        }
-        if (i < final_wheel_velocity_commands.size()) {
-          final_wheel_velocity_commands[i] = 0.0;
-        }
+        final_steering_commands_[i] = current_steering_angle_for_hold;
+        final_wheel_velocity_commands_[i] = 0.0;
       } catch (const std::exception & e) {
         RCLCPP_ERROR_THROTTLE(
           get_node()->get_logger(),
@@ -1271,19 +1271,19 @@ controller_interface::return_type SwerveDriveController::update(
     for (size_t i = 0; i < num_modules_; ++i) {
       RCLCPP_DEBUG(
         get_node()->get_logger(), "Command Module %zu: Steering command %.2f, Wheel command %.2f",
-        i, final_steering_commands[i],
-        final_wheel_velocity_commands[i] * wheel_saturation_scale_factor_);
+        i, final_steering_commands_[i],
+        final_wheel_velocity_commands_[i] * wheel_saturation_scale_factor_);
 
       // Set the steering and wheel commands
-      if (!module_handles_[i].steering_cmd_pos.get().set_value(final_steering_commands[i])) {
+      if (!module_handles_[i].steering_cmd_pos.get().set_value(final_steering_commands_[i])) {
         RCLCPP_WARN(
           get_node()->get_logger(), "Failed to set value for interface %s",
           module_handles_[i].steering_cmd_pos.get().get_name().c_str());
       }
-      previoud_steering_commands_[i] = final_steering_commands[i];
+      previoud_steering_commands_[i] = final_steering_commands_[i];
       if (is_steering_aligned) {
         if (!module_handles_[i].wheel_cmd_vel.get().set_value(
-            final_wheel_velocity_commands[i] *
+            final_wheel_velocity_commands_[i] *
             wheel_saturation_scale_factor_))
         {
           RCLCPP_WARN(
@@ -1300,7 +1300,7 @@ controller_interface::return_type SwerveDriveController::update(
         RCLCPP_WARN(
           get_node()->get_logger(),
           "Steering not aligned, stopping wheel. final_steering_commands: %f",
-          final_steering_commands[i]);
+          final_steering_commands_[i]);
       }
     }
   }
@@ -1351,11 +1351,11 @@ controller_interface::return_type SwerveDriveController::update(
     joint_state_msg_.header.stamp = time;
 
     for (size_t i = 0; i < num_modules_; ++i) {
-      joint_state_msg_.position[i] = final_steering_commands[i];
+      joint_state_msg_.position[i] = final_steering_commands_[i];
       joint_state_msg_.velocity[i] = std::numeric_limits<double>::quiet_NaN();
 
       joint_state_msg_.position[i + num_modules_] = std::numeric_limits<double>::quiet_NaN();
-      joint_state_msg_.velocity[i + num_modules_] = final_wheel_velocity_commands[i];
+      joint_state_msg_.velocity[i + num_modules_] = final_wheel_velocity_commands_[i];
     }
     rt_commanded_joint_state_publisher_->try_publish(joint_state_msg_);
   }
@@ -1363,31 +1363,21 @@ controller_interface::return_type SwerveDriveController::update(
   // publish visualization markers
   if (enable_visualization_ && visualizer_) {
     if ((time - last_visualization_publish_time_).seconds() >= visualization_update_time_) {
-      std::vector<double> robot_frame_steering_angles_for_viz(num_modules_);
-      std::vector<double> wheel_linear_vels_for_viz(num_modules_);
 
       for (size_t i = 0; i < num_modules_; ++i) {
         // set the steering angles and wheel velocities for visualization considering the offsets
-        if (i < final_steering_commands.size() && i < module_angle_offsets_.size()) {
-          robot_frame_steering_angles_for_viz[i] = (
-            final_steering_commands[i] + module_angle_offsets_[i]);
-        } else {
-          robot_frame_steering_angles_for_viz[i] = 0.0;
-        }
-        if (i < final_wheel_velocity_commands.size()) {
-          wheel_linear_vels_for_viz[i] = final_wheel_velocity_commands[i] * wheel_radius_;
-        } else {
-          wheel_linear_vels_for_viz[i] = 0.0;
-        }
+        robot_frame_steering_angles_for_viz_[i] =
+          final_steering_commands_[i] + module_angle_offsets_[i];
+        wheel_linear_vels_for_viz_[i] = final_wheel_velocity_commands_[i] * wheel_radius_;
       }
 
-      if (robot_frame_steering_angles_for_viz.size() == num_modules_) {
+      if (robot_frame_steering_angles_for_viz_.size() == num_modules_) {
         visualizer_->publish_markers(
           time,
           target_vx_, target_vy_, target_wz_,
           module_x_offsets_, module_y_offsets_,
-          robot_frame_steering_angles_for_viz,
-          wheel_linear_vels_for_viz
+          robot_frame_steering_angles_for_viz_,
+          wheel_linear_vels_for_viz_
         );
         last_visualization_publish_time_ = time;
       } else {
