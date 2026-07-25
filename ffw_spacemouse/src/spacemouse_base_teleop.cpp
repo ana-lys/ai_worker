@@ -63,6 +63,10 @@ public:
     this->declare_parameter("invert_head_pan", false);
     this->declare_parameter("head_step", 0.05);
 
+    // ── Logitech active topic
+    // ──────────────────────────────────────────────────────────
+    this->declare_parameter("logitech_active_topic", "/logitech/base_active");
+
     // ── Joint topics
     // ──────────────────────────────────────────────────────────
     this->declare_parameter(
@@ -97,6 +101,13 @@ public:
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
         this->get_parameter("joint_state_topic").as_string(), 20,
         std::bind(&SpaceMouseBaseTeleop::joint_state_callback, this, _1));
+
+    // Logitech active flag — true means Logitech has taken over base control
+    logitech_active_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        this->get_parameter("logitech_active_topic").as_string(), 10,
+        [this](const std_msgs::msg::Bool::SharedPtr msg) {
+          logitech_active_ = msg->data;
+        });
 
     // ── Publishers
     // ────────────────────────────────────────────────────────────
@@ -201,6 +212,10 @@ private:
     if (current_mode_ != "BASE")
       return;
 
+    // If Logitech has taken over, suppress SpaceMouse base control
+    if (logitech_active_)
+      return;
+
     double max_linear_vel = this->get_parameter("max_linear_vel").as_double();
     double max_angular_vel = this->get_parameter("max_angular_vel").as_double();
 
@@ -292,6 +307,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr aux_joy_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
       joint_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr logitech_active_sub_;
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_pub_;
@@ -323,6 +339,7 @@ private:
   int joint_state_count_{0};
   int failsafe_check_cycles_{0};
   bool hardware_mode_{true};
+  bool logitech_active_{false};
 
   // ── Failsafe
   // ─────────────────────────────────────────────────────────────────

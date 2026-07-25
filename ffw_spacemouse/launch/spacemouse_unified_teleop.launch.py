@@ -1,49 +1,134 @@
+import glob
 import os
+import re
+import subprocess
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, RegisterEventHandler, EmitEvent
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, EmitEvent
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
-from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
-def generate_launch_description():
+
+def _detect_spacemice():
+    """Auto-detect two SpaceMouse devices and return their SDL indices as (left, right).
+
+    Scans /dev/input/js* for 3Dconnexion PowerMouse / SpaceMouse (vendor 256f,
+    product c63a), then sorts by physical USB path so the assignment is
+    deterministic regardless of device-discovery order.
+
+    Returns (left_sdl_id, right_sdl_id) as strings, or (None, None) if fewer
+    than 2 SpaceMice are found.
+    """
+    spacemice = []  # list of (js_path, usb_phys_path)
+
+    for js in sorted(glob.glob('/dev/input/js*')):
+        try:
+            out = subprocess.check_output(
+                ['udevadm', 'info', '-a', '-n', js],
+                text=True, stderr=subprocess.DEVNULL)
+            if ('ATTRS{idVendor}=="256f"' in out and
+                'ATTRS{idProduct}=="c63a"' in out):
+                spacemice.append(js)
+        except Exception:
+            continue
+
+    if len(spacemice) < 2:
+        print(f'[spacemouse_unified_teleop] WARNING: Expected 2 SpaceMice, '
+              f'found {len(spacemice)}. Falling back to device_id 0 and 1.')
+        return None, None
+
+    # Resolve physical USB path for deterministic left/right assignment
+    # Build a map from /dev/input/jsN → USB port path via by-path symlinks
+    js_to_usbpath = {}
+    for symlink in glob.glob('/dev/input/by-path/*-joystick'):
+        if '-event-' in symlink:
+            continue
+        try:
+            real = os.path.realpath(symlink)
+            if real in spacemice:
+                js_to_usbpath[real] = symlink
+        except Exception:
+            continue
+
+    if len(js_to_usbpath) >= 2:
+        # Sort by USB path string for deterministic assignment
+        sorted_usb = sorted(js_to_usbpath.items(), key=lambda x: x[1])
+        left_js = sorted_usb[0][0]
+        right_js = sorted_usb[1][0]
+    else:
+        # Fall back to /dev/input/js* alphabetical order
+        left_js = spacemice[0]
+        right_js = spacemice[1]
+        print(f'[spacemouse_unified_teleop] WARNING: Could not resolve USB '
+              f'paths; falling back to js* order for left/right assignment.')
+
+    # Extract SDL index from /dev/input/jsN
+    def _sdl_index(path):
+        m = re.search(r'js(\d+)$', path)
+        return m.group(1) if m else '0'
+
+    left_id = _sdl_index(left_js)
+    right_id = _sdl_index(right_js)
+
+    left_usb = js_to_usbpath.get(left_js, left_js)
+    right_usb = js_to_usbpath.get(right_js, right_js)
+
+    print(f'[spacemouse_unified_teleop] Auto-detected SpaceMice:')
+    print(f'  LEFT  arm ← SDL {left_id}  ({left_usb})')
+    print(f'  RIGHT arm ← SDL {right_id} ({right_usb})')
+
+    return left_id, right_id
+
+
+def launch_setup(context):
     ffw_spacemouse_dir = get_package_share_directory('ffw_spacemouse')
     mapper_launch_file = os.path.join(ffw_spacemouse_dir, 'launch', 'spacemouse_mapper.launch.py')
 
-    hardware_mode_arg = DeclareLaunchArgument(
-        'hardware_mode',
-        default_value='true',
-        description='If true, enables base teleop, mode switching, and hardware/Gazebo sync.'
-    )
+    hardware_mode_str = LaunchConfiguration('hardware_mode').perform(context)
+    hardware_mode = hardware_mode_str.lower() in ('true', '1', 'yes')
+    robot_model = LaunchConfiguration('robot_model').perform(context)
 
-    robot_model_arg = DeclareLaunchArgument(
-        'robot_model',
-        default_value='bg2',
-        description='Robot model variant: bg2 (RH-P12-RN-A grippers) or smtm (XM430 right gripper).'
-    )
+    # Resolve device IDs — auto-detect if left at defaults
+    left_id = LaunchConfiguration('left_device_id').perform(context)
+    right_id = LaunchConfiguration('right_device_id').perform(context)
 
-    left_device_id_arg = DeclareLaunchArgument('left_device_id', default_value='0')
-    right_device_id_arg = DeclareLaunchArgument('right_device_id', default_value='1')
+    # Logitech joystick override
+    use_logitech_str = LaunchConfiguration('use_logitech').perform(context)
+    use_logitech = use_logitech_str.lower() in ('true', '1', 'yes')
+    logitech_device_id = LaunchConfiguration('logitech_device_id').perform(context)
+
+    if left_id == '0' and right_id == '1':
+        auto_left, auto_right = _detect_spacemice()
+        if auto_left is not None:
+            left_id = auto_left
+            right_id = auto_right
+
+    nodes = []
 
     # Left SpaceMouse Mapper (includes joy_node)
-    left_mapper = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(mapper_launch_file),
-        launch_arguments={
-            'target_arm': 'left',
-            'device_id': LaunchConfiguration('left_device_id')
-        }.items()
+    nodes.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(mapper_launch_file),
+            launch_arguments={
+                'target_arm': 'left',
+                'device_id': left_id,
+            }.items()
+        )
     )
 
     # Right SpaceMouse Mapper (includes joy_node)
-    right_mapper = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(mapper_launch_file),
-        launch_arguments={
-            'target_arm': 'right',
-            'device_id': LaunchConfiguration('right_device_id')
-        }.items()
+    nodes.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(mapper_launch_file),
+            launch_arguments={
+                'target_arm': 'right',
+                'device_id': right_id,
+            }.items()
+        )
     )
 
     # Base Teleop Node
@@ -71,41 +156,76 @@ def generate_launch_description():
             'invert_z': False,
             'invert_pitch': False,
             'invert_head_pan': False,
-            'hardware_mode': LaunchConfiguration('hardware_mode')
+            'hardware_mode': hardware_mode,
         }]
     )
+    nodes.append(base_teleop_node)
 
     # IK Solver Teleop Node
-    ik_solver_node = Node(
-        package='ffw_collision_checker',
-        executable='ffw_ik_solver_teleop',
-        name='ffw_ik_solver_teleop',
-        output='screen',
-        parameters=[{
-            'hardware_mode': LaunchConfiguration('hardware_mode'),
-            'robot_model': LaunchConfiguration('robot_model')
-        }]
-    )
-
-    # Failsafe shutdown event
-    failsafe_event = RegisterEventHandler(
-        condition=IfCondition(LaunchConfiguration('hardware_mode')),
-        event_handler=OnProcessExit(
-            target_action=base_teleop_node,
-            on_exit=[
-                EmitEvent(event=Shutdown(reason='SpaceMouse Base Teleop terminated due to Joint State Failsafe!'))
-            ]
+    nodes.append(
+        Node(
+            package='ffw_collision_checker',
+            executable='ffw_ik_solver_teleop',
+            name='ffw_ik_solver_teleop',
+            output='screen',
+            parameters=[{
+                'hardware_mode': hardware_mode,
+                'robot_model': robot_model,
+            }]
         )
     )
 
+    # Logitech Joystick (optional — base control override)
+    if use_logitech:
+        logitech_launch = os.path.join(
+            ffw_spacemouse_dir, 'launch', 'logitech_teleop.launch.py')
+        nodes.append(
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(logitech_launch),
+                launch_arguments={
+                    'device_id': logitech_device_id,
+                    'max_linear_vel': '0.6',
+                    'max_angular_vel': '0.5',
+                }.items()
+            )
+        )
+
+    # Failsafe shutdown event — registered against the base_teleop_node
+    if hardware_mode:
+        nodes.append(
+            RegisterEventHandler(
+                event_handler=OnProcessExit(
+                    target_action=base_teleop_node,
+                    on_exit=[
+                        EmitEvent(event=Shutdown(
+                            reason='SpaceMouse Base Teleop terminated due to Joint State Failsafe!'))
+                    ]
+                )
+            )
+        )
+
+    return nodes
+
+
+def generate_launch_description():
     return LaunchDescription([
-        hardware_mode_arg,
-        robot_model_arg,
-        left_device_id_arg,
-        right_device_id_arg,
-        left_mapper,
-        right_mapper,
-        base_teleop_node,
-        ik_solver_node,
-        failsafe_event
+        DeclareLaunchArgument(
+            'hardware_mode', default_value='true',
+            description='If true, enables base teleop, mode switching, and hardware/Gazebo sync.'),
+        DeclareLaunchArgument(
+            'robot_model', default_value='bg2',
+            description='Robot model variant: bg2 (RH-P12-RN-A grippers) or smtm (XM430 right gripper).'),
+        DeclareLaunchArgument(
+            'left_device_id', default_value='0',
+            description='SDL joystick index for left SpaceMouse (auto-detected if left at default).'),
+        DeclareLaunchArgument(
+            'right_device_id', default_value='1',
+            description='SDL joystick index for right SpaceMouse (auto-detected if left at default).'),
+        DeclareLaunchArgument(
+            'use_logitech', default_value='false',
+            description='Enable Logitech Extreme 3D Pro as base control override.'),
+        DeclareLaunchArgument(
+            'logitech_device_id', default_value='-1',
+            description='SDL device index for Logitech (auto-detect if -1).'),
+        OpaqueFunction(function=launch_setup),
     ])

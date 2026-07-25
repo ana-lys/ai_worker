@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(ffw_spacemouse)
+project(ffw_joy)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
@@ -39,37 +39,44 @@ endif()
 
 find_package(ffw_collision_checker REQUIRED)
 
-# Build the control mapper C++ node
-add_executable(spacemouse_mapper src/spacemouse_mapper.cpp)
-ament_target_dependencies(spacemouse_mapper rclcpp sensor_msgs geometry_msgs trajectory_msgs joy ament_index_cpp ffw_collision_checker)
-target_link_libraries(spacemouse_mapper Eigen3::Eigen)
+# Build the joy mapper C++ node
+add_executable(joy_mapper src/joy_mapper.cpp)
+ament_target_dependencies(joy_mapper rclcpp sensor_msgs geometry_msgs trajectory_msgs joy ament_index_cpp ffw_collision_checker)
+target_link_libraries(joy_mapper Eigen3::Eigen)
 if(TARGET ffw_collision_checker::ffw_ik_solver_lib)
-  target_link_libraries(spacemouse_mapper ffw_collision_checker::ffw_ik_solver_lib)
+  target_link_libraries(joy_mapper ffw_collision_checker::ffw_ik_solver_lib)
 else()
-  target_link_libraries(spacemouse_mapper ffw_ik_solver_lib)
+  target_link_libraries(joy_mapper ffw_ik_solver_lib)
 endif()
 
-add_executable(spacemouse_base_teleop src/spacemouse_base_teleop.cpp)
-ament_target_dependencies(spacemouse_base_teleop rclcpp sensor_msgs geometry_msgs trajectory_msgs)
+add_executable(joy_base_teleop src/joy_base_teleop.cpp)
+ament_target_dependencies(joy_base_teleop rclcpp sensor_msgs geometry_msgs trajectory_msgs)
 
-# Install C++ executable
+# Install C++ executables
 install(TARGETS
-  spacemouse_mapper
-  spacemouse_base_teleop
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-# Install Python scripts
-install(PROGRAMS
-  scripts/explore_logitech.py
-  scripts/identify_spacemice.py
-  scripts/logitech_base_teleop.py
-  scripts/test_buttons.py
+  joy_mapper
+  joy_base_teleop
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # Install launch and rviz files
 install(DIRECTORY launch rviz
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# Install utility scripts
+install(PROGRAMS
+  scripts/identify_joysticks.py
+  scripts/test_buttons.py
+  scripts/joy_explorer.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install documentation and udev rules
+install(FILES
+  teleop_precision_mode_memo.md
+  udev_rules.txt
+  udev_rules_template.txt
   DESTINATION share/${PROJECT_NAME}
 )
 
