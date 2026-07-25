@@ -22,7 +22,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <queue>
+#include <cstdint>
 #include <cmath>
 #include <functional>
 #include <stdexcept>
@@ -162,6 +162,8 @@ protected:
   double steering_alignment_angle_error_threshold_;
   double steering_alignment_start_angle_error_threshold_;
   double steering_alignment_start_speed_error_threshold_;
+  double linear_vel_deadband_;
+  double angular_vel_deadband_;
   std::string odom_solver_method_str_;
 
   std::string cmd_vel_topic_;
@@ -230,7 +232,13 @@ protected:
   realtime_limited_velocity_publisher_ =
     nullptr;
   geometry_msgs::msg::Twist limited_velocity_msg_;
-  std::queue<Twist> previous_commands_;
+  Twist cmd_velocity_history_[2];
+  uint8_t cmd_velocity_history_len_{0};
+
+  // Mathematical constants
+  static constexpr double kPiHalf = M_PI * 0.5;
+  static constexpr double kTwoPi = 2.0 * M_PI;
+  static constexpr double kEpsilon = 1e-9;
 
   SpeedLimiter limiter_linear_x_;
   SpeedLimiter limiter_linear_y_;

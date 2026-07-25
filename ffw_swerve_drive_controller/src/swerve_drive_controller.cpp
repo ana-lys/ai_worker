@@ -92,6 +92,8 @@ CallbackReturn SwerveDriveController::on_init()
     auto_declare<double>("steering_alignment_angle_error_threshold", 0.1);
     auto_declare<double>("steering_alignment_start_angle_error_threshold", 0.1);
     auto_declare<double>("steering_alignment_start_speed_error_threshold", 0.1);
+    auto_declare<double>("linear_vel_deadband", 0.0);
+    auto_declare<double>("angular_vel_deadband", 0.0);
 
     auto_declare<std::string>("cmd_vel_topic", "/cmd_vel");
     auto_declare<bool>("use_stamped_cmd_vel", false);
@@ -259,6 +261,8 @@ CallbackReturn SwerveDriveController::on_configure(
       "steering_alignment_start_angle_error_threshold").as_double();
     steering_alignment_start_speed_error_threshold_ = get_node()->get_parameter(
       "steering_alignment_start_speed_error_threshold").as_double();
+    linear_vel_deadband_ = get_node()->get_parameter("linear_vel_deadband").as_double();
+    angular_vel_deadband_ = get_node()->get_parameter("angular_vel_deadband").as_double();
 
     cmd_vel_topic_ = get_node()->get_parameter("cmd_vel_topic").as_string();
     use_stamped_cmd_vel_ = get_node()->get_parameter("use_stamped_cmd_vel").as_bool();
@@ -475,10 +479,10 @@ CallbackReturn SwerveDriveController::on_configure(
     realtime_limited_velocity_publisher_ =
       std::make_shared<realtime_tools::RealtimePublisher<Twist>>(limited_velocity_publisher_);
   }
-  const Twist empty_twist;
   // Fill last two commands with default constructed commands
-  previous_commands_.emplace(empty_twist);
-  previous_commands_.emplace(empty_twist);
+  cmd_velocity_history_[0] = Twist();
+  cmd_velocity_history_[1] = Twist();
+  cmd_velocity_history_len_ = 2;
   previoud_steering_commands_.reserve(num_modules_);
   is_rotation_direction_ = Rotation::STOP;
   RCLCPP_DEBUG(logger, "Configuration successful");
@@ -848,26 +852,16 @@ controller_interface::return_type SwerveDriveController::update(
     target_wz_ = 0.0;
   }
 
+  // --- Deadband filtering: zero out commands below the threshold ---
+  if (std::abs(target_vx_) < linear_vel_deadband_) { target_vx_ = 0.0; }
+  if (std::abs(target_vy_) < linear_vel_deadband_) { target_vy_ = 0.0; }
+  if (std::abs(target_wz_) < angular_vel_deadband_) { target_wz_ = 0.0; }
+
   // --- 1.1 command may be limited further by SpeedLimit without affecting the stored twist command
   if (enabled_speed_limits_) {
-    // T-1 command for speed limit
-    Twist previous_cmd;
-    // T-2 command for speed limit
-    Twist pprevious_cmd;
-
-    // Keep the size of the history to 2 for previous_commands
-    if (previous_commands_.size() >= 2) {
-      previous_cmd = previous_commands_.back();
-      pprevious_cmd = previous_commands_.front();
-    } else if (previous_commands_.size() == 1) {
-      previous_cmd = previous_commands_.back();
-      pprevious_cmd = previous_cmd;
-    } else {
-      // when previous_commands_ is empty or not initialized
-      RCLCPP_WARN_THROTTLE(
-        get_node()->get_logger(), *get_node()->get_clock(), 1000,
-        "Speed limiter: Not enough previous commands in history.");
-    }
+    // T-1 and T-2 commands for speed limit from fixed-size history
+    Twist previous_cmd = cmd_velocity_history_[1];
+    Twist pprevious_cmd = cmd_velocity_history_[0];
 
     // target_vx_, target_vy_, target_wz_ is the current command velocity (before limiting)
     // SpeedLimiter limits the target velocities based on the previous command and the time period
@@ -881,16 +875,12 @@ controller_interface::return_type SwerveDriveController::update(
       target_wz_, previous_cmd.angular.z, pprevious_cmd.angular.z,
       time_gap);
 
-    // remove the oldest command from the history and maintain the size of 2
-    if (previous_commands_.size() >= 2) {
-      previous_commands_.pop();
-    }
-    // set the limited command and save it to the history
-    Twist current_limited_cmd_obj;
-    current_limited_cmd_obj.linear.x = target_vx_;
-    current_limited_cmd_obj.linear.y = target_vy_;
-    current_limited_cmd_obj.angular.z = target_wz_;
-    previous_commands_.emplace(current_limited_cmd_obj);
+    // shift history: [0] ← [1], [1] ← current
+    cmd_velocity_history_[0] = cmd_velocity_history_[1];
+    cmd_velocity_history_[1].linear.x = target_vx_;
+    cmd_velocity_history_[1].linear.y = target_vy_;
+    cmd_velocity_history_[1].angular.z = target_wz_;
+    if (cmd_velocity_history_len_ < 2) { cmd_velocity_history_len_ = 2; }
 
     // if publish_limited_velocity_ is true, publish the limited velocity
     if (publish_limited_velocity_ && realtime_limited_velocity_publisher_) {
