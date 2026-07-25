@@ -435,9 +435,12 @@ private:
     }
     double map_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
 
+    bool offset_updated = false;
+
     const bool is_good_match = (result.inlier_rms < max_accepted_rms_ && map_coverage >= 0.70 && result.inlier_count >= 5);
 
     if (is_good_match) {
+      offset_updated = true;
       consecutive_failures_ = 0;
       map_to_odom_offset_ =
           result.corrected_pose * sync_odom_pose.inverse();
@@ -446,6 +449,7 @@ private:
       RCLCPP_DEBUG(get_logger(), "ICP alignment took %.3f ms (iters=%d) | Map Coverage: %.1f%% | Scan Inliers: %.1f%% | RMS: %.2f cm",
                    elapsed.count(), result.iterations, map_coverage * 100.0, inlier_ratio * 100.0, result.inlier_rms * 100.0);
     } else {
+      offset_updated = false;
       consecutive_failures_++;
       RCLCPP_WARN(get_logger(), "ICP failed (fail #%d/%d): converged=%d, coverage=%.1f%%, RMS=%.4f. %s",
                   consecutive_failures_, fallback_hysteresis_,
@@ -454,10 +458,66 @@ private:
                       ? "Triggering fallback relocalization..."
                       : "Skipping fallback — waiting for more consecutive failures.");
 
-      bool offset_updated = false;
+      // offset_updated declared above; will be set to true by whichever
+      // fallback tier succeeds
 
-      if (consecutive_failures_ >= fallback_hysteresis_) {
-        // --- Tier 1 fallback: geometric relocalization against the static map ---
+      // --- Tier 1 fallback: scan-to-scan ICP against the frozen reference ---
+      // Uses the persistent s2s_matcher_ whose KD-tree is rebuilt only on success
+      // frames.  On consecutive failures the reference stays frozen so the tree
+      // costs nothing to reuse.
+      if (s2s_matcher_ != nullptr &&
+          consecutive_failures_ >= scan_to_scan_hysteresis_) {
+
+        auto s2s_start = std::chrono::high_resolution_clock::now();
+
+        try {
+          Pose2D s2s_initial_guess = s2s_reference_odom_.inverse() * sync_odom_pose;
+          ICPResult s2s_result = s2s_matcher_->align(scan_points, s2s_initial_guess);
+
+          auto s2s_end = std::chrono::high_resolution_clock::now();
+          std::chrono::duration<double, std::milli> s2s_elapsed = s2s_end - s2s_start;
+
+          if (s2s_result.inlier_rms < max_accepted_rms_ && s2s_result.inlier_count >= 10) {
+            Pose2D rel_delta = s2s_result.corrected_pose;
+            Pose2D ref_map_pose = map_to_odom_offset_ * s2s_reference_odom_;
+            Pose2D current_map_pose = ref_map_pose * rel_delta;
+
+            map_to_odom_offset_ = current_map_pose * sync_odom_pose.inverse();
+            consecutive_failures_ = 0;
+            offset_updated = true;
+
+            RCLCPP_INFO(get_logger(),
+                        "Scan-to-scan ICP fallback succeeded in %.2f ms: "
+                        "rel=[%.3f, %.3f, %.3f], rms=%.4f, inliers=%d",
+                        s2s_elapsed.count(),
+                        rel_delta.x, rel_delta.y, rel_delta.theta,
+                        s2s_result.inlier_rms, s2s_result.inlier_count);
+
+            int cov_count = 0;
+            for (const auto &mp : map_pts) {
+              double min_dist_sq = std::numeric_limits<double>::max();
+              for (const auto &sp : scan_points) {
+                Point2D tp = current_map_pose.apply(sp);
+                double dx = mp.x - tp.x;
+                double dy = mp.y - tp.y;
+                double dist_sq = dx*dx + dy*dy;
+                if (dist_sq < min_dist_sq) min_dist_sq = dist_sq;
+              }
+              if (min_dist_sq < 0.0225) cov_count++;
+            }
+            map_coverage = map_pts.empty() ? 0.0 : (double)cov_count / map_pts.size();
+          } else {
+            RCLCPP_DEBUG(get_logger(), "Scan-to-scan ICP fell through: rms=%.4f, inliers=%d (%.1f ms)",
+                         s2s_result.inlier_rms, s2s_result.inlier_count, s2s_elapsed.count());
+          }
+        } catch (const std::exception &e) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                               "Scan-to-scan ICP exception: %s", e.what());
+        }
+      }
+
+      // --- Tier 2 fallback: geometric relocalization against the static map ---
+      if (!offset_updated && consecutive_failures_ >= fallback_hysteresis_) {
         const Pose2D map_frame_initial_guess = map_to_odom_offset_ * sync_odom_pose;
         auto reloc_result = relocalizer_->relocalize(scan_points, *matcher_, map_frame_initial_guess);
 
@@ -503,93 +563,28 @@ private:
         }
       }
 
-      // --- Tier 2 fallback: scan-to-scan ICP against the previous frame ---
-      // When both map-based ICP and geometric relocalization fail, use
-      // point-to-point ICP between consecutive scans to maintain the relative
-      // displacement. Works particularly well when the robot is static
-      // (consecutive scans are nearly identical).
-      if (!offset_updated && have_prev_scan_ && prev_scan_points_.size() >= 10 &&
-          consecutive_failures_ >= scan_to_scan_hysteresis_) {
-
-        auto s2s_start = std::chrono::high_resolution_clock::now();
-
-        ICPConfig s2s_cfg;
-        s2s_cfg.max_correspondence_dist = 0.5;
-        s2s_cfg.max_iterations = 20;
-        s2s_cfg.min_inlier_ratio = 0.15;
-        s2s_cfg.huber_delta = 0.10;
-        s2s_cfg.normal_k_neighbors = 5;
-        s2s_cfg.translation_eps = 1e-4;
-        s2s_cfg.rotation_eps = 1e-5;
-        s2s_cfg.verbose = false;
-
-        try {
-          // Build a temporary point-to-line ICP using the PREVIOUS scan as "map"
-          ScanToMapICP s2s_matcher(prev_scan_points_, s2s_cfg);
-
-          // initial_guess: odometry-predicted relative displacement from
-          // previous to current base_link frame
-          Pose2D s2s_initial_guess = prev_odom_pose_.inverse() * sync_odom_pose;
-          ICPResult s2s_result = s2s_matcher.align(scan_points, s2s_initial_guess);
-
-          auto s2s_end = std::chrono::high_resolution_clock::now();
-          std::chrono::duration<double, std::milli> s2s_elapsed = s2s_end - s2s_start;
-
-          if (s2s_result.inlier_rms < max_accepted_rms_ && s2s_result.inlier_count >= 10) {
-            // The corrected_pose is the ICP-refined pose of the current scan
-            // in the previous scan's frame — i.e. the relative displacement.
-            Pose2D rel_delta = s2s_result.corrected_pose;
-
-            // Previous scan's corrected pose in map frame
-            Pose2D prev_map_pose = map_to_odom_offset_ * prev_odom_pose_;
-
-            // Current map pose = previous map pose composed with relative displacement
-            Pose2D current_map_pose = prev_map_pose * rel_delta;
-
-            map_to_odom_offset_ = current_map_pose * sync_odom_pose.inverse();
-            consecutive_failures_ = 0;
-            offset_updated = true;
-
-            RCLCPP_INFO(get_logger(),
-                        "Scan-to-scan ICP fallback succeeded in %.2f ms: "
-                        "rel=[%.3f, %.3f, %.3f], rms=%.4f, inliers=%d",
-                        s2s_elapsed.count(),
-                        rel_delta.x, rel_delta.y, rel_delta.theta,
-                        s2s_result.inlier_rms, s2s_result.inlier_count);
-
-            // Recompute map_coverage for the accuracy representation below
-            int cov_count = 0;
-            for (const auto &mp : map_pts) {
-              double min_dist_sq = std::numeric_limits<double>::max();
-              for (const auto &sp : scan_points) {
-                Point2D tp = current_map_pose.apply(sp);
-                double dx = mp.x - tp.x;
-                double dy = mp.y - tp.y;
-                double dist_sq = dx*dx + dy*dy;
-                if (dist_sq < min_dist_sq) min_dist_sq = dist_sq;
-              }
-              if (min_dist_sq < 0.0225) cov_count++;
-            }
-            map_coverage = map_pts.empty() ? 0.0 : (double)cov_count / map_pts.size();
-          } else {
-            RCLCPP_DEBUG(get_logger(), "Scan-to-scan ICP fell through: rms=%.4f, inliers=%d (%.1f ms)",
-                         s2s_result.inlier_rms, s2s_result.inlier_count, s2s_elapsed.count());
-          }
-        } catch (const std::exception &e) {
-          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                               "Scan-to-scan ICP exception: %s", e.what());
-        }
-      }
     }
 
     const Pose2D corrected_pose = map_to_odom_offset_ * sync_odom_pose;
     publishCorrectedOdom(msg->header.stamp, corrected_pose, map_coverage);
     broadcastMapToOdom(msg->header.stamp);
 
-    // Store scan for next frame's scan-to-scan ICP fallback
-    have_prev_scan_ = true;
-    prev_scan_points_ = std::move(scan_points);
-    prev_odom_pose_ = sync_odom_pose;
+    // Rebuild persistent scan-to-scan matcher only on success frames.
+    // Freezing the reference here means the KD-tree + normals survive
+    // across consecutive failures without re-computation.
+    if (offset_updated && scan_points.size() >= 10) {
+      ICPConfig s2s_cfg;
+      s2s_cfg.max_correspondence_dist = 0.5;
+      s2s_cfg.max_iterations = 20;
+      s2s_cfg.min_inlier_ratio = 0.15;
+      s2s_cfg.huber_delta = 0.10;
+      s2s_cfg.normal_k_neighbors = 5;
+      s2s_cfg.translation_eps = 1e-4;
+      s2s_cfg.rotation_eps = 1e-5;
+      s2s_cfg.verbose = false;
+      s2s_matcher_ = std::make_unique<ScanToMapICP>(scan_points, s2s_cfg);
+      s2s_reference_odom_ = sync_odom_pose;
+    }
   }
 
   void publishCorrectedOdom(const rclcpp::Time &stamp, const Pose2D &pose, double map_coverage) {
@@ -651,10 +646,11 @@ private:
   bool have_odom_ = false;
   int consecutive_failures_ = 0;
 
-  // --- scan-to-scan ICP fallback state ---
-  std::vector<Point2D> prev_scan_points_;
-  Pose2D prev_odom_pose_;
-  bool have_prev_scan_ = false;
+  // --- Persistent scan-to-scan ICP fallback ---
+  // The KD-tree + normals inside s2s_matcher_ are rebuilt only when a
+  // success frame provides a new reference scan, NOT on every fallback attempt.
+  std::unique_ptr<ScanToMapICP> s2s_matcher_;
+  Pose2D s2s_reference_odom_;
 
   std::optional<Pose2D> laser_to_base_;
   std::string cached_scan_frame_;

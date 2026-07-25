@@ -38,7 +38,7 @@ def generate_launch_description():
     
     corrected_odom_topic_arg = DeclareLaunchArgument(
         'corrected_odom_topic',
-        default_value='/odom_corrected',
+        default_value='/icp_pose_raw',
         description='Topic for corrected odometry'
     )
     
