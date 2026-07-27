@@ -442,6 +442,7 @@ private:
     if (is_good_match) {
       offset_updated = true;
       consecutive_failures_ = 0;
+      main_icp_failures_since_last_true_success_ = 0;
       map_to_odom_offset_ =
           result.corrected_pose * sync_odom_pose.inverse();
       double inlier_ratio = (double)result.inlier_count / scan_points.size();
@@ -451,6 +452,7 @@ private:
     } else {
       offset_updated = false;
       consecutive_failures_++;
+      main_icp_failures_since_last_true_success_++;
       RCLCPP_WARN(get_logger(), "ICP failed (fail #%d/%d): converged=%d, coverage=%.1f%%, RMS=%.4f. %s",
                   consecutive_failures_, fallback_hysteresis_,
                   result.converged, map_coverage * 100.0, result.inlier_rms,
@@ -517,7 +519,10 @@ private:
       }
 
       // --- Tier 2 fallback: geometric relocalization against the static map ---
-      if (!offset_updated && consecutive_failures_ >= fallback_hysteresis_) {
+      // Uses main_icp_failures_since_last_true_success_ (not consecutive_failures_)
+      // so that scan-to-scan fallback successes don't reset the counter and prevent
+      // the relocalizer from ever running.
+      if (!offset_updated && main_icp_failures_since_last_true_success_ >= fallback_hysteresis_) {
         const Pose2D map_frame_initial_guess = map_to_odom_offset_ * sync_odom_pose;
         auto reloc_result = relocalizer_->relocalize(scan_points, *matcher_, map_frame_initial_guess);
 
@@ -549,12 +554,13 @@ private:
           }
           double reloc_coverage = map_pts.empty() ? 0.0 : (double)covered_count / map_pts.size();
 
-          if (reloc_coverage > map_coverage && reloc_coverage >= 0.70) {
+          if (reloc_coverage > map_coverage && reloc_coverage >= 0.55) {
             RCLCPP_INFO(get_logger(), "Fallback relocalization succeeded. Recovered pose: [%.3f, %.3f, %.3f], coverage: %.1f%%",
                         reloc_pose.x, reloc_pose.y, reloc_pose.theta, reloc_coverage * 100.0);
             map_to_odom_offset_ = reloc_pose * sync_odom_pose.inverse();
             map_coverage = reloc_coverage;
             consecutive_failures_ = 0;
+            main_icp_failures_since_last_true_success_ = 0;
             offset_updated = true;
           } else {
             RCLCPP_ERROR(get_logger(), "Fallback relocalization did not find a better fit (reloc coverage=%.1f%%, original map coverage=%.1f%%). Keeping previous map->odom offset.",
@@ -645,6 +651,7 @@ private:
   geometry_msgs::msg::TwistWithCovariance current_odom_twist_;
   bool have_odom_ = false;
   int consecutive_failures_ = 0;
+  int main_icp_failures_since_last_true_success_ = 0;  // only reset on true main ICP success
 
   // --- Persistent scan-to-scan ICP fallback ---
   // The KD-tree + normals inside s2s_matcher_ are rebuilt only when a

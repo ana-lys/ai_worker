@@ -119,6 +119,11 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
+# Install the Python debug script so it is available via "ros2 run ffw_odom debug_scan_map.py".
+install(PROGRAMS scripts/debug_scan_map.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install launch and config files.
 install(DIRECTORY
   launch
