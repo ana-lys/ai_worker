@@ -23,9 +23,9 @@ class GripperCurrentMonitor(Node):
             voltage = values.get('Present Input Voltage', None)
             hw_err = values.get('Hardware Error Status', None)
 
-            output = f"[XM430 ID 130] Current: {current_ma:>8.2f} mA"
+            output = f"[XM430 ID 130] Current: {current_ma:>10.6f} mA"
             if pos is not None:
-                output += f" | Pos: {pos:>8.1f}"
+                output += f" | Pos: {pos:>10.6f}"
             if vel is not None:
                 output += f" | Vel: {vel:>8.2f}"
             if voltage is not None:

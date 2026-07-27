@@ -1604,7 +1604,7 @@ public:
 
     gripper_r_pos_ += get_step(right_btn0_, right_btn0_press_time_); // close
     gripper_r_pos_ -= get_step(right_btn1_, right_btn1_press_time_); // open
-    gripper_r_pos_ = std::clamp(gripper_r_pos_, 0.0, 1.2);
+    gripper_r_pos_ = std::clamp(gripper_r_pos_, 0.199, 1.2);  // XM430 MinPosLimit=130 (~0.199 rad)
 
     static int log_counter = 0;
     if ((left_btn0_ || left_btn1_ || right_btn0_ || right_btn1_) &&
