@@ -529,7 +529,7 @@ private:
               float base_b = 255.0f - (127.0f * x);
               float base_g = 255.0f * (1.0f - x);
               float base_r = 0.0f;
-              float diff = x - 0.135f;
+              float diff = x - 0.115f;
               float c = 1.0f - std::pow(diff / 0.02f, 4.0f);
               if (c < 0.0f) c = 0.0f;
               float b = base_b * (1.0f - c) + 0.0f * c;
