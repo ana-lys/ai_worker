@@ -329,7 +329,7 @@
       </gpio>
       <!-- XM430-W350 gripper (replaces RH-P12-RN-A at ID 8) -->
       <!-- Hardware registers already burned [OpMode=5, CurrentLimit=750mA,
-           MaxPos=1024, MinPos=0, HomingOffset=240 — software values must match
+           MaxPos=1024, MinPos=130 (~11.5°), HomingOffset=240 — software values must match
            so the DynamixelHardware plugin is a no-op at init. -->
       <gpio name="dxl130">
         <param name="type">dxl</param>
@@ -347,7 +347,7 @@
         <param name="Profile Acceleration">0</param>
         <param name="Homing Offset">240</param>
         <param name="Max Position Limit">1024</param>
-        <param name="Min Position Limit">0</param>
+        <param name="Min Position Limit">130</param>
         <param name="[unit info]">Goal Position, 0.0015339807878856412, rad, signed, 0.0; Present Position, 0.0015339807878856412, rad, signed, 0.0</param>
       </gpio>
       <!-- LEFT ARM -->

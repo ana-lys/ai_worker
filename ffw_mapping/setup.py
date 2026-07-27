@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/record_map.launch.py']),
+        ('share/' + package_name + '/launch', ['launch/record_map.launch.py', 'launch/record_and_project.launch.py']),
     ],
     install_requires=['setuptools', 'rosbag2_py', 'open3d', 'opencv-python', 'scikit-learn', 'pyyaml', 'numpy', 'tf-transformations'],
     zip_safe=True,
@@ -18,7 +18,7 @@ setup(
     maintainer_email='shatapdude@gmail.com',
     description='Offline Mapping tools using ICP and RANSAC',
     license='MIT',
-    scripts=['scripts/generate_map.py', 'scripts/convert_bag.py'],
+    scripts=['scripts/generate_map.py', 'scripts/convert_bag.py', 'scripts/accumulate_map_scan.py'],
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
