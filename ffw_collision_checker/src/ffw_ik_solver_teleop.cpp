@@ -390,6 +390,14 @@ public:
     collision_debug_pub_ = this->create_publisher<ffw_collision_checker::msg::CollisionDebug>(
         "/ik_solver/collision_debug", 10);
 
+    // Achieved EE pose (MuJoCo site pose) in map frame, per arm — published each
+    // control tick so the SpaceMouse mapper can re-base its delta accumulation
+    // onto the real pose at engage/switch time (see quest_teleop_plan.md §11).
+    achieved_pose_pub_l_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/ik_solver/achieved_ee_pose_l", 10);
+    achieved_pose_pub_r_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/ik_solver/achieved_ee_pose_r", 10);
+
     // If hardware_mode=false, base teleop is disabled, so there's no mode
     // switch. Default to ARM.
     current_mode_ = hardware_mode_ ? "BASE" : "ARM";
@@ -863,6 +871,10 @@ public:
       target_l_ = initial_l_;
       accum_l_trans_.setZero();
       accum_l_rot_.setIdentity();
+      // Re-base the mapper's world-frame reference so its next delta starts
+      // from the freshly-snapped pose (no phantom jump on mode switch).
+      last_mapper_l_trans_ = target_l_.translation();
+      last_mapper_l_rot_ = target_l_.linear();
     }
     if (right_id >= 0) {
       initial_r_.translation() =
@@ -874,6 +886,8 @@ public:
       target_r_ = initial_r_;
       accum_r_trans_.setZero();
       accum_r_rot_.setIdentity();
+      last_mapper_r_trans_ = target_r_.translation();
+      last_mapper_r_rot_ = target_r_.linear();
     }
 
     hardware_sync_requested_ = false;
@@ -1514,6 +1528,8 @@ private:
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
       head_traj_pub_;
   rclcpp::Publisher<ffw_collision_checker::msg::CollisionDebug>::SharedPtr collision_debug_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_pub_l_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_pub_r_;
 
   bool hardware_mode_ = true;
   std::string robot_model_ = "bg2";
@@ -1572,6 +1588,31 @@ public:
 
   void publish_collision_debug(const ffw_collision_checker::msg::CollisionDebug &msg) {
     collision_debug_pub_->publish(msg);
+  }
+
+  // Publish each arm's achieved EE pose (MuJoCo site pose) in map frame, so
+  // the SpaceMouse mapper can re-base its world-frame accumulation onto the
+  // real pose at engage/switch time (see quest_teleop_plan.md §11).
+  void publish_achieved_poses(const Eigen::Isometry3d &achieved_l,
+                              const Eigen::Isometry3d &achieved_r,
+                              bool publish_l, bool publish_r) {
+    auto publish_one = [this](const rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr &pub,
+                              const Eigen::Isometry3d &achieved) {
+      geometry_msgs::msg::PoseStamped msg;
+      msg.header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+      msg.header.frame_id = "map";
+      msg.pose.position.x = achieved.translation().x();
+      msg.pose.position.y = achieved.translation().y();
+      msg.pose.position.z = achieved.translation().z();
+      Eigen::Quaterniond q(achieved.linear());
+      msg.pose.orientation.x = q.x();
+      msg.pose.orientation.y = q.y();
+      msg.pose.orientation.z = q.z();
+      msg.pose.orientation.w = q.w();
+      pub->publish(msg);
+    };
+    if (publish_l) publish_one(achieved_pose_pub_l_, achieved_l);
+    if (publish_r) publish_one(achieved_pose_pub_r_, achieved_r);
   }
 
   int get_and_reset_joint_msg_count() {
@@ -1932,6 +1973,10 @@ int main(int argc, char **argv) {
               d->site_xmat + 9 * right_id)
               .cast<double>();
     }
+    // Publish the achieved EE pose in map frame (not the commanded target —
+    // the setpoint can lag the site after clipping/IK).
+    node->publish_achieved_poses(achieved_l, achieved_r,
+                                 left_id >= 0, right_id >= 0);
     node->clip_target(achieved_l, achieved_r);
 
     // Update target variables so the viewer spheres reflect the clipped target
