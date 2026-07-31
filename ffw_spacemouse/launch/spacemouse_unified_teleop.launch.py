@@ -199,16 +199,19 @@ def launch_setup(context):
         )
 
     # Quest controller bridge (optional — ARM override). quest_to_ros2.py is the
-    # pure telemetry bridge publishing /quest_state (no control logic); --tui
-    # keeps its 100 Hz HUD on the piped launch stdout (quest_teleop_plan §7).
+    # pure telemetry bridge publishing /quest_state (no control logic). Its
+    # output goes to the launch log, not the console, so the mapper/base node
+    # prints stay readable instead of being flooded by the bridge's 100 Hz HUD
+    # (quest_teleop_plan §7). For a live quest HUD, run the script with --tui
+    # in its own terminal.
     if use_quest:
         quest_script = os.path.join(
             get_package_prefix('ffw_spacemouse'),
             'lib', 'ffw_spacemouse', 'quest_to_ros2.py')
         nodes.append(
             ExecuteProcess(
-                cmd=['python3', quest_script, '--port', quest_device, '--tui'],
-                output='screen',
+                cmd=['python3', quest_script, '--port', quest_device],
+                output='log',
             )
         )
 
