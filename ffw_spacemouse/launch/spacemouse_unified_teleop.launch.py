@@ -4,13 +4,13 @@ import re
 import subprocess
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, EmitEvent
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, EmitEvent, ExecuteProcess
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 
 
 def _detect_spacemice():
@@ -101,6 +101,11 @@ def launch_setup(context):
     use_logitech = use_logitech_str.lower() in ('true', '1', 'yes')
     logitech_device_id = LaunchConfiguration('logitech_device_id').perform(context)
 
+    # Quest controller ARM override
+    use_quest_str = LaunchConfiguration('use_quest').perform(context)
+    use_quest = use_quest_str.lower() in ('true', '1', 'yes')
+    quest_device = LaunchConfiguration('quest_device').perform(context)
+
     if left_id == '0' and right_id == '1':
         auto_left, auto_right = _detect_spacemice()
         if auto_left is not None:
@@ -120,13 +125,16 @@ def launch_setup(context):
         )
     )
 
-    # Right SpaceMouse Mapper (includes joy_node)
+    # Right SpaceMouse Mapper (includes joy_node) — quest_publish_notifications
+    # false: only the left instance fires /ffw_control/notification; both still
+    # publish their own /quest/<arm>/active (quest_teleop_plan §7).
     nodes.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(mapper_launch_file),
             launch_arguments={
                 'target_arm': 'right',
                 'device_id': right_id,
+                'quest_publish_notifications': 'false',
             }.items()
         )
     )
@@ -190,6 +198,20 @@ def launch_setup(context):
             )
         )
 
+    # Quest controller bridge (optional — ARM override). quest_to_ros2.py is the
+    # pure telemetry bridge publishing /quest_state (no control logic); --tui
+    # keeps its 100 Hz HUD on the piped launch stdout (quest_teleop_plan §7).
+    if use_quest:
+        quest_script = os.path.join(
+            get_package_prefix('ffw_spacemouse'),
+            'lib', 'ffw_spacemouse', 'quest_to_ros2.py')
+        nodes.append(
+            ExecuteProcess(
+                cmd=['python3', quest_script, '--port', quest_device, '--tui'],
+                output='screen',
+            )
+        )
+
     # Failsafe shutdown event — registered against the base_teleop_node
     if hardware_mode:
         nodes.append(
@@ -227,5 +249,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'logitech_device_id', default_value='-1',
             description='SDL device index for Logitech (auto-detect if -1).'),
+        DeclareLaunchArgument(
+            'use_quest', default_value='false',
+            description='Enable Quest controller ARM override (runs quest_to_ros2.py bridge + forwards quest params to joy_hand).'),
+        DeclareLaunchArgument(
+            'quest_device', default_value='9500',
+            description='Port the Quest stream arrives on (passed to quest_to_ros2.py --port).'),
         OpaqueFunction(function=launch_setup),
     ])
