@@ -635,20 +635,6 @@ private:
       joy = latest_joy_;
     }
 
-    // Drift re-base (quest_teleop_plan §11): while in ARM, if the solver's
-    // achieved pose has drifted >10cm from the mapper's accumulated goal, snap
-    // back to the achieved pose. Gated on SpaceMouse idle (both axes ~0) and
-    // quest inactive, so we never fight the operator or a live override.
-    if (quest_state_ == QuestState::SM_CONTROL && achieved_pose_valid_ &&
-        spacemouse_idle(joy)) {
-      double dist = (achieved_pose_map_.translation() - ee_goal_.translation()).norm();
-      if (dist > 0.10) {
-        ee_goal_ = achieved_pose_map_;
-        RCLCPP_INFO(this->get_logger(),
-          "Drift re-base: snapped ee_goal_ to achieved (%.3f m gap)", dist);
-      }
-    }
-
     double pos_step = this->get_parameter("pos_step").as_double();
     double rot_step = this->get_parameter("rot_step").as_double();
 
