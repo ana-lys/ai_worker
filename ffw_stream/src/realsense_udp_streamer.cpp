@@ -251,8 +251,10 @@ void stream_camera(const std::string &serial, int index,
     log("CAM" + std::to_string(index) +
         " depth_scale=" + std::to_string(depth_scale) + " m/unit");
 
-    // Fixed exposure for the color sensor (right D405 RGB): disable
-    // auto-exposure and pin a low exposure (us) for a sharper image.
+    // Fixed color-sensor settings for the right D405 RGB: disable auto-exposure
+    // and pin a low exposure (us) for a sharper, less-overbright image. Also
+    // disable auto white balance — with a large dark area (gripper) in view,
+    // AWB gain compensation can wash the image out.
     if (rgb_mode && color_exposure_us > 0) {
       try {
         rs2::color_sensor cs = profile.get_device().first<rs2::color_sensor>();
@@ -260,12 +262,17 @@ void stream_camera(const std::string &serial, int index,
           cs.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 0.0f);
         if (cs.supports(RS2_OPTION_EXPOSURE))
           cs.set_option(RS2_OPTION_EXPOSURE, static_cast<float>(color_exposure_us));
+        if (cs.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE))
+          cs.set_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE, 0.0f);
         float ae = cs.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE)
                        ? cs.get_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE) : -1.0f;
         float exp = cs.supports(RS2_OPTION_EXPOSURE)
                         ? cs.get_option(RS2_OPTION_EXPOSURE) : -1.0f;
+        float awb = cs.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE)
+                        ? cs.get_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE) : -1.0f;
         log("CAM" + std::to_string(index) + " color: auto_exposure=" +
-            std::to_string(ae) + " exposure_us=" + std::to_string(exp));
+            std::to_string(ae) + " exposure_us=" + std::to_string(exp) +
+            " auto_white_balance=" + std::to_string(awb));
       } catch (const rs2::error &e) {
         log("CAM" + std::to_string(index) + " color option set failed: " + e.what());
       }
