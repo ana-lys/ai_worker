@@ -214,7 +214,8 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
 void stream_camera(const std::string &serial, int index,
                    const std::string &dest_ip, int depth_port, int ir_port,
                    int width, int height, int fps, float max_depth_m,
-                   bool rgb_mode = false, int color_exposure_us = -1) {
+                   bool rgb_mode = false, int color_exposure_us = -1,
+                   int color_wb = -1) {
   std::ostringstream hdr;
   hdr << "\n=== CAM" << index << " " << serial << " : depth->udp:" << depth_port
       << "  " << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port << "  gst=h264 ===";
@@ -277,17 +278,39 @@ void stream_camera(const std::string &serial, int index,
             s.set_option(RS2_OPTION_EXPOSURE, static_cast<float>(color_exposure_us));
           if (s.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE))
             s.set_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE, 0.0f);
+          // Manual white balance: with AWB disabled the sensor sits at its
+          // fixed WB, which reads yellow under warm light. Optionally pin a
+          // manual value (K). Always log the supported range so we know the
+          // valid scale even when not overriding.
+          if (s.supports(RS2_OPTION_WHITE_BALANCE)) {
+            rs2::option_range rng = s.get_option_range(RS2_OPTION_WHITE_BALANCE);
+            if (color_wb > 0) {
+              s.set_option(RS2_OPTION_WHITE_BALANCE, static_cast<float>(color_wb));
+            }
+            log("CAM" + std::to_string(index) + " " + who +
+                " WB range: min=" + std::to_string(rng.min) +
+                " max=" + std::to_string(rng.max) +
+                " default=" + std::to_string(rng.def) +
+                (color_wb > 0 ? "  manual_wb=" + std::to_string(color_wb)
+                              : "  (left at default)"));
+          } else {
+            log("CAM" + std::to_string(index) + " " + who +
+                " : RS2_OPTION_WHITE_BALANCE not supported");
+          }
           float ae = s.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE)
                          ? s.get_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE) : -1.0f;
           float exp = s.supports(RS2_OPTION_EXPOSURE)
                           ? s.get_option(RS2_OPTION_EXPOSURE) : -1.0f;
           float awb = s.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE)
                           ? s.get_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE) : -1.0f;
+          float wb = s.supports(RS2_OPTION_WHITE_BALANCE)
+                         ? s.get_option(RS2_OPTION_WHITE_BALANCE) : -1.0f;
           log("CAM" + std::to_string(index) + " " + who + " '" +
               std::string(s.get_info(RS2_CAMERA_INFO_NAME)) +
               "': auto_exposure=" + std::to_string(ae) +
               " exposure_us=" + std::to_string(exp) +
-              " auto_white_balance=" + std::to_string(awb));
+              " auto_white_balance=" + std::to_string(awb) +
+              " white_balance=" + std::to_string(wb));
         };
 
         rs2::sensor color_owner;
@@ -424,7 +447,8 @@ int main(int argc, char **argv) {
     std::cerr << "Usage: " << argv[0]
               << " <dest_ip> <base_port> [width=480] [height=270] [fps=30] "
                  "[max_depth_m=1.0] [--enable-d405s|--disable-d405s] "
-                 "[--d435-rgb|--no-d435-rgb]"
+                 "[--d435-rgb|--no-d435-rgb] [--color-exposure <us>] "
+                 "[--color-wb <K>]"
               << std::endl;
     return 1;
   }
@@ -433,6 +457,7 @@ int main(int argc, char **argv) {
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
+  int color_wb = -1;           // -1 = leave SDK default white balance
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--enable-d405s") {
@@ -446,6 +471,10 @@ int main(int argc, char **argv) {
     } else if (arg == "--color-exposure") {
       if (i + 1 < argc) {
         color_exposure_us = std::atoi(argv[++i]);
+      }
+    } else if (arg == "--color-wb") {
+      if (i + 1 < argc) {
+        color_wb = std::atoi(argv[++i]);
       }
     } else {
       positional_args.push_back(arg);
@@ -503,7 +532,8 @@ int main(int argc, char **argv) {
       std::to_string(fps) + "  max_depth=" + std::to_string(max_depth_m) + "m" +
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
-      "  color_exposure_us=" + std::to_string(color_exposure_us));
+      "  color_exposure_us=" + std::to_string(color_exposure_us) +
+      "  color_wb=" + std::to_string(color_wb));
 
   std::vector<std::thread> threads;
   int cam_idx = 0;
@@ -521,7 +551,7 @@ int main(int argc, char **argv) {
       bool rgb_mode = (cam_idx == 1);
       threads.emplace_back(stream_camera, serials[i], cam_idx,
                            dest_ip, depth_port, ir_port, width, height, fps,
-                           max_depth_m, rgb_mode, color_exposure_us);
+                           max_depth_m, rgb_mode, color_exposure_us, color_wb);
       cam_idx++;
     }
   }

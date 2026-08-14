@@ -30,6 +30,12 @@ def generate_launch_description():
         description='Fixed color exposure (us) for the D405 RGB stream; '
                     '0 = keep SDK default auto-exposure'
     )
+    color_wb_arg = DeclareLaunchArgument(
+        'color_wb',
+        default_value='0',
+        description='Fixed manual white balance (K) for the D405 RGB stream; '
+                    '0 = leave SDK default white balance'
+    )
 
     def launch_setup(context, *args, **kwargs):
         dest_ip = LaunchConfiguration('dest_ip').perform(context)
@@ -38,6 +44,7 @@ def generate_launch_description():
         enable_d405s = LaunchConfiguration('enable_d405s').perform(context).lower() == 'true'
         rgb_source = LaunchConfiguration('rgb_source').perform(context)
         color_exposure = LaunchConfiguration('color_exposure').perform(context)
+        color_wb = LaunchConfiguration('color_wb').perform(context)
         actions = []
 
         # RealSense streamer can be used for D405s and/or D435 RGB.
@@ -48,6 +55,8 @@ def generate_launch_description():
             cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag]
             if color_exposure != '0':
                 cmd += ['--color-exposure', color_exposure]
+            if color_wb != '0':
+                cmd += ['--color-wb', color_wb]
             actions.append(
                 ExecuteProcess(cmd=cmd, output='screen')
             )
@@ -97,5 +106,6 @@ def generate_launch_description():
         rgb_source_arg,
         use_h264_arg,
         color_exposure_arg,
+        color_wb_arg,
         OpaqueFunction(function=launch_setup)
     ])

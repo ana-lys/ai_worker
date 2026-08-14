@@ -79,6 +79,9 @@ def generate_launch_description():
         DeclareLaunchArgument('color_exposure', default_value='6000',
                               description='Fixed color exposure (us) for the right D405 RGB; '
                                           'disables auto-exposure and auto white balance'),
+        DeclareLaunchArgument('color_wb', default_value='0',
+                              description='Fixed manual white balance (K) for the right D405 RGB; '
+                                          '0 = leave SDK default white balance (AWB stays off)'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -98,6 +101,7 @@ def generate_launch_description():
     base_port = LaunchConfiguration('base_port')
     use_h264 = LaunchConfiguration('use_h264')
     color_exposure = LaunchConfiguration('color_exposure')
+    color_wb = LaunchConfiguration('color_wb')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -313,6 +317,7 @@ def generate_launch_description():
             'rgb_source': 'oakd_lite',
             'use_h264': use_h264,
             'color_exposure': color_exposure,
+            'color_wb': color_wb,
         }.items(),
         condition=IfCondition(launch_cameras)
     )
