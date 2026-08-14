@@ -251,28 +251,81 @@ void stream_camera(const std::string &serial, int index,
     log("CAM" + std::to_string(index) +
         " depth_scale=" + std::to_string(depth_scale) + " m/unit");
 
-    // Fixed color-sensor settings for the right D405 RGB: disable auto-exposure
-    // and pin a low exposure (us) for a sharper, less-overbright image. Also
-    // disable auto white balance — with a large dark area (gripper) in view,
-    // AWB gain compensation can wash the image out.
+    // Fixed exposure for the right D405 color stream: disable auto-exposure and
+    // pin a low exposure (us) for a sharper, less-overbright image. Also disable
+    // auto white balance — with a large dark area (gripper) in view, AWB gain
+    // compensation can wash the image out.
+    //
+    // The D405 has no dedicated RGB module: its "color" stream is synthesized
+    // from one of the global-shutter IR imagers, which is shared with the depth
+    // stream. So `first<rs2::color_sensor>()` is not necessarily the sensor that
+    // drives the streamed frames, and the depth sensor's auto-exposure can keep
+    // overriding a manual exposure set only on the color sensor. We therefore:
+    //   1. find the sensor that owns the active COLOR stream and pin its
+    //      exposure / AWB,
+    //   2. disable auto-exposure on the depth sensor too (same imager),
+    //   3. restart the pipeline so the options are applied at stream start
+    //      (some RealSense options only take effect when streaming begins).
     if (rgb_mode && color_exposure_us > 0) {
       try {
-        rs2::color_sensor cs = profile.get_device().first<rs2::color_sensor>();
-        if (cs.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE))
-          cs.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 0.0f);
-        if (cs.supports(RS2_OPTION_EXPOSURE))
-          cs.set_option(RS2_OPTION_EXPOSURE, static_cast<float>(color_exposure_us));
-        if (cs.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE))
-          cs.set_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE, 0.0f);
-        float ae = cs.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE)
-                       ? cs.get_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE) : -1.0f;
-        float exp = cs.supports(RS2_OPTION_EXPOSURE)
-                        ? cs.get_option(RS2_OPTION_EXPOSURE) : -1.0f;
-        float awb = cs.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE)
-                        ? cs.get_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE) : -1.0f;
-        log("CAM" + std::to_string(index) + " color: auto_exposure=" +
-            std::to_string(ae) + " exposure_us=" + std::to_string(exp) +
-            " auto_white_balance=" + std::to_string(awb));
+        rs2::device dev = profile.get_device();
+
+        auto set_options = [&](rs2::sensor &s, const char *who) {
+          if (s.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE))
+            s.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 0.0f);
+          if (s.supports(RS2_OPTION_EXPOSURE))
+            s.set_option(RS2_OPTION_EXPOSURE, static_cast<float>(color_exposure_us));
+          if (s.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE))
+            s.set_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE, 0.0f);
+          float ae = s.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE)
+                         ? s.get_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE) : -1.0f;
+          float exp = s.supports(RS2_OPTION_EXPOSURE)
+                          ? s.get_option(RS2_OPTION_EXPOSURE) : -1.0f;
+          float awb = s.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE)
+                          ? s.get_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE) : -1.0f;
+          log("CAM" + std::to_string(index) + " " + who + " '" +
+              std::string(s.get_info(RS2_CAMERA_INFO_NAME)) +
+              "': auto_exposure=" + std::to_string(ae) +
+              " exposure_us=" + std::to_string(exp) +
+              " auto_white_balance=" + std::to_string(awb));
+        };
+
+        rs2::sensor color_owner;
+        bool found = false;
+        for (auto &s : dev.query_sensors()) {
+          for (auto &sp : s.get_stream_profiles()) {
+            if (sp.stream_type() == RS2_STREAM_COLOR) {
+              color_owner = s;
+              found = true;
+              break;
+            }
+          }
+          if (found) break;
+        }
+        if (found) {
+          set_options(color_owner, "color");
+        } else {
+          log("CAM" + std::to_string(index) + " color: no sensor owns a COLOR stream");
+        }
+
+        // Same imager feeds depth; pin its auto-exposure off too so depth AE
+        // cannot keep overriding the manual exposure above.
+        try {
+          rs2::depth_sensor ds = dev.first<rs2::depth_sensor>();
+          set_options(ds, "depth");
+        } catch (const rs2::error &e) {
+          log("CAM" + std::to_string(index) + " depth exposure set failed: " + e.what());
+        }
+
+        // Restart so the options take effect at stream start. If this fails,
+        // keep streaming with whatever stuck — just log it.
+        try {
+          pipe.stop();
+          profile = pipe.start(cfg);
+          log("CAM" + std::to_string(index) + " pipeline restarted after exposure set");
+        } catch (const rs2::error &e) {
+          log("CAM" + std::to_string(index) + " pipeline restart failed: " + e.what());
+        }
       } catch (const rs2::error &e) {
         log("CAM" + std::to_string(index) + " color option set failed: " + e.what());
       }
