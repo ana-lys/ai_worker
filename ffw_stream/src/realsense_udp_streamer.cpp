@@ -17,7 +17,7 @@
 // Usage:
 //   realsense_udp_streamer <dest_ip> <base_port> [width=480] [height=270]
 //   [fps=30] [max_depth_m=1.0] [--enable-d405s|--disable-d405s]
-//   [--d435-rgb|--no-d435-rgb]
+//   [--d435-rgb|--no-d435-rgb] [--color-exposure <microseconds>]
 //
 // Port mapping (per camera index i, 0-based):
 //   depth -> base_port + i*2
@@ -214,7 +214,7 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
 void stream_camera(const std::string &serial, int index,
                    const std::string &dest_ip, int depth_port, int ir_port,
                    int width, int height, int fps, float max_depth_m,
-                   bool rgb_mode = false) {
+                   bool rgb_mode = false, int color_exposure_us = -1) {
   std::ostringstream hdr;
   hdr << "\n=== CAM" << index << " " << serial << " : depth->udp:" << depth_port
       << "  " << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port << "  gst=h264 ===";
@@ -250,6 +250,26 @@ void stream_camera(const std::string &serial, int index,
         profile.get_device().first<rs2::depth_sensor>().get_depth_scale();
     log("CAM" + std::to_string(index) +
         " depth_scale=" + std::to_string(depth_scale) + " m/unit");
+
+    // Fixed exposure for the color sensor (right D405 RGB): disable
+    // auto-exposure and pin a low exposure (us) for a sharper image.
+    if (rgb_mode && color_exposure_us > 0) {
+      try {
+        rs2::color_sensor cs = profile.get_device().first<rs2::color_sensor>();
+        if (cs.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE))
+          cs.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 0.0f);
+        if (cs.supports(RS2_OPTION_EXPOSURE))
+          cs.set_option(RS2_OPTION_EXPOSURE, static_cast<float>(color_exposure_us));
+        float ae = cs.supports(RS2_OPTION_ENABLE_AUTO_EXPOSURE)
+                       ? cs.get_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE) : -1.0f;
+        float exp = cs.supports(RS2_OPTION_EXPOSURE)
+                        ? cs.get_option(RS2_OPTION_EXPOSURE) : -1.0f;
+        log("CAM" + std::to_string(index) + " color: auto_exposure=" +
+            std::to_string(ae) + " exposure_us=" + std::to_string(exp));
+      } catch (const rs2::error &e) {
+        log("CAM" + std::to_string(index) + " color option set failed: " + e.what());
+      }
+    }
 
     size_t second_bpp = rgb_mode ? 3 : 1;
     std::vector<uint8_t> depth8(width * height, 0);
@@ -352,6 +372,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> positional_args;
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
+  int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--enable-d405s") {
@@ -362,6 +383,10 @@ int main(int argc, char **argv) {
       d435_rgb_enabled = true;
     } else if (arg == "--no-d435-rgb") {
       d435_rgb_enabled = false;
+    } else if (arg == "--color-exposure") {
+      if (i + 1 < argc) {
+        color_exposure_us = std::atoi(argv[++i]);
+      }
     } else {
       positional_args.push_back(arg);
     }
@@ -417,7 +442,8 @@ int main(int argc, char **argv) {
       "  " + std::to_string(width) + "x" + std::to_string(height) + "@" +
       std::to_string(fps) + "  max_depth=" + std::to_string(max_depth_m) + "m" +
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
-      "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off"));
+      "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
+      "  color_exposure_us=" + std::to_string(color_exposure_us));
 
   std::vector<std::thread> threads;
   int cam_idx = 0;
@@ -435,7 +461,7 @@ int main(int argc, char **argv) {
       bool rgb_mode = (cam_idx == 1);
       threads.emplace_back(stream_camera, serials[i], cam_idx,
                            dest_ip, depth_port, ir_port, width, height, fps,
-                           max_depth_m, rgb_mode);
+                           max_depth_m, rgb_mode, color_exposure_us);
       cam_idx++;
     }
   }

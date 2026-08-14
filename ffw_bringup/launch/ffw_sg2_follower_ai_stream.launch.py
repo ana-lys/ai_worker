@@ -49,7 +49,7 @@ def generate_launch_description():
                               description='Whether to launch cameras.'),
         DeclareLaunchArgument('launch_lidar', default_value='true',
                               description='Whether to launch lidar.'),
-        DeclareLaunchArgument('init_position', default_value='true',
+        DeclareLaunchArgument('init_position', default_value='false',
                               description='Whether to launch the init_position node.'),
         DeclareLaunchArgument('model', default_value='ffw_sg2_rev1_follower',
                               description='Robot model name.'),
@@ -76,6 +76,9 @@ def generate_launch_description():
                               description='Base UDP port for UDP Streamer'),
         DeclareLaunchArgument('use_h264', default_value='true',
                               description='OAK-D codec: true=H264 Baseline (default), false=MJPEG'),
+        DeclareLaunchArgument('color_exposure', default_value='5000',
+                              description='Fixed color exposure (us) for the right D405 RGB; '
+                                          'disables auto-exposure'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -94,6 +97,7 @@ def generate_launch_description():
     dest_ip = LaunchConfiguration('dest_ip')
     base_port = LaunchConfiguration('base_port')
     use_h264 = LaunchConfiguration('use_h264')
+    color_exposure = LaunchConfiguration('color_exposure')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -308,6 +312,7 @@ def generate_launch_description():
             'base_port': base_port,
             'rgb_source': 'oakd_lite',
             'use_h264': use_h264,
+            'color_exposure': color_exposure,
         }.items(),
         condition=IfCondition(launch_cameras)
     )

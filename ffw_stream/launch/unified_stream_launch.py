@@ -24,6 +24,12 @@ def generate_launch_description():
         default_value='true',
         description='OAK-D codec: true=H264 Baseline (default), false=MJPEG'
     )
+    color_exposure_arg = DeclareLaunchArgument(
+        'color_exposure',
+        default_value='0',
+        description='Fixed color exposure (us) for the D405 RGB stream; '
+                    '0 = keep SDK default auto-exposure'
+    )
 
     def launch_setup(context, *args, **kwargs):
         dest_ip = LaunchConfiguration('dest_ip').perform(context)
@@ -31,6 +37,7 @@ def generate_launch_description():
         fps = LaunchConfiguration('fps').perform(context)
         enable_d405s = LaunchConfiguration('enable_d405s').perform(context).lower() == 'true'
         rgb_source = LaunchConfiguration('rgb_source').perform(context)
+        color_exposure = LaunchConfiguration('color_exposure').perform(context)
         actions = []
 
         # RealSense streamer can be used for D405s and/or D435 RGB.
@@ -38,11 +45,11 @@ def generate_launch_description():
             rs_exec = os.path.join(get_package_prefix('ffw_stream'), 'lib', 'ffw_stream', 'realsense_udp_streamer')
             d405_flag = '--enable-d405s' if enable_d405s else '--disable-d405s'
             d435_flag = '--d435-rgb' if rgb_source == 'd435' else '--no-d435-rgb'
+            cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag]
+            if color_exposure != '0':
+                cmd += ['--color-exposure', color_exposure]
             actions.append(
-                ExecuteProcess(
-                    cmd=[rs_exec, dest_ip, base_port, d405_flag, d435_flag],
-                    output='screen'
-                )
+                ExecuteProcess(cmd=cmd, output='screen')
             )
 
         if rgb_source == 'zedm':
@@ -89,5 +96,6 @@ def generate_launch_description():
         enable_d405s_arg,
         rgb_source_arg,
         use_h264_arg,
+        color_exposure_arg,
         OpaqueFunction(function=launch_setup)
     ])
