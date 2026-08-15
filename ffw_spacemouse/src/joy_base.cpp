@@ -23,13 +23,13 @@ struct ButtonClickState {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SpaceMouseBaseTeleop
+// JoyBase
 //
 // Physical assignment (BASE mode):
 //   base_joy  = RIGHT SpaceMouse → cmd_vel (swerve base)
 //   aux_joy   = LEFT  SpaceMouse → elevator (lift) + head pan/tilt
 //
-// ARM mode (handled by spacemouse_mapper / IK solver):
+// ARM mode (handled by joy_hand / IK solver):
 //   RIGHT SpaceMouse → right arm   |   LEFT SpaceMouse → left arm
 //
 // Precision mode (double-click both buttons on same mouse):
@@ -39,9 +39,9 @@ struct ButtonClickState {
 // Mode switch (double-click both buttons on BOTH mice simultaneously):
 //   Switches between BASE and ARM modes.
 // ─────────────────────────────────────────────────────────────────────────────
-class SpaceMouseBaseTeleop : public rclcpp::Node {
+class JoyBase : public rclcpp::Node {
 public:
-  SpaceMouseBaseTeleop() : Node("spacemouse_base_teleop") {
+  JoyBase() : Node("joy_base") {
     // ── Base joy parameters (RIGHT SpaceMouse → swerve base) ─────────────────
     this->declare_parameter("base_joy_topic", "/right/joy");
     this->declare_parameter("max_linear_vel", 1.0);
@@ -92,15 +92,15 @@ public:
     // ───────────────────────────────────────────────────────────
     base_joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
         this->get_parameter("base_joy_topic").as_string(), 10,
-        std::bind(&SpaceMouseBaseTeleop::base_joy_callback, this, _1));
+        std::bind(&JoyBase::base_joy_callback, this, _1));
 
     aux_joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
         this->get_parameter("aux_joy_topic").as_string(), 10,
-        std::bind(&SpaceMouseBaseTeleop::aux_joy_callback, this, _1));
+        std::bind(&JoyBase::aux_joy_callback, this, _1));
 
     joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
         this->get_parameter("joint_state_topic").as_string(), 20,
-        std::bind(&SpaceMouseBaseTeleop::joint_state_callback, this, _1));
+        std::bind(&JoyBase::joint_state_callback, this, _1));
 
     // Logitech active flag — true means Logitech has taken over base control
     logitech_active_sub_ = this->create_subscription<std_msgs::msg::Bool>(
@@ -132,7 +132,7 @@ public:
     // Failsafe timer (checks every 2.5 seconds)
     failsafe_timer_ = this->create_wall_timer(
         std::chrono::milliseconds(2500),
-        std::bind(&SpaceMouseBaseTeleop::failsafe_check, this));
+        std::bind(&JoyBase::failsafe_check, this));
 
     // Publish initial mode and precision states after a short delay
     std::thread([this]() {
@@ -147,7 +147,7 @@ public:
     }).detach();
 
     RCLCPP_INFO(this->get_logger(),
-                "SpaceMouse Base Teleop started. base_joy=%s (RIGHT mouse, "
+                "JoyBase started. base_joy=%s (RIGHT mouse, "
                 "base), aux_joy=%s (LEFT mouse, head)",
                 this->get_parameter("base_joy_topic").as_string().c_str(),
                 this->get_parameter("aux_joy_topic").as_string().c_str());
@@ -428,7 +428,7 @@ private:
 
 int main(int argc, char *argv[]) {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<SpaceMouseBaseTeleop>());
+  rclcpp::spin(std::make_shared<JoyBase>());
   rclcpp::shutdown();
   return 0;
 }

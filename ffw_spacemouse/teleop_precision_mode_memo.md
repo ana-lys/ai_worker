@@ -1,6 +1,6 @@
 # SpaceMouse Precision Mode Toggle
 
-This memo documents the addition of a hardware-based Precision Mode toggle in the `spacemouse_mapper` node.
+This memo documents the addition of a hardware-based Precision Mode toggle in the `joy_hand` node (formerly `spacemouse_mapper`).
 
 ## Motivation
 The SpaceMouse physical hardware reaches its mechanical limits on diagonal movements before the internal axes hit 1.0 (e.g. `sqrt(0.6^2 + 0.6^2) = 0.84`). To achieve maximum velocity on diagonal movements, we must use a `trans_sensitivity` multiplier of `1.5`. 

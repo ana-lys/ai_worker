@@ -36,11 +36,8 @@ def generate_launch_description():
         'quest_release_min', default_value='0.1',
         description='All four analog floats below this arms the engage count.')
     quest_w_slow_arg = DeclareLaunchArgument(
-        'quest_w_slow', default_value='0.02',
+        'quest_w_slow', default_value='0.15',
         description='Interpolation gain during QUEST_APPROACH.')
-    quest_w_fast_arg = DeclareLaunchArgument(
-        'quest_w_fast', default_value='0.15',
-        description='Interpolation gain during QUEST_TRACK.')
     quest_approach_pos_m_arg = DeclareLaunchArgument(
         'quest_approach_pos_m', default_value='0.05',
         description='Position error threshold for APPROACH->READY.')
@@ -50,9 +47,18 @@ def generate_launch_description():
     quest_timeout_s_arg = DeclareLaunchArgument(
         'quest_timeout_s', default_value='0.5',
         description='No /quest_state for this long -> abort freeze.')
-    quest_no_progress_s_arg = DeclareLaunchArgument(
-        'quest_no_progress_s', default_value='5.0',
-        description='APPROACH without error progress for this long -> abort freeze.')
+    quest_debug_engage_arg = DeclareLaunchArgument(
+        'quest_debug_engage', default_value='false',
+        description='Log each detect_engage edge (arm/hold/disarm) in joy_hand for diagnostics.')
+    quest_thumb_engage_min_arg = DeclareLaunchArgument(
+        'quest_thumb_engage_min', default_value='0.5',
+        description='Thumb/grip analog must be >= this for the 4-way engage hold.')
+    quest_trigger_engage_min_arg = DeclareLaunchArgument(
+        'quest_trigger_engage_min', default_value='0.5',
+        description='Trigger analog must be >= this for the 4-way engage hold.')
+    quest_debug_error_arg = DeclareLaunchArgument(
+        'quest_debug_error', default_value='false',
+        description='Print the APPROACH error budget (ep/er + position distances) in joy_hand for slow->fast diagnostics.')
 
     return LaunchDescription([
         target_arm_arg,
@@ -61,11 +67,13 @@ def generate_launch_description():
         quest_hold_engage_s_arg,
         quest_release_min_arg,
         quest_w_slow_arg,
-        quest_w_fast_arg,
         quest_approach_pos_m_arg,
         quest_approach_ang_rad_arg,
         quest_timeout_s_arg,
-        quest_no_progress_s_arg,
+        quest_debug_engage_arg,
+        quest_thumb_engage_min_arg,
+        quest_trigger_engage_min_arg,
+        quest_debug_error_arg,
         Node(
             package='joy',
             executable='joy_node',
@@ -79,8 +87,8 @@ def generate_launch_description():
         ),
         Node(
             package='ffw_spacemouse',
-            executable='spacemouse_mapper',
-            name='spacemouse_mapper',
+            executable='joy_hand',
+            name='joy_hand',
             namespace=LaunchConfiguration('target_arm'),
             output='screen',
             parameters=[{
@@ -108,11 +116,13 @@ def generate_launch_description():
                 'quest_hold_engage_s': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_hold_engage_s'), value_type=float),
                 'quest_release_min': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_release_min'), value_type=float),
                 'quest_w_slow': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_w_slow'), value_type=float),
-                'quest_w_fast': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_w_fast'), value_type=float),
                 'quest_approach_pos_m': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_approach_pos_m'), value_type=float),
                 'quest_approach_ang_rad': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_approach_ang_rad'), value_type=float),
                 'quest_timeout_s': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_timeout_s'), value_type=float),
-                'quest_no_progress_s': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_no_progress_s'), value_type=float),
+                'quest_debug_engage': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_debug_engage'), value_type=bool),
+                'quest_debug_error': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_debug_error'), value_type=bool),
+                'quest_thumb_engage_min': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_thumb_engage_min'), value_type=float),
+                'quest_trigger_engage_min': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_trigger_engage_min'), value_type=float),
                 **joint_limits,
             }]
         ),

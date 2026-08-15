@@ -14,6 +14,7 @@ Usage:
     ros2 launch ffw_spacemouse explore_logitech.launch.py
 """
 
+import math
 import time
 
 import rclpy
@@ -35,6 +36,14 @@ AXIS_LABELS = {
     3: 'THR (throttle)',
     4: 'HX (hat X)',
     5: 'HY (hat Y)',
+}
+
+# Teleop mapping: which axes map to which cmd_vel fields with x^5 scaling
+#   axis → (cmd_vel_field, max_velocity_attr)
+TELEOP_AXIS_MAP = {
+    0: ('vy', 'max_linear'),    # X stick L/R → linear.y
+    1: ('vx', 'max_linear'),    # Y stick F/B → linear.x
+    2: ('wz', 'max_angular'),   # twist        → angular.z
 }
 
 BUTTON_LABELS = {
@@ -59,6 +68,8 @@ class LogitechExplorer(Node):
         self.joy = Joy()
         self.received = False
         self._first = True
+        self.max_linear = 0.6
+        self.max_angular = 0.5
 
         self.sub = self.create_subscription(Joy, '/joy_logitech', self.cb, 10)
         self.timer = self.create_timer(0.01, self.tick)  # 100 Hz
@@ -74,6 +85,13 @@ class LogitechExplorer(Node):
 
     def _sep(self, ch='─', n=72):
         return ch * n
+
+    def _scaled(self, val, vmax):
+        """max(x² − 0.04, 0) × 1.04 × vmax, sign-preserving."""
+        s = max(val * val - 0.04, 0.0) * 1.04
+        if val < 0:
+            s = -s
+        return s * vmax
 
     # ── callbacks ────────────────────────────────────────────────────────
 
@@ -98,12 +116,18 @@ class LogitechExplorer(Node):
         lines.append(f'── Logitech Extreme 3D Pro  |  {t}  |  '
                      f'{len(msg.axes)} axes  {len(msg.buttons)} buttons  ──')
 
-        # Axes — one per line with bar
+        # Axes — one per line with bar + teleop-equivalent scaled output
         for i in range(min(len(msg.axes), 6)):
             label = AXIS_LABELS.get(i, f'Axis {i}')
             val = msg.axes[i]
             bar = self._bar(val)
-            lines.append(f'  [{i}] {label:15s} {val:+7.4f}  {bar}')
+            suffix = ''
+            if i in TELEOP_AXIS_MAP:
+                field, max_attr = TELEOP_AXIS_MAP[i]
+                vmax = getattr(self, max_attr)
+                sv = self._scaled(val, vmax)
+                suffix = f'  → {field}: {sv:+9.5f}'
+            lines.append(f'  [{i}] {label:15s} {val:+7.4f}  {bar}{suffix}')
 
         # Hat
         if len(msg.axes) >= 6:

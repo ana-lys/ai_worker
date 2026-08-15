@@ -52,8 +52,8 @@ def generate_launch_description():
         # Base, Elevator, and Head Teleop Node
         Node(
             package='ffw_spacemouse',
-            executable='spacemouse_base_teleop',
-            name='spacemouse_base_teleop',
+            executable='joy_base',
+            name='joy_base',
             output='screen',
             parameters=[{
                 'base_joy_topic': '/spacemouse/right/joy',
