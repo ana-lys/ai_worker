@@ -36,6 +36,7 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/float32.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "ffw_collision_checker/srv/toggle_joint_group.hpp"
 #include "ffw_collision_checker/srv/save_load_pose.hpp"
@@ -327,13 +328,46 @@ class TeleopNode : public rclcpp::Node {
 public:
   TeleopNode() : Node("ffw_ik_solver_teleop") {
 
+    // Two goal-update functions (quest_teleop_plan §10 fix): the delta one
+    // consumes spacemouse absolute goals as deltas (accum/rebase); the pose
+    // one consumes quest absolute goals directly (no accum/rebase). joy_hand
+    // publishes on whichever topic matches the current mode, so which function
+    // runs is decided by which topic delivered the last goal.
     pose_sub_l_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
         "/spacemouse/left/ee_target_pose", 10,
-        std::bind(&TeleopNode::pose_callback_l, this, _1));
+        std::bind(&TeleopNode::update_goal_delta_l, this, _1));
 
     pose_sub_r_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
         "/spacemouse/right/ee_target_pose", 10,
-        std::bind(&TeleopNode::pose_callback_r, this, _1));
+        std::bind(&TeleopNode::update_goal_delta_r, this, _1));
+
+    quest_pose_sub_l_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/quest/left/ee_target_pose", 10,
+        std::bind(&TeleopNode::update_goal_pose_l, this, _1));
+
+    quest_pose_sub_r_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        "/quest/right/ee_target_pose", 10,
+        std::bind(&TeleopNode::update_goal_pose_r, this, _1));
+
+    // Per-arm quest state feed (joy_hand publishes on every state change): lets
+    // the leash pick 1.5cm during APPROACH vs 3cm in TRACK (§8b).
+    quest_state_sub_l_ = this->create_subscription<std_msgs::msg::String>(
+        "/quest/left/state", 10,
+        std::bind(&TeleopNode::quest_state_cb_l, this, _1));
+
+    quest_state_sub_r_ = this->create_subscription<std_msgs::msg::String>(
+        "/quest/right/state", 10,
+        std::bind(&TeleopNode::quest_state_cb_r, this, _1));
+
+    // §11: live per-arm trigger feed — absolute gripper command in TRACK mode
+    // (1 → close, 0 → open). Published every active quest tick by joy_hand.
+    quest_trigger_sub_l_ = this->create_subscription<std_msgs::msg::Float32>(
+        "/quest/left/trigger", 10,
+        std::bind(&TeleopNode::quest_trigger_cb_l, this, _1));
+
+    quest_trigger_sub_r_ = this->create_subscription<std_msgs::msg::Float32>(
+        "/quest/right/trigger", 10,
+        std::bind(&TeleopNode::quest_trigger_cb_r, this, _1));
 
     joy_sub_l_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/left/joy", 10, std::bind(&TeleopNode::joy_callback_l, this, _1));
@@ -352,6 +386,8 @@ public:
     this->declare_parameter<bool>("right_arm_enabled", true);
     this->declare_parameter<bool>("lift_enabled", true);
     this->declare_parameter<bool>("collision_debug", true);
+    // §10 slow->fast debug: print target_l/achieved/error each 0.2s during quest
+    this->declare_parameter<bool>("quest_debug_solver", false);
 
     this->declare_parameter<std::string>("robot_model", "bg2");
     robot_model_ = this->get_parameter("robot_model").as_string();
@@ -360,6 +396,7 @@ public:
     right_arm_enabled_ = true;
     lift_enabled_ = true;
     collision_debug_ = true;
+    quest_debug_solver_ = this->get_parameter("quest_debug_solver").as_bool();
 
     parameter_callback_handle_ = this->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> &parameters) {
@@ -644,6 +681,13 @@ public:
     r = target_r_;
   }
 
+  // §10 quest slow->fast debug: pre-clip target as last seen by the pose callback
+  void get_raw_targets(Eigen::Isometry3d &l, Eigen::Isometry3d &r) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    l = raw_target_l_;
+    r = raw_target_r_;
+  }
+
   void clip_target(const Eigen::Isometry3d &achieved_l,
                    const Eigen::Isometry3d &achieved_r, double max_dist = 0.01,
                    double max_angle = 0.1) {
@@ -652,12 +696,24 @@ public:
       return;
     }
 
-    // Left arm clipping
+    // Per-arm, per-state leash: the quest pose path runs 1.5cm during APPROACH
+    // (before the triggers release) and 3cm in TRACK so the QP sees a larger
+    // error (lower adaptive damping, less lag); the spacemouse delta path keeps
+    // the tight 1cm default.
+    const double max_dist_l = last_goal_from_quest_l_ ? quest_leash(quest_state_l_) : max_dist;
+    const double max_dist_r = last_goal_from_quest_r_ ? quest_leash(quest_state_r_) : max_dist;
+
+    // Left arm clipping. The accum rebases only apply to the delta path: when
+    // the last goal came from quest (pose path), target is rebuilt from the
+    // absolute goal each tick and there is no accum to keep consistent — writing
+    // it would corrupt the spacemouse baseline for after quest ends.
     Eigen::Vector3d err_l = target_l_.translation() - achieved_l.translation();
-    if (err_l.norm() > max_dist) {
+    if (err_l.norm() > max_dist_l) {
       target_l_.translation() =
-          achieved_l.translation() + err_l.normalized() * max_dist;
-      accum_l_trans_ = target_l_.translation() - initial_l_.translation();
+          achieved_l.translation() + err_l.normalized() * max_dist_l;
+      if (!last_goal_from_quest_l_) {
+        accum_l_trans_ = target_l_.translation() - initial_l_.translation();
+      }
     }
     Eigen::AngleAxisd err_rot_l(target_l_.linear() *
                                 achieved_l.linear().transpose());
@@ -666,15 +722,19 @@ public:
           max_angle * (err_rot_l.angle() > 0 ? 1 : -1), err_rot_l.axis());
       target_l_.linear() =
           clamped_rot_l.toRotationMatrix() * achieved_l.linear();
-      accum_l_rot_ = target_l_.linear() * initial_l_.linear().transpose();
+      if (!last_goal_from_quest_l_) {
+        accum_l_rot_ = target_l_.linear() * initial_l_.linear().transpose();
+      }
     }
 
     // Right arm clipping
     Eigen::Vector3d err_r = target_r_.translation() - achieved_r.translation();
-    if (err_r.norm() > max_dist) {
+    if (err_r.norm() > max_dist_r) {
       target_r_.translation() =
-          achieved_r.translation() + err_r.normalized() * max_dist;
-      accum_r_trans_ = target_r_.translation() - initial_r_.translation();
+          achieved_r.translation() + err_r.normalized() * max_dist_r;
+      if (!last_goal_from_quest_r_) {
+        accum_r_trans_ = target_r_.translation() - initial_r_.translation();
+      }
     }
     Eigen::AngleAxisd err_rot_r(target_r_.linear() *
                                 achieved_r.linear().transpose());
@@ -683,7 +743,25 @@ public:
           max_angle * (err_rot_r.angle() > 0 ? 1 : -1), err_rot_r.axis());
       target_r_.linear() =
           clamped_rot_r.toRotationMatrix() * achieved_r.linear();
-      accum_r_rot_ = target_r_.linear() * initial_r_.linear().transpose();
+      if (!last_goal_from_quest_r_) {
+        accum_r_rot_ = target_r_.linear() * initial_r_.linear().transpose();
+      }
+    }
+  }
+
+  // Store the achieved EE pose read from site_xpos each main-loop tick so the
+  // quest pose callbacks (ROS thread) can leash the absolute goal against it.
+  void set_achieved_poses(const Eigen::Isometry3d &achieved_l,
+                          const Eigen::Isometry3d &achieved_r,
+                          bool valid_l, bool valid_r) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (valid_l) {
+      achieved_l_ = achieved_l;
+      achieved_valid_l_ = true;
+    }
+    if (valid_r) {
+      achieved_r_ = achieved_r;
+      achieved_valid_r_ = true;
     }
   }
 
@@ -1317,7 +1395,7 @@ private:
       return false;
     }
   }
-  void pose_callback_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+  void update_goal_delta_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
     if (solving_to_home_) {
       return;
@@ -1327,6 +1405,8 @@ private:
     Eigen::Quaterniond rot(msg->pose.orientation.w, msg->pose.orientation.x,
                            msg->pose.orientation.y, msg->pose.orientation.z);
     Eigen::Matrix3d rot_mat = rot.toRotationMatrix();
+
+    last_goal_from_quest_l_ = false;
 
     if (first_msg_l_) {
       last_mapper_l_trans_ = trans;
@@ -1345,9 +1425,10 @@ private:
     target_l_.translation() = initial_l_.translation() + accum_l_trans_;
     target_l_.linear() = accum_l_rot_ * initial_l_.linear();
     clamp_target_angle(target_l_, initial_l_, accum_l_rot_);
+    raw_target_l_ = target_l_;  // §10: pre-clip target for quest slow->fast debug
   }
 
-  void pose_callback_r(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+  void update_goal_delta_r(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
     if (solving_to_home_) {
       return;
@@ -1357,6 +1438,8 @@ private:
     Eigen::Quaterniond rot(msg->pose.orientation.w, msg->pose.orientation.x,
                            msg->pose.orientation.y, msg->pose.orientation.z);
     Eigen::Matrix3d rot_mat = rot.toRotationMatrix();
+
+    last_goal_from_quest_r_ = false;
 
     if (first_msg_r_) {
       last_mapper_r_trans_ = trans;
@@ -1375,6 +1458,124 @@ private:
     target_r_.translation() = initial_r_.translation() + accum_r_trans_;
     target_r_.linear() = accum_r_rot_ * initial_r_.linear();
     clamp_target_angle(target_r_, initial_r_, accum_r_rot_);
+    raw_target_r_ = target_r_;  // §10: pre-clip target for quest slow->fast debug
+  }
+
+  // Quest state machine mirror, fed by joy_hand's /quest/<arm>/state (published
+  // on every transition). Declared here so the callbacks below can use it as a
+  // return/parameter type; CTRL also means "quest not active".
+  enum class QuestState { CTRL, APPROACH, TRACK };
+
+  // Per-arm quest state feed (§8b): joy_hand publishes /quest/<arm>/state on
+  // every transition. Reads under pose_mutex_ like the pose callbacks.
+  void quest_state_cb_l(const std_msgs::msg::String::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    quest_state_l_ = parse_quest_state(msg->data);
+  }
+  void quest_state_cb_r(const std_msgs::msg::String::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    quest_state_r_ = parse_quest_state(msg->data);
+  }
+  static QuestState parse_quest_state(const std::string &s) {
+    if (s == "APPROACH") return QuestState::APPROACH;
+    if (s == "TRACK") return QuestState::TRACK;
+    return QuestState::CTRL;
+  }
+
+  // §11: live per-arm trigger feed (joy_hand publishes every active quest tick).
+  // Only consumed in TRACK; the held trigger during APPROACH is ignored so the
+  // 4-way engage hold never moves the gripper.
+  void quest_trigger_cb_l(const std_msgs::msg::Float32::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    quest_trigger_l_ = msg->data;
+  }
+  void quest_trigger_cb_r(const std_msgs::msg::Float32::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    quest_trigger_r_ = msg->data;
+  }
+
+  // Quest absolute-goal path: the mapper's interpolated ee_goal_ IS the target,
+  // no accum/rebase/delta chain. The goal is leashed against the stored achieved
+  // pose (achieved + per-state leash) so a far or unreachable goal still yields a
+  // bounded per-tick velocity — the main-loop clip_target alone would be defeated
+  // here because the next quest message overwrites its snap each tick. The
+  // mapper's absolute orientation is authoritative, so clamp_target_angle is NOT
+  // applied. last_mapper_* is kept fresh so the first spacemouse delta after
+  // quest resumes has no phantom baseline jump.
+  void update_goal_pose_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (solving_to_home_) {
+      return;
+    }
+    Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
+                          msg->pose.position.z);
+    Eigen::Quaterniond rot(msg->pose.orientation.w, msg->pose.orientation.x,
+                           msg->pose.orientation.y, msg->pose.orientation.z);
+    Eigen::Matrix3d rot_mat = rot.toRotationMatrix();
+
+    last_mapper_l_trans_ = trans;
+    last_mapper_l_rot_ = rot_mat;
+    first_msg_l_ = false;
+    last_goal_from_quest_l_ = true;
+
+    target_l_.translation() = trans;
+    target_l_.linear() = rot_mat;
+    if (achieved_valid_l_) {
+      const double leash_l = quest_leash(quest_state_l_);   // 1.5cm APPROACH, 6cm TRACK
+      Eigen::Vector3d err_l = trans - achieved_l_.translation();
+      if (err_l.norm() > leash_l) {
+        target_l_.translation() =
+            achieved_l_.translation() + err_l.normalized() * leash_l;
+      }
+      Eigen::AngleAxisd err_rot_l(target_l_.linear() *
+                                  achieved_l_.linear().transpose());
+      if (std::abs(err_rot_l.angle()) > kGoalMaxAngle) {
+        Eigen::AngleAxisd clamped_rot_l(
+            kGoalMaxAngle * (err_rot_l.angle() > 0 ? 1 : -1),
+            err_rot_l.axis());
+        target_l_.linear() =
+            clamped_rot_l.toRotationMatrix() * achieved_l_.linear();
+      }
+    }
+    raw_target_l_ = target_l_;  // §10: pre-clip (leashed) target for quest slow->fast debug
+  }
+
+  void update_goal_pose_r(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (solving_to_home_) {
+      return;
+    }
+    Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
+                          msg->pose.position.z);
+    Eigen::Quaterniond rot(msg->pose.orientation.w, msg->pose.orientation.x,
+                           msg->pose.orientation.y, msg->pose.orientation.z);
+    Eigen::Matrix3d rot_mat = rot.toRotationMatrix();
+
+    last_mapper_r_trans_ = trans;
+    last_mapper_r_rot_ = rot_mat;
+    first_msg_r_ = false;
+    last_goal_from_quest_r_ = true;
+
+    target_r_.translation() = trans;
+    target_r_.linear() = rot_mat;
+    if (achieved_valid_r_) {
+      const double leash_r = quest_leash(quest_state_r_);   // 1.5cm APPROACH, 6cm TRACK
+      Eigen::Vector3d err_r = trans - achieved_r_.translation();
+      if (err_r.norm() > leash_r) {
+        target_r_.translation() =
+            achieved_r_.translation() + err_r.normalized() * leash_r;
+      }
+      Eigen::AngleAxisd err_rot_r(target_r_.linear() *
+                                  achieved_r_.linear().transpose());
+      if (std::abs(err_rot_r.angle()) > kGoalMaxAngle) {
+        Eigen::AngleAxisd clamped_rot_r(
+            kGoalMaxAngle * (err_rot_r.angle() > 0 ? 1 : -1),
+            err_rot_r.axis());
+        target_r_.linear() =
+            clamped_rot_r.toRotationMatrix() * achieved_r_.linear();
+      }
+    }
+    raw_target_r_ = target_r_;  // §10: pre-clip (leashed) target for quest slow->fast debug
   }
 
   void joy_callback_l(const sensor_msgs::msg::Joy::SharedPtr msg) {
@@ -1488,6 +1689,51 @@ private:
   Eigen::Vector3d accum_r_trans_ = Eigen::Vector3d::Zero();
   Eigen::Matrix3d accum_r_rot_ = Eigen::Matrix3d::Identity();
 
+  // §10 quest slow->fast debug: pre-clip target as last seen by the pose callback
+  // (before clip_target's leash and before any solveStep-side modifications).
+  Eigen::Isometry3d raw_target_l_ = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d raw_target_r_ = Eigen::Isometry3d::Identity();
+
+  // Two goal-update paths: true when the last goal came from /quest/<arm>/ee_target_pose
+  // (pose path), false when it came from /spacemouse/<arm>/ee_target_pose (delta
+  // path). Used to keep clip_target's accum rebases out of the pose path.
+  bool last_goal_from_quest_l_ = false;
+  bool last_goal_from_quest_r_ = false;
+
+  // Stored achieved EE pose for the pose path's per-state leash (1.5cm APPROACH,
+  // 6cm TRACK).
+  // The main loop reads site_xpos every tick and pushes it here under pose_mutex_
+  // so update_goal_pose_* can clamp the absolute goal even though the next quest
+  // message overwrites the target before the loop's clip_target would run.
+  Eigen::Isometry3d achieved_l_ = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d achieved_r_ = Eigen::Isometry3d::Identity();
+  bool achieved_valid_l_ = false;
+  bool achieved_valid_r_ = false;
+  // Per-path, per-state translation leash. The spacemouse delta path keeps the
+  // tight 1cm clamp; the quest pose path is state-dependent: 1.5cm during
+  // APPROACH (before the triggers release, so the arm previews slowly) and 6cm
+  // once TRACK begins. A bigger leash means a bigger QP error and thus lower
+  // adaptive damping, so the arm chases the accumulator faster and lags less (§6).
+  // [TEST] 3cm -> 6cm: is the leash binding the TRACK chase? If the ~1s tail
+  // survives the doubled clip, the leash was never the limiter — the tail is
+  // the lead decay / solver response instead (revert or tune from there).
+  static constexpr double kSpaceMouseMaxDist = 0.01;      // 1cm — matches clip_target default
+  static constexpr double kQuestApproachMaxDist = 0.015;  // 1.5cm — before trigger release
+  static constexpr double kQuestMaxDist = 0.06;           // 6cm — after release (TRACK) [TEST]
+  static constexpr double kGoalMaxAngle = 0.1;            // ~5.7°, both paths
+
+  // Quest state mirrors (see enum above); used to pick the per-state leash.
+  QuestState quest_state_l_ {QuestState::CTRL};
+  QuestState quest_state_r_ {QuestState::CTRL};
+
+  // §11: latest /quest/<arm>/trigger analog — absolute gripper command in TRACK.
+  double quest_trigger_l_ = 0.0;
+  double quest_trigger_r_ = 0.0;
+
+  double quest_leash(QuestState st) const {
+    return st == QuestState::APPROACH ? kQuestApproachMaxDist : kQuestMaxDist;
+  }
+
   bool left_btn0_ = false, left_btn1_ = false;
   bool right_btn0_ = false, right_btn1_ = false;
 
@@ -1496,11 +1742,25 @@ private:
   double right_btn0_press_time_ = 0.0;
   double right_btn1_press_time_ = 0.0;
 
+  // Gripper position ranges — larger = closed. Left RH-P12-RN-A, right XM430
+  // (MinPosLimit 130 ≈ 0.199 rad, floor 0.175). Used by the button increments
+  // and the §11 quest-trigger absolute mapping.
+  static constexpr double kGripperLMin = 0.0;
+  static constexpr double kGripperLMax = 1.2;
+  static constexpr double kGripperRMin = 0.175;
+  static constexpr double kGripperRMax = 1.2;
+
   double gripper_l_pos_ = 1.1;
   double gripper_r_pos_ = 1.1;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_l_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_r_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr quest_pose_sub_l_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr quest_pose_sub_r_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr quest_state_sub_l_;  // /quest/left/state (§8b)
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr quest_state_sub_r_;  // /quest/right/state (§8b)
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr quest_trigger_sub_l_;  // /quest/left/trigger (§11)
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr quest_trigger_sub_r_;  // /quest/right/trigger (§11)
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_l_;
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_r_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
@@ -1545,6 +1805,7 @@ private:
   bool right_arm_enabled_ = true;
   bool lift_enabled_ = true;
   bool collision_debug_ = true;
+  bool quest_debug_solver_ = false;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
   std::vector<std::string> frozen_joints_{"head"};
@@ -1563,6 +1824,7 @@ private:
 
 public:
   bool is_hardware_mode() const { return hardware_mode_; }
+  bool quest_debug_solver() const { return quest_debug_solver_; }
   bool is_sync_requested() const { return hardware_sync_requested_; }
   const std::string &get_robot_model() const { return robot_model_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
@@ -1639,19 +1901,36 @@ public:
       return 0.002 * std::min(mult, 3.0);
     };
 
-    gripper_l_pos_ += get_step(left_btn0_, left_btn0_press_time_); // close
-    gripper_l_pos_ -= get_step(left_btn1_, left_btn1_press_time_); // open
-    gripper_l_pos_ = std::clamp(gripper_l_pos_, 0.0, 1.2);
-
-    gripper_r_pos_ += get_step(right_btn0_, right_btn0_press_time_); // close
-    gripper_r_pos_ -= get_step(right_btn1_, right_btn1_press_time_); // open
-    gripper_r_pos_ = std::clamp(gripper_r_pos_, 0.175, 1.2);  // XM430 MinPosLimit=130 (~0.199 rad)
+    // Quest TRACK (§11): the released trigger is repurposed as an absolute
+    // gripper command — 1 → close, 0 → open. Only TRACK obeys it: the 4-way
+    // engage hold keeps the trigger pulled during APPROACH, so obeying it there
+    // would slam the gripper closed. Thumbs release → CTRL → spacemouse buttons
+    // resume; trigger grip re-arms only on the next engage → release cycle.
+    // Reads under pose_mutex_ (writers: quest state/trigger callbacks).
+    {
+      std::lock_guard<std::mutex> lock(pose_mutex_);
+      if (quest_state_l_ == QuestState::TRACK) {
+        gripper_l_pos_ = std::clamp(quest_trigger_l_, 0.0, 1.0) * kGripperLMax;
+      } else {
+        gripper_l_pos_ += get_step(left_btn0_, left_btn0_press_time_); // close
+        gripper_l_pos_ -= get_step(left_btn1_, left_btn1_press_time_); // open
+        gripper_l_pos_ = std::clamp(gripper_l_pos_, kGripperLMin, kGripperLMax);
+      }
+      if (quest_state_r_ == QuestState::TRACK) {
+        gripper_r_pos_ = kGripperRMin +
+            std::clamp(quest_trigger_r_, 0.0, 1.0) * (kGripperRMax - kGripperRMin);
+      } else {
+        gripper_r_pos_ += get_step(right_btn0_, right_btn0_press_time_); // close
+        gripper_r_pos_ -= get_step(right_btn1_, right_btn1_press_time_); // open
+        gripper_r_pos_ = std::clamp(gripper_r_pos_, kGripperRMin, kGripperRMax);  // XM430 MinPosLimit=130
+      }
+    }
 
     static int log_counter = 0;
     if ((left_btn0_ || left_btn1_ || right_btn0_ || right_btn1_) &&
         log_counter++ % 50 == 0) {
-      RCLCPP_INFO(this->get_logger(),
-                  "Grippers -> L: %.2f (btns: %d, %d) | R: %.2f (btns: %d, %d)",
+      RCLCPP_DEBUG(this->get_logger(),
+                   "Grippers -> L: %.2f (btns: %d, %d) | R: %.2f (btns: %d, %d)",
                   gripper_l_pos_, left_btn0_, left_btn1_, gripper_r_pos_,
                   right_btn0_, right_btn1_);
     }
@@ -1973,6 +2252,65 @@ int main(int argc, char **argv) {
               d->site_xmat + 9 * right_id)
               .cast<double>();
     }
+    // Feed the achieved pose to the quest pose callbacks (ROS thread) so they
+    // can leash the absolute goal against it.
+    node->set_achieved_poses(achieved_l, achieved_r, left_id >= 0, right_id >= 0);
+    // §10 quest slow->fast debug: ground truth on why APPROACH error never
+    // falls below threshold. raw target = pre-clip (as the mapper delta
+    // landed), current target = what solveStep chased this tick, achieved =
+    // MuJoCo site. Throttled to 0.2s.
+    if (node->quest_debug_solver()) {
+      static auto last_qs_print = std::chrono::steady_clock::now();
+      auto qs_now = std::chrono::steady_clock::now();
+      if (std::chrono::duration<double>(qs_now - last_qs_print).count() >= 0.2) {
+        last_qs_print = qs_now;
+        Eigen::Isometry3d raw_l, raw_r;
+        node->get_raw_targets(raw_l, raw_r);
+        RCLCPP_INFO(
+            node->get_logger(),
+            "[SOLVER] L tgt=(%.3f %.3f %.3f) raw=(%.3f %.3f %.3f) ach=(%.3f %.3f %.3f) |clip-ach|L=%.4f |raw-ach|L=%.4f |raw-clip|L=%.4f | R tgt=(%.3f %.3f %.3f) raw=(%.3f %.3f %.3f) ach=(%.3f %.3f %.3f) |clip-ach|R=%.4f |raw-ach|R=%.4f err=%.4f conv=%d stalled=%d dist=%.4f nC=%d soft=%zu",
+            current_target_l.translation().x(), current_target_l.translation().y(),
+            current_target_l.translation().z(), raw_l.translation().x(),
+            raw_l.translation().y(), raw_l.translation().z(),
+            achieved_l.translation().x(), achieved_l.translation().y(),
+            achieved_l.translation().z(),
+            (current_target_l.translation() - achieved_l.translation()).norm(),
+            (raw_l.translation() - achieved_l.translation()).norm(),
+            (raw_l.translation() - current_target_l.translation()).norm(),
+            current_target_r.translation().x(), current_target_r.translation().y(),
+            current_target_r.translation().z(), raw_r.translation().x(),
+            raw_r.translation().y(), raw_r.translation().z(),
+            achieved_r.translation().x(), achieved_r.translation().y(),
+            achieved_r.translation().z(),
+            (current_target_r.translation() - achieved_r.translation()).norm(),
+            (raw_r.translation() - achieved_r.translation()).norm(),
+            res.error, res.converged, res.stalled, res.min_dist,
+            res.contacts.total_contacts,
+            node->get_soft_locked_joints().size());
+        // §10 CBF wall: the body pair at the closest contact and how many CBF
+        // rows the QP enforced (contacts within collision_margin). dist is the
+        // same closest gap as above; the names discriminate a central
+        // torso/head wall from a self-collision or the opposite arm.
+        int n_within = 0;
+        for (const auto &c : res.contacts.closest) {
+          if (c.dist > col_cfg.collision_margin) break;
+          ++n_within;
+        }
+        const char *b1 = nullptr, *b2 = nullptr;
+        double cdist = res.min_dist;
+        if (!res.contacts.closest.empty()) {
+          const auto &c0 = res.contacts.closest.front();
+          b1 = mj_id2name(m, mjOBJ_BODY, c0.body1);
+          b2 = mj_id2name(m, mjOBJ_BODY, c0.body2);
+          cdist = c0.dist;
+        }
+        RCLCPP_INFO(node->get_logger(),
+          "[SOLVER] wall dist=%.4f within=%d block=%s<->%s",
+          cdist, n_within,
+          b1 ? b1 : "?", b2 ? b2 : "?");
+      }
+    }
+
     // Publish the achieved EE pose in map frame (not the commanded target —
     // the setpoint can lag the site after clipping/IK).
     node->publish_achieved_poses(achieved_l, achieved_r,
