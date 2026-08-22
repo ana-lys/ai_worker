@@ -35,6 +35,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/float32.hpp"
 #include "std_srvs/srv/trigger.hpp"
@@ -599,6 +600,22 @@ public:
           latest_real_joints_ = *msg;
           joint_msg_count_++;
         });
+    // Full machine-state resync request (fired by joy_base on joint-state
+    // recovery): re-run apply_hardware_sync to snap MuJoCo back to the real
+    // robot joints and re-base the arm targets — same primitive as the
+    // BASE→ARM switch, so teleop resumes from where the robot actually is.
+    resync_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+        "/teleop_resync", 10, [this](const std_msgs::msg::Empty::SharedPtr) {
+          std::lock_guard<std::mutex> lock(pose_mutex_);
+          hardware_sync_requested_ = true;
+        });
+    // Pose-change notification: fired when a pose load / home reset homing
+    // completes, so joy_hand re-bases its ee_goal_ onto the new achieved pose.
+    // Without it the mapper's goal stays anchored at the pre-load pose and the
+    // limit profile (a world-frame clamp on that goal) applies relative to the
+    // stale reference — the effective range shifts by the pose displacement.
+    pose_changed_pub_ = this->create_publisher<std_msgs::msg::Empty>(
+        "/teleop/pose_changed", 10);
     // When hardware_mode=false: no joint_states publisher — MuJoCo is internal
     // only.
 
@@ -703,17 +720,19 @@ public:
     const double max_dist_l = last_goal_from_quest_l_ ? quest_leash(quest_state_l_) : max_dist;
     const double max_dist_r = last_goal_from_quest_r_ ? quest_leash(quest_state_r_) : max_dist;
 
-    // Left arm clipping. The accum rebases only apply to the delta path: when
-    // the last goal came from quest (pose path), target is rebuilt from the
-    // absolute goal each tick and there is no accum to keep consistent — writing
-    // it would corrupt the spacemouse baseline for after quest ends.
+    // Left arm clipping. The leash is transient: it bounds only the target
+    // handed to the next solveStep. accum (delta path) is deliberately NOT
+    // rebased onto the leashed value — accum must track only the mapper's
+    // published deltas, so the next update_goal_delta re-asserts the mapper's
+    // absolute goal (which the mapper keeps clamped inside the limit profile).
+    // Rebasing accum here pinned the target at achieved + leash while the
+    // clamped goal was stationary (delta == 0), so the arm stopped short of
+    // the profile boundary — or stayed outside it — instead of tracking the
+    // in-box goal. The quest path never writes accum for the same reason.
     Eigen::Vector3d err_l = target_l_.translation() - achieved_l.translation();
     if (err_l.norm() > max_dist_l) {
       target_l_.translation() =
           achieved_l.translation() + err_l.normalized() * max_dist_l;
-      if (!last_goal_from_quest_l_) {
-        accum_l_trans_ = target_l_.translation() - initial_l_.translation();
-      }
     }
     Eigen::AngleAxisd err_rot_l(target_l_.linear() *
                                 achieved_l.linear().transpose());
@@ -722,9 +741,6 @@ public:
           max_angle * (err_rot_l.angle() > 0 ? 1 : -1), err_rot_l.axis());
       target_l_.linear() =
           clamped_rot_l.toRotationMatrix() * achieved_l.linear();
-      if (!last_goal_from_quest_l_) {
-        accum_l_rot_ = target_l_.linear() * initial_l_.linear().transpose();
-      }
     }
 
     // Right arm clipping
@@ -732,9 +748,6 @@ public:
     if (err_r.norm() > max_dist_r) {
       target_r_.translation() =
           achieved_r.translation() + err_r.normalized() * max_dist_r;
-      if (!last_goal_from_quest_r_) {
-        accum_r_trans_ = target_r_.translation() - initial_r_.translation();
-      }
     }
     Eigen::AngleAxisd err_rot_r(target_r_.linear() *
                                 achieved_r.linear().transpose());
@@ -743,9 +756,6 @@ public:
           max_angle * (err_rot_r.angle() > 0 ? 1 : -1), err_rot_r.axis());
       target_r_.linear() =
           clamped_rot_r.toRotationMatrix() * achieved_r.linear();
-      if (!last_goal_from_quest_r_) {
-        accum_r_rot_ = target_r_.linear() * initial_r_.linear().transpose();
-      }
     }
   }
 
@@ -1417,6 +1427,19 @@ private:
     Eigen::Vector3d delta_trans = trans - last_mapper_l_trans_;
     Eigen::Matrix3d delta_rot = rot_mat * last_mapper_l_rot_.transpose();
 
+    // Re-base detection: a single SpaceMouse tick moves the goal by at most
+    // ~7.5mm / ~3° (pos_step × sensitivity, cubic-scaled), so a larger jump
+    // means the mapper re-anchored ee_goal_ onto a new achieved pose (pose
+    // load / home reset / engage). Treat it as a new baseline instead of a
+    // command — otherwise the arm lurches by the full pose displacement.
+    Eigen::AngleAxisd jump_aa(delta_rot);
+    if (delta_trans.norm() > kMapperRebaseDist ||
+        std::abs(jump_aa.angle()) > kMapperRebaseAng) {
+      last_mapper_l_trans_ = trans;
+      last_mapper_l_rot_ = rot_mat;
+      return; // re-base only — target unchanged
+    }
+
     last_mapper_l_trans_ = trans;
     last_mapper_l_rot_ = rot_mat;
 
@@ -1449,6 +1472,17 @@ private:
 
     Eigen::Vector3d delta_trans = trans - last_mapper_r_trans_;
     Eigen::Matrix3d delta_rot = rot_mat * last_mapper_r_rot_.transpose();
+
+    // Re-base detection: see update_goal_delta_l — a goal jump larger than any
+    // single SpaceMouse tick means the mapper re-anchored ee_goal_ onto a new
+    // achieved pose; treat it as a new baseline, never as a command.
+    Eigen::AngleAxisd jump_aa(delta_rot);
+    if (delta_trans.norm() > kMapperRebaseDist ||
+        std::abs(jump_aa.angle()) > kMapperRebaseAng) {
+      last_mapper_r_trans_ = trans;
+      last_mapper_r_rot_ = rot_mat;
+      return; // re-base only — target unchanged
+    }
 
     last_mapper_r_trans_ = trans;
     last_mapper_r_rot_ = rot_mat;
@@ -1722,6 +1756,13 @@ private:
   static constexpr double kQuestMaxDist = 0.06;           // 6cm — after release (TRACK) [TEST]
   static constexpr double kGoalMaxAngle = 0.1;            // ~5.7°, both paths
 
+  // Goal-jump thresholds for the delta-path re-base detection: a single
+  // SpaceMouse tick moves the goal by at most ~7.5mm / ~3°, so anything
+  // larger is a mapper re-anchor (pose load / home reset / engage) and must
+  // be treated as a new baseline, never as a commanded motion.
+  static constexpr double kMapperRebaseDist = 0.03;  // 3cm
+  static constexpr double kMapperRebaseAng = 0.1;    // ~5.7°
+
   // Quest state mirrors (see enum above); used to pick the per-state leash.
   QuestState quest_state_l_ {QuestState::CTRL};
   QuestState quest_state_r_ {QuestState::CTRL};
@@ -1765,6 +1806,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_r_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr real_joint_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr resync_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr locks_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr obstacle_sub_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_traj_sub_;
@@ -1783,6 +1825,7 @@ private:
       left_traj_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
       right_traj_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pose_changed_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
       lift_traj_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
@@ -1828,6 +1871,12 @@ public:
   bool is_sync_requested() const { return hardware_sync_requested_; }
   const std::string &get_robot_model() const { return robot_model_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
+  // Tell joy_hand the arm settled at a new pose (pose load / home reset) so it
+  // re-bases ee_goal_ onto the achieved pose before the next mapper delta.
+  void publish_pose_changed() {
+    std_msgs::msg::Empty msg;
+    pose_changed_pub_->publish(msg);
+  }
   bool is_solving_to_home() const { return solving_to_home_; }
   void stop_solving_to_home() { solving_to_home_ = false; }
   int get_homing_ticks() const { return homing_ticks_; }
@@ -1895,10 +1944,10 @@ public:
         return 0.0;
       double hold_time = now - press_time;
       if (hold_time <= 0.0)
-        return 0.002;
-      // increase up to x3.0 after 2 seconds
+        return 0.004;
+      // increase up to x3.0 after 2 seconds (base doubled vs 0.002)
       double mult = 1.0 + (hold_time / 2.0) * 2.0;
-      return 0.002 * std::min(mult, 3.0);
+      return 0.004 * std::min(mult, 3.0);
     };
 
     // Quest TRACK (§11): the released trigger is repurposed as an absolute
@@ -2173,6 +2222,11 @@ int main(int argc, char **argv) {
       if (arrived || timeout || stalled) {
         node->stop_solving_to_home();
         stall_counter = 0;
+        // The arm just settled at a loaded pose / home-reset posture that the
+        // mapper knows nothing about: tell joy_hand to re-base its ee_goal_
+        // onto the new achieved pose, or the limit profile clamps the stale
+        // pre-load goal and the effective range shifts by the displacement.
+        node->publish_pose_changed();
         if (arrived) {
           RCLCPP_INFO(node->get_logger(), "Robot has successfully arrived at target posture. Teleop resumed.");
         } else if (timeout) {

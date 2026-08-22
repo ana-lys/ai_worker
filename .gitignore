@@ -551,3 +551,6 @@ build/
 ffw_mapping/scan_*/
 ffw_mapping/*_dataset/
 
+
+# Abandoned joint-centering A/B experiment backup (untracked, kept local only)
+centering_backup/

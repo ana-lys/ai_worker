@@ -1,0 +1,8 @@
+# Limit-profile library for the CLI (/teleop/limit_profile).
+# Sections: [name] followed by `set <arm> px_min px_max py_min py_max pz_min pz_max
+# roll_min roll_max pitch_min pitch_max yaw_min yaw_max` (meters/radians).
+# Loaded lines are published verbatim; Save writes this exact format.
+
+[cubes]
+set l 0.216000 0.316000 0.323000 0.423000 0.623000 0.723000 -0.099480 0.249580 0.090760 0.439820 -0.061090 0.287980
+set r 0.425000 0.680000 -0.479000 0.000000 0.752000 0.795000 -0.087270 0.087270 0.267040 0.418880 -0.087270 0.087270

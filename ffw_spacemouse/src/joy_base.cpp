@@ -10,6 +10,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "sensor_msgs/msg/joy.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "trajectory_msgs/msg/joint_trajectory_point.hpp"
@@ -117,6 +118,11 @@ public:
         this->get_parameter("head_topic").as_string(), 10);
     mode_pub_ =
         this->create_publisher<std_msgs::msg::String>("/teleop_mode", 10);
+    // Full machine-state resync request. Fired once on joint-state recovery:
+    // the solver snaps MuJoCo back to the real joints and the mappers re-base
+    // their ee_goal_ onto the fresh achieved pose (both arms).
+    resync_pub_ =
+        this->create_publisher<std_msgs::msg::Empty>("/teleop_resync", 10);
 
     // Precision: base mouse (right) → right arm, aux mouse (left) → left arm
     right_arm_precision_pub_ = this->create_publisher<std_msgs::msg::Bool>(
@@ -127,7 +133,11 @@ public:
     // ── Initial state
     // ─────────────────────────────────────────────────────────
     current_head_pos_ = {0.0, 0.0};
-    current_mode_ = "BASE";
+    current_mode_ = "ARM";
+    // Joint-state health gate: in simulation there is no /joint_states feed, so
+    // the gate stays open; in hardware mode the node starts inert and only
+    // becomes ready after the first healthy joint-state window (failsafe_check).
+    joint_state_ready_ = !hardware_mode_;
 
     // Failsafe timer (checks every 2.5 seconds)
     failsafe_timer_ = this->create_wall_timer(
@@ -212,6 +222,12 @@ private:
     if (current_mode_ != "BASE")
       return;
 
+    // Joint-state health gate: while the feed is unhealthy (or not yet
+    // initialized) the node is inert — stop commanding the base, just wait
+    // for the feed to recover.
+    if (!joint_state_ready_)
+      return;
+
     // If Logitech has taken over, suppress SpaceMouse base control
     if (logitech_active_)
       return;
@@ -254,6 +270,11 @@ private:
     }
 
     if (current_mode_ != "BASE")
+      return;
+
+    // Joint-state health gate: inert while the feed is unhealthy — no head
+    // commands either, so nothing fights a stale /joint_states state.
+    if (!joint_state_ready_)
       return;
 
     double head_step = this->get_parameter("head_step").as_double();
@@ -312,6 +333,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr resync_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr
       right_arm_precision_pub_; // base (right) mouse
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr
@@ -323,7 +345,7 @@ private:
   std::vector<double> latest_phys_head_{0.0, 0.0};
   bool head_initialized_{false};
   bool was_moving_head_{false};
-  std::string current_mode_{"BASE"};
+  std::string current_mode_{"ARM"};
 
   std::vector<double> head_lower_limits_;
   std::vector<double> head_upper_limits_;
@@ -338,32 +360,73 @@ private:
   double last_left_arm_precision_toggle_{0.0};
   int joint_state_count_{0};
   int failsafe_check_cycles_{0};
+  bool joint_state_ready_{false};
   bool hardware_mode_{true};
   bool logitech_active_{false};
 
-  // ── Failsafe
+  // ── Joint-state health gate (was: kill-failsafe)
   // ─────────────────────────────────────────────────────────────────
-  void failsafe_check() {
-    if (!hardware_mode_) return; // No failsafe in pure simulation
+  // Joint states must clear this message floor per 2.5 s check window before
+  // teleop is enabled — and again on recovery. Mirrors the solver's first-time
+  // sync bar (>=95 Hz): 238 msgs / 2.5 s = 95.2 Hz average. The 5% headroom
+  // matters: a nominal 100 Hz feed delivers 249-251 msgs per window depending
+  // on phase, so an exact 100 Hz floor (250) false-trips "dropped" every few
+  // windows and blips teleop off for a window — even though nothing dropped.
+  static constexpr int k_joint_state_healthy_min_ = 238;
 
+  void failsafe_check() {
+    if (!hardware_mode_) return; // No gate in pure simulation
+
+    // Nothing seen yet: stay inert, no logging, keep waiting. Same "not ready"
+    // state the node boots into — teleop simply doesn't work until the feed is
+    // healthy.
     if (failsafe_check_cycles_ == 0 && joint_state_count_ == 0) {
-      // Suspend failsafe until the first /joint_states message is received.
-      // This allows the system to take its time booting up without crashing.
+      joint_state_ready_ = false;
       return;
     }
 
     failsafe_check_cycles_++;
-    if (failsafe_check_cycles_ >
-        1) { // allow first 2.5s startup after first message
-      if (joint_state_count_ < 175) { // 70Hz * 2.5 seconds = 175
-        RCLCPP_FATAL(this->get_logger(),
-                     "CRITICAL: Joint states 2.5-sec average dropped to %.1f "
-                     "Hz! Failsafe triggering shutdown.",
-                     joint_state_count_ / 2.5);
-        rclcpp::shutdown();
-      }
-    }
+    const int count = joint_state_count_;
     joint_state_count_ = 0;
+    const bool window_healthy = count >= k_joint_state_healthy_min_;
+
+    if (failsafe_check_cycles_ <= 1) {
+      // First window after the first message: adopt its health without
+      // transition logs (mirrors the old startup grace period).
+      joint_state_ready_ = window_healthy;
+      return;
+    }
+
+    if (window_healthy && !joint_state_ready_) {
+      // Recovered — re-sync the head target to the real robot and resume.
+      // head_initialized_ = false makes the next joint_state_callback re-capture
+      // the physical head pose, so teleop continues from where the robot is
+      // (same re-sync pattern as the BASE-mode switch).
+      {
+        std::lock_guard<std::mutex> lock(joint_mutex_);
+        head_initialized_ = false;
+        current_head_pos_[0] = latest_phys_head_[0];
+        current_head_pos_[1] = latest_phys_head_[1];
+        was_moving_head_ = false;
+      }
+      joint_state_ready_ = true;
+      // Full machine-state resync: the head was re-seeded above; signal the
+      // solver (MuJoCo snap to real joints) and both arm mappers (re-base
+      // ee_goal_ to the fresh achieved pose) so teleop resumes from where the
+      // robot actually is — not the pre-dropout commanded pose.
+      std_msgs::msg::Empty rs;
+      resync_pub_->publish(rs);
+      RCLCPP_WARN(this->get_logger(),
+                  "Joint states recovered (%.1f Hz) — re-initialized, "
+                  "teleop resumed.",
+                  count / 2.5);
+    } else if (!window_healthy && joint_state_ready_) {
+      joint_state_ready_ = false;
+      RCLCPP_WARN(this->get_logger(),
+                  "Joint states dropped to %.1f Hz — suspending teleop, "
+                  "waiting for recovery (no shutdown).",
+                  count / 2.5);
+    }
   }
 
   // ── Button double-click logic ─────────────────────────────────────────────

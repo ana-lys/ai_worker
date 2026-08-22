@@ -16,6 +16,7 @@
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/float32.hpp"
 
 using std::placeholders::_1;
@@ -181,6 +182,14 @@ public:
         // measured from this, NOT header.stamp (§5).
         achieved_pose_received_time_ = this->now();
         if (!achieved_pose_valid_) {
+          // After a machine-state resync (joint-state recovery) only a pose
+          // published AFTER the resync may anchor us — the solver re-snaps
+          // MuJoCo to the real joints and then publishes the fresh pose, so
+          // any message stamped before our resync is still the stale pre-sync
+          // simulation pose. Skip it and keep waiting for the fresh one.
+          if (rclcpp::Time(msg->header.stamp).nanoseconds() <
+              resync_stamp_.nanoseconds())
+            return;
           achieved_pose_valid_ = true;
           // First achieved pose while already in ARM: re-base into the world
           // frame so the mapper starts from the real pose, not Identity.
@@ -190,6 +199,39 @@ public:
               "Rebased ee_goal_ to first achieved pose (%s)", target_arm_.c_str());
           }
         }
+      });
+
+    // ── Machine-state resync subscription ─────────────────────────
+    // joy_base fires this on joint-state recovery: drop the achieved-pose
+    // anchor so the next (post-sync) achieved pose re-bases ee_goal_ onto the
+    // real robot. Only meaningful in ARM — in BASE the solver keeps streaming
+    // fresh achieved poses anyway, and the ARM-switch path re-bases on entry.
+    resync_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+      "/teleop_resync", 10, [this](const std_msgs::msg::Empty::SharedPtr) {
+          if (current_mode_ == "ARM") {
+            achieved_pose_valid_ = false;
+            resync_stamp_ = this->now();
+            RCLCPP_INFO(this->get_logger(),
+              "Resync requested — waiting for fresh achieved pose (%s)",
+              target_arm_.c_str());
+          }
+      });
+
+    // ── Pose-change subscription (solver → mapper) ─────────────────
+    // Fired by ffw_ik_solver_teleop when a pose load / home reset homing
+    // completes: the arm settled at a pose the mapper never commanded, so
+    // re-base ee_goal_ onto the achieved pose immediately. Without this the
+    // goal stays anchored at the pre-load pose and the limit profile (a
+    // world-frame clamp on the goal) applies relative to the stale reference —
+    // the effective range shifts by the pose displacement.
+    pose_changed_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+      "/teleop/pose_changed", 10, [this](const std_msgs::msg::Empty::SharedPtr) {
+          if (current_mode_ == "ARM" && achieved_pose_valid_) {
+            ee_goal_ = achieved_pose_map_;
+            RCLCPP_INFO(this->get_logger(),
+              "Pose changed — ee_goal_ re-based to achieved pose (%s)",
+              target_arm_.c_str());
+          }
       });
 
     // ── EE lock subscription ──────────────────────────────────────
@@ -225,6 +267,9 @@ public:
         } else if (axis_arm.find("yaw") != std::string::npos) {
           lock_flag = &soft_lock_ee_yaw_;
           locked_value = &soft_locked_yaw_;
+        } else if (axis_arm.find("pitch") != std::string::npos) {
+          lock_flag = &soft_lock_ee_pitch_;
+          locked_value = &soft_locked_pitch_;
         } else {
           RCLCPP_WARN(this->get_logger(), "Unknown ee_lock axis: '%s'", axis_arm.c_str());
           return;
@@ -245,9 +290,8 @@ public:
         if (!was_locked && new_state) {
           // Extract RPY from current ee_goal_ (extrinsic XYZ: Rx*Ry*Rz)
           const Eigen::Matrix3d &R = ee_goal_.linear();
-          double sin_pitch = -R(0, 2);
+          double sin_pitch = R(0, 2);
           double pitch, yaw;
-          (void)pitch;
           if (std::abs(sin_pitch) >= 0.9999999) {
             pitch = std::copysign(M_PI / 2.0, sin_pitch);
             yaw = 0.0;
@@ -258,9 +302,66 @@ public:
           double roll = std::atan2(-R(1, 2), R(2, 2));
           if (lock_flag == &soft_lock_ee_roll_) *locked_value = roll;
           if (lock_flag == &soft_lock_ee_yaw_) *locked_value = yaw;
+          if (lock_flag == &soft_lock_ee_pitch_) *locked_value = pitch;
+          const char *axis_name = (lock_flag == &soft_lock_ee_roll_) ? "roll"
+                               : (lock_flag == &soft_lock_ee_yaw_) ? "yaw"
+                               : "pitch";
           RCLCPP_INFO(this->get_logger(), "EE %s locked at %.3f rad for %s",
-            (lock_flag == &soft_lock_ee_roll_ ? "roll" : "yaw"), *locked_value, target_arm_.c_str());
+            axis_name, *locked_value, target_arm_.c_str());
         }
+      });
+
+    // ── Manual limit profile subscription (CLI-created) ──
+    // Format: "set <arm> px_min px_max py_min py_max pz_min pz_max roll_min
+    // roll_max pitch_min pitch_max yaw_min yaw_max" or "clear <arm>". Bounds in
+    // meters/radians, absolute world frame ("map"); survives resyncs. The arm
+    // token matches by suffix like /ik_solver/ee_lock above.
+    limit_profile_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/teleop/limit_profile", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(ee_lock_mutex_);
+        std::stringstream ss(msg->data);
+        std::string action, arm;
+        ss >> action >> arm;
+        // Accept the bare "l"/"r" token (CLI limit-profile messages) as well as
+        // the "_l"/"_r" suffix form (ee_lock style), so both senders match.
+        bool matches_my_arm = false;
+        if (target_arm_ == "left" && (arm == "l" || arm.find("_l") != std::string::npos))
+          matches_my_arm = true;
+        else if (target_arm_ == "right" && (arm == "r" || arm.find("_r") != std::string::npos))
+          matches_my_arm = true;
+        if (!matches_my_arm) return;
+
+        if (action == "clear") {
+          limit_profile_.active = false;
+          RCLCPP_INFO(this->get_logger(), "Limit profile cleared (%s)", target_arm_.c_str());
+          return;
+        }
+        if (action != "set") {
+          RCLCPP_WARN(this->get_logger(), "Invalid limit_profile action: '%s'", action.c_str());
+          return;
+        }
+
+        double bounds[12];
+        for (double &b : bounds) {
+          if (!(ss >> b)) {
+            RCLCPP_WARN(this->get_logger(),
+              "Invalid limit_profile set format — need 12 bounds, got partial parse");
+            return;
+          }
+        }
+        LimitProfile &p = limit_profile_;
+        p.px_min = bounds[0]; p.px_max = bounds[1];
+        p.py_min = bounds[2]; p.py_max = bounds[3];
+        p.pz_min = bounds[4]; p.pz_max = bounds[5];
+        p.roll_min = bounds[6]; p.roll_max = bounds[7];
+        p.pitch_min = bounds[8]; p.pitch_max = bounds[9];
+        p.yaw_min = bounds[10]; p.yaw_max = bounds[11];
+        p.active = true;
+        RCLCPP_INFO(this->get_logger(),
+          "Limit profile set (%s): x[%.3f,%.3f] y[%.3f,%.3f] z[%.3f,%.3f] "
+          "roll[%.3f,%.3f] pitch[%.3f,%.3f] yaw[%.3f,%.3f]",
+          target_arm_.c_str(), p.px_min, p.px_max, p.py_min, p.py_max, p.pz_min, p.pz_max,
+          p.roll_min, p.roll_max, p.pitch_min, p.pitch_max, p.yaw_min, p.yaw_max);
       });
 
     // ── Quest subscriptions & publishers (quest_teleop_plan §7, Task 2) ──
@@ -320,6 +421,27 @@ private:
     return Eigen::Vector3d(roll, pitch, yaw);
   }
 
+  static Eigen::Matrix3d rpy_to_matrix(double roll, double pitch, double yaw) {
+    // Extrinsic XYZ Euler: R = Rx(roll) * Ry(pitch) * Rz(yaw)
+    return Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()).toRotationMatrix() *
+           Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() *
+           Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  }
+
+  // ── Manual limit profile (CLI-created per-arm position+orientation box) ──
+  // Bounds in meters and radians, clamped onto the absolute world-frame goal
+  // every tick before publishing. Guarded by ee_lock_mutex_ (subscription
+  // callback writes; apply_limit_profile() reads under the caller's lock).
+  struct LimitProfile {
+    bool active {false};
+    double px_min {0}, px_max {0};
+    double py_min {0}, py_max {0};
+    double pz_min {0}, pz_max {0};
+    double roll_min {0}, roll_max {0};
+    double pitch_min {0}, pitch_max {0};
+    double yaw_min {0}, yaw_max {0};
+  };
+
   // True when all mapped SpaceMouse axes are near neutral — gates the drift
   // re-base so we never yank the goal out from under an active input (§11).
   bool spacemouse_idle(const sensor_msgs::msg::Joy &joy) {
@@ -334,8 +456,8 @@ private:
   }
 
   void apply_ee_locks() {
-    // Clamp locked roll/yaw axes within slack of their locked centers
-    if (!soft_lock_ee_roll_ && !soft_lock_ee_yaw_)
+    // Clamp locked roll/yaw/pitch axes within slack of their locked centers
+    if (!soft_lock_ee_roll_ && !soft_lock_ee_yaw_ && !soft_lock_ee_pitch_)
       return;
 
     Eigen::Vector3d rpy = extract_rpy(ee_goal_.linear());
@@ -349,12 +471,32 @@ private:
     if (soft_lock_ee_yaw_)
       yaw = std::clamp(yaw, soft_locked_yaw_ - ee_orientation_slack_,
                              soft_locked_yaw_ + ee_orientation_slack_);
+    if (soft_lock_ee_pitch_)
+      pitch = std::clamp(pitch, soft_locked_pitch_ - ee_orientation_slack_,
+                               soft_locked_pitch_ + ee_orientation_slack_);
 
-    // Reconstruct: R = Rx(roll) * Ry(pitch) * Rz(yaw)
-    Eigen::Matrix3d Rx = Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()).toRotationMatrix();
-    Eigen::Matrix3d Ry = Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()).toRotationMatrix();
-    Eigen::Matrix3d Rz = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-    ee_goal_.linear() = Rx * Ry * Rz;
+    ee_goal_.linear() = rpy_to_matrix(roll, pitch, yaw);
+  }
+
+  void apply_limit_profile() {
+    // Clamp the absolute world-frame goal inside the manual profile box. The
+    // profile is the outer hard envelope: call AFTER apply_ee_locks() so a
+    // lock center outside the box can never pull the goal past a bound.
+    // Caller holds ee_lock_mutex_ (same contract as apply_ee_locks()).
+    if (!limit_profile_.active) return;
+
+    const LimitProfile &p = limit_profile_;
+    Eigen::Vector3d t = ee_goal_.translation();
+    t.x() = std::clamp(t.x(), p.px_min, p.px_max);
+    t.y() = std::clamp(t.y(), p.py_min, p.py_max);
+    t.z() = std::clamp(t.z(), p.pz_min, p.pz_max);
+    ee_goal_.translation() = t;
+
+    Eigen::Vector3d rpy = extract_rpy(ee_goal_.linear());
+    double roll = std::clamp(rpy.x(), p.roll_min, p.roll_max);
+    double pitch = std::clamp(rpy.y(), p.pitch_min, p.pitch_max);
+    double yaw = std::clamp(rpy.z(), p.yaw_min, p.yaw_max);
+    ee_goal_.linear() = rpy_to_matrix(roll, pitch, yaw);
   }
 
   // ── Quest override helpers (quest_teleop_plan §4-§10, Task 2) ──
@@ -426,6 +568,7 @@ private:
     Eigen::Matrix3d R_rel = achieved_pose_map_.linear().transpose() * quest_target_.linear();
     Eigen::Vector3d rpy = extract_rpy(R_rel);
     if (soft_lock_ee_roll_) rpy.x() = 0.0;
+    if (soft_lock_ee_pitch_) rpy.y() = 0.0;
     if (soft_lock_ee_yaw_) rpy.z() = 0.0;
     Eigen::Matrix3d R_red =
         (Eigen::AngleAxisd(rpy.x(), Eigen::Vector3d::UnitX()).toRotationMatrix() *
@@ -585,11 +728,12 @@ private:
       return;
     }
 
-    if (soft_lock_ee_roll_ || soft_lock_ee_yaw_) {
+    if (soft_lock_ee_roll_ || soft_lock_ee_yaw_ || soft_lock_ee_pitch_) {
       std::lock_guard<std::mutex> lock(ee_lock_mutex_);
       Eigen::Vector3d rpy = extract_rpy(achieved_pose_map_.linear());
       if (soft_lock_ee_roll_) soft_locked_roll_ = rpy.x();
       if (soft_lock_ee_yaw_) soft_locked_yaw_ = rpy.z();
+      if (soft_lock_ee_pitch_) soft_locked_pitch_ = rpy.y();
       RCLCPP_INFO(this->get_logger(),
         "Re-captured soft-lock centers at engage (%s)", target_arm_.c_str());
     }
@@ -791,6 +935,10 @@ private:
       step_quest_state_machine();   // keep-alive / go-fast / watchdog (§4/§9)
       if (quest_state_ == QuestState::SM_CONTROL) {
         // Aborted: goal frozen where it is, count disarmed (§4 "Abort").
+        // Clamps still apply on the frozen goal (soft-locks + profile).
+        std::lock_guard<std::mutex> lock(ee_lock_mutex_);
+        apply_ee_locks();
+        apply_limit_profile();
         publish_pose();
         return;
       }
@@ -798,7 +946,8 @@ private:
       step_quest_interpolation();   // slerp ee_goal_ toward quest target (§6)
       {
         std::lock_guard<std::mutex> lock(ee_lock_mutex_);
-        apply_ee_locks();   // soft-locks still enforced in quest mode (§6)
+        apply_ee_locks();       // soft-locks still enforced in quest mode (§6)
+        apply_limit_profile();  // profile: outer hard envelope on the whole pose
       }
       publish_pose(true);   // quest active → absolute-goal topic (solver pose path)
       return;   // SpaceMouse velocity suppressed while quest is active (§7)
@@ -901,10 +1050,11 @@ private:
     q_new.normalize();
     ee_goal_.linear() = q_new.toRotationMatrix();
 
-    // Apply EE orientation locks (clamp yaw/roll after integrating spacemouse delta)
+    // Apply EE orientation locks + manual limit profile after integrating delta
     {
       std::lock_guard<std::mutex> lock(ee_lock_mutex_);
-      apply_ee_locks();
+      apply_ee_locks();        // soft-locks: clamp locked roll/yaw/pitch axes
+      apply_limit_profile();   // profile: outer hard envelope on the whole pose
     }
 
     publish_pose();
@@ -944,7 +1094,10 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr precision_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ee_lock_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr limit_profile_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr resync_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr pose_changed_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr quest_state_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr quest_pose_pub_;
@@ -964,6 +1117,10 @@ private:
   Eigen::Isometry3d achieved_pose_map_ {Eigen::Isometry3d::Identity()};
   bool achieved_pose_valid_ {false};
   rclcpp::Time achieved_pose_received_time_;
+  // Set on machine-state resync; achieved-pose messages stamped before it are
+  // stale pre-sync poses and must not anchor the re-base (epoch = no resync
+  // yet, every message passes).
+  rclcpp::Time resync_stamp_;
 
   Eigen::Isometry3d ee_goal_;
   double command_dt_ {0.01};
@@ -974,9 +1131,14 @@ private:
   std::mutex ee_lock_mutex_;
   bool soft_lock_ee_roll_ {false};
   bool soft_lock_ee_yaw_ {false};
+  bool soft_lock_ee_pitch_ {false};
   double soft_locked_roll_ {0.0};
   double soft_locked_yaw_ {0.0};
+  double soft_locked_pitch_ {0.0};
   double ee_orientation_slack_ {0.0};  // set from parameter ee_orientation_slack_deg
+
+  // ── Manual limit profile (CLI-created; guarded by ee_lock_mutex_) ──
+  LimitProfile limit_profile_;
 
   // ── Quest override state (quest_teleop_plan §4-§10, Task 2) ──
   QuestState quest_state_ {QuestState::SM_CONTROL};   // quest_active_ ⇔ != SM_CONTROL
