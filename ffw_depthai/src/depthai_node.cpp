@@ -274,15 +274,15 @@ int main(int argc, char **argv) {
       const auto& data = videoFrame->getData();
 
       // First frame: publish the CameraInfo for the streamed resolution once.
-      // The encoded ImgFrame still carries the source frame dimensions; fall
-      // back to the requested 1920x1080 if the metadata is unset.
+      // The VideoEncoder preserves the requested 1920x1080 exactly, so use the
+      // constants — the encoded ImgFrame's width/height metadata is NOT
+      // populated, and reading it yields garbage (the 720p streamer reads raw
+      // frames where those fields are valid, which is why it uses the frame
+      // dimensions).
       {
-        uint32_t actual_w = videoFrame->getWidth();
-        uint32_t actual_h = videoFrame->getHeight();
-        if (actual_w == 0 || actual_h == 0) { actual_w = 1920; actual_h = 1080; }
         std::lock_guard<std::mutex> lk(camera_info_mtx);
         if (!camera_info) {
-          camera_info = build_camera_info(actual_w, actual_h);
+          camera_info = build_camera_info(1920, 1080);
           camera_info_pub->publish(*camera_info);
           RCLCPP_INFO(node->get_logger(),
                       "Published intrinsics on /oakd/camera_info: %ux%u "
