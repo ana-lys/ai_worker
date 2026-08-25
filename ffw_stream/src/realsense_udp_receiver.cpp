@@ -25,6 +25,7 @@ public:
     this->declare_parameter<bool>("headless", false);
     this->declare_parameter<bool>("enable_d405s", true);
     this->declare_parameter<int>("depthai_video_port", 9100);
+    this->declare_parameter<int>("oakd_720p_video_port", 9110);
     this->declare_parameter<std::string>("rgb_source", "zedm");
     this->declare_parameter<std::string>("oakd_codec", "h264");
 
@@ -32,6 +33,7 @@ public:
     num_cameras_ = this->get_parameter("num_cameras").as_int();
     bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
     int depthai_video_port = this->get_parameter("depthai_video_port").as_int();
+    int oakd_720p_video_port = this->get_parameter("oakd_720p_video_port").as_int();
     rgb_source_ = this->get_parameter("rgb_source").as_string();
     oakd_codec_ = this->get_parameter("oakd_codec").as_string();
 
@@ -79,7 +81,15 @@ public:
 
     // OAK-D (depthai) telemetry on depthai_video_port + 200 (bidirectional — RTT calibration)
     int depthai_telemetry_port = depthai_video_port + 200;
-    threads_.emplace_back(&RealsenseUDPReceiver::oakdTelemetryLoop, this, depthai_telemetry_port);
+    threads_.emplace_back(&RealsenseUDPReceiver::oakdTelemetryLoop, this, depthai_telemetry_port, "OAK-D");
+
+    // OAK-D 720p raw stream on oakd_720p_video_port — auto-detected, always listening.
+    // Display prefers this feed over the 1080p fallback when both are present.
+    threads_.emplace_back(&RealsenseUDPReceiver::oakd720pStreamLoop, this, oakd_720p_video_port);
+
+    // OAK-D 720p telemetry on oakd_720p_video_port + 200 (bidirectional — RTT calibration)
+    threads_.emplace_back(&RealsenseUDPReceiver::oakdTelemetryLoop, this,
+                          oakd_720p_video_port + 200, "OAK-720p");
   }
 
   ~RealsenseUDPReceiver() {
@@ -203,7 +213,7 @@ private:
     close(sock);
   }
 
-  void oakdTelemetryLoop(int port) {
+  void oakdTelemetryLoop(int port, const std::string &source = "OAK-D") {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return;
 
@@ -224,7 +234,8 @@ private:
     }
 
     RCLCPP_INFO(this->get_logger(),
-                "[Telemetry/OAK-D] Listening on UDP %d (RTT calibration enabled)", port);
+                "[Telemetry/%s] Listening on UDP %d (RTT calibration enabled)",
+                source.c_str(), port);
 
     char buffer[1024];
     struct sockaddr_in sender_addr;
@@ -274,8 +285,9 @@ private:
           resp[n] = '\0';
 
           // If telemetry arrived during the cal window, consume it normally
-          if (strncmp(resp, "[OAK-D]", 7) == 0) {
-            processOakdTelemetry(resp, interpolated_offset());
+          std::string tag = "[" + source + "]";
+          if (strncmp(resp, tag.c_str(), tag.size()) == 0) {
+            processOakdTelemetry(resp, interpolated_offset(), source);
             continue;  // try recvfrom again for CAL_RES
           }
 
@@ -301,9 +313,9 @@ private:
             last_cal_time_ms = t4_ms;
             double rtt = t4_ms - t1_ms;
             RCLCPP_INFO(this->get_logger(),
-                        "[OAK-D] Calibration: RTT=%.3fms offset=%.1fms "
+                        "[%s] Calibration: RTT=%.3fms offset=%.1fms "
                         "drift=%.3fppms  t1=%.1f t4=%.1f oakt=%.1f",
-                        rtt, cal_offset_ms, drift_rate_ppms * 1000.0,
+                        source.c_str(), rtt, cal_offset_ms, drift_rate_ppms * 1000.0,
                         t1_ms, t4_ms, oakt);
             break;
           }
@@ -338,17 +350,17 @@ private:
           char ip_str[INET_ADDRSTRLEN];
           inet_ntop(AF_INET, &sender_addr.sin_addr, ip_str, sizeof(ip_str));
           RCLCPP_INFO(this->get_logger(),
-                      "[OAK-D] Sender identified: %s:%d",
-                      ip_str, ntohs(sender_addr.sin_port));
+                      "[%s] Sender identified: %s:%d",
+                      source.c_str(), ip_str, ntohs(sender_addr.sin_port));
         }
 
-        processOakdTelemetry(buffer, interpolated_offset());
+        processOakdTelemetry(buffer, interpolated_offset(), source);
       }
     }
     close(sock);
   }
 
-  void processOakdTelemetry(const char *buffer, double cal_offset_ms) {
+  void processOakdTelemetry(const char *buffer, double cal_offset_ms, const std::string &source = "OAK-D") {
     if (!buffer || !*buffer) return;
 
     std::lock_guard<std::mutex> lock(telemetry_mutex_);
@@ -368,7 +380,7 @@ private:
       // Use absolute value: for sub-ms latencies the sign is just calibration
       // noise (clock drift + RTT asymmetry), so clamping to 0 is misleading.
       int lat_int = static_cast<int>(std::round(std::abs(raw_latency)));
-      last_oakd_latency_str_ = " | Latency: " + std::to_string(lat_int) + " ms";
+      last_oakd_latency_str_[source] = " | Latency: " + std::to_string(lat_int) + " ms";
 
       // Debug: print raw values whenever latency would clamp
       if (raw_latency <= 1.0) {
@@ -379,18 +391,18 @@ private:
           tw_ts + cal_offset_ms, raw_latency, display_lat);
       }
 
-      latest_telemetry_["OAK-D"] = std::string(buffer) + last_oakd_latency_str_;
+      latest_telemetry_[source] = std::string(buffer) + last_oakd_latency_str_[source];
     } else {
       // System info or uncalibrated: show the message + last known latency (if any)
       std::string enriched = buffer;
-      if (!last_oakd_latency_str_.empty()) {
-        enriched += last_oakd_latency_str_;
+      if (!last_oakd_latency_str_[source].empty()) {
+        enriched += last_oakd_latency_str_[source];
       }
       if (tw_ts < 0.0) {
         RCLCPP_DEBUG(this->get_logger(),
           "LatDBG no TW: field in: %s", buffer);
       }
-      latest_telemetry_["OAK-D"] = enriched;
+      latest_telemetry_[source] = enriched;
     }
   }
 
@@ -398,7 +410,9 @@ private:
     std::string feed_name;
     std::string pipeline;
 
-    if (rgb_source_ == "oakd_lite") {
+    if (rgb_source_ == "oakd_lite" || rgb_source_ == "oakd_lite_720p") {
+      // The 1080p HW fallback (when it is running) is always received on 9100.
+      // In 720p mode this feed just idles while the display prefers OAK-D-720p.
       feed_name = "OAK-D";
       if (oakd_codec_ == "h264") {
         // H264-Baseline receiver:
@@ -431,6 +445,53 @@ private:
         "rtpjitterbuffer latency=50 ! rtph264depay ! decodebin ! videoconvert ! "
         "appsink drop=true sync=false";
     }
+    RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
+
+    while (running_ && rclcpp::ok()) {
+      cv::VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
+      if (!cap.isOpened()) {
+        RCLCPP_WARN(this->get_logger(), "[%s] Failed to open UDP stream, retrying in 2s...", feed_name.c_str());
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        continue;
+      }
+
+      RCLCPP_INFO(this->get_logger(), "[%s] Successfully connected", feed_name.c_str());
+
+      cv::Mat frame;
+
+      while (running_ && rclcpp::ok()) {
+        if (!cap.read(frame) || frame.empty()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+          continue;
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(img_mutex_);
+          latest_images_[feed_name] = frame.clone();
+        }
+
+        frames_received_[feed_name]++;
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - fps_timers_[feed_name]).count();
+        if (elapsed >= 60.0) {
+          frames_received_[feed_name] = 0;
+          fps_timers_[feed_name] = now;
+        }
+      }
+    }
+  }
+
+  void oakd720pStreamLoop(int port) {
+    std::string feed_name = "OAK-D-720p";
+    // Same low-latency H264 receiver as the fallback OAK-D feed:
+    //   - latency=20 on jitter buffer, decode ASAP
+    //   - queue leaky=downstream: if decode is slow, drop old frames not new ones
+    std::string pipeline = "udpsrc port=" + std::to_string(port) +
+      " buffer-size=2147483647 "
+      "caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+      "rtpjitterbuffer latency=20 ! rtph264depay ! decodebin ! videoconvert ! "
+      "queue max-size-buffers=1 leaky=downstream ! "
+      "appsink drop=true sync=false async=false max-buffers=1";
     RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
 
     while (running_ && rclcpp::ok()) {
@@ -569,7 +630,8 @@ private:
       cv::Mat zed_frame;
       {
         std::lock_guard<std::mutex> lock(img_mutex_);
-        if (latest_images_.count("OAK-D")) zed_frame = latest_images_["OAK-D"].clone();
+        if (latest_images_.count("OAK-D-720p")) zed_frame = latest_images_["OAK-D-720p"].clone();
+        else if (latest_images_.count("OAK-D")) zed_frame = latest_images_["OAK-D"].clone();
         else if (latest_images_.count("ZED")) zed_frame = latest_images_["ZED"].clone();
       }
 
@@ -638,7 +700,7 @@ private:
 
   std::mutex telemetry_mutex_;
   std::map<std::string, std::string> latest_telemetry_;
-  std::string last_oakd_latency_str_;
+  std::map<std::string, std::string> last_oakd_latency_str_;
 
   std::vector<std::thread> threads_;
   std::thread display_thread_;

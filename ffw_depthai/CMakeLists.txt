@@ -33,7 +33,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
 
-# Build the node
+# ── 1080p HW-encode streamer (fallback, unchanged) ─────────────────────────
 add_executable(depthai_udp_streamer src/depthai_node.cpp)
 target_include_directories(depthai_udp_streamer PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -49,8 +49,24 @@ target_link_libraries(depthai_udp_streamer
     ${GSTREAMER_LIBRARIES}
 )
 
+# ── 720p raw -> host-CPU x264 streamer (new) ───────────────────────────────
+add_executable(depthai_720p_udp_streamer src/depthai_720p_raw_streamer.cpp)
+target_include_directories(depthai_720p_udp_streamer PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    ${GSTREAMER_INCLUDE_DIRS}
+)
+target_compile_features(depthai_720p_udp_streamer PUBLIC cxx_std_17)
+
+ament_target_dependencies(depthai_720p_udp_streamer rclcpp)
+
+target_link_libraries(depthai_720p_udp_streamer
+    depthai::core
+    ${GSTREAMER_LIBRARIES}
+)
+
 # Install
-install(TARGETS depthai_udp_streamer DESTINATION lib/${PROJECT_NAME})
+install(TARGETS depthai_udp_streamer depthai_720p_udp_streamer DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY ${DEPTHAI_INSTALL_DIR}/lib/ DESTINATION lib/)
 
 ament_package()
