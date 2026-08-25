@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ffw_zmqinterface</name>
+  <version>0.0.1</version>
+  <description>
+    Robot-side ZMQ HIL link: publishes RobotState/EEState (PUB, latest-wins) on
+    tcp://*:6001, receives ControlCmd (SUB) on tcp://*:6002. gateway_node
+    bridges the link to the spacemouse teleop stack (/quest/*/ee_target_pose).
+  </description>
+  <maintainer email="shatapdude@gmail.com">ana-lys</maintainer>
+  <license>Apache 2.0</license>
+
+  <exec_depend>python3-zmq</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

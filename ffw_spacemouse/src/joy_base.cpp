@@ -367,12 +367,11 @@ private:
   // ── Joint-state health gate (was: kill-failsafe)
   // ─────────────────────────────────────────────────────────────────
   // Joint states must clear this message floor per 2.5 s check window before
-  // teleop is enabled — and again on recovery. Mirrors the solver's first-time
-  // sync bar (>=95 Hz): 238 msgs / 2.5 s = 95.2 Hz average. The 5% headroom
-  // matters: a nominal 100 Hz feed delivers 249-251 msgs per window depending
-  // on phase, so an exact 100 Hz floor (250) false-trips "dropped" every few
-  // windows and blips teleop off for a window — even though nothing dropped.
-  static constexpr int k_joint_state_healthy_min_ = 238;
+  // teleop is enabled — and again on recovery. Lowered to 80 Hz so a temporary
+  // connection/feed quality dip doesn't suspend teleop: 200 msgs / 2.5 s = 80 Hz
+  // floor, with ample headroom under the nominal 100 Hz feed (249-251 msgs per
+  // window) so phase jitter can't false-trip the gate either.
+  static constexpr int k_joint_state_healthy_min_ = 200;
 
   void failsafe_check() {
     if (!hardware_mode_) return; // No gate in pure simulation

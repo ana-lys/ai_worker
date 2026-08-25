@@ -1435,9 +1435,22 @@ private:
     Eigen::AngleAxisd jump_aa(delta_rot);
     if (delta_trans.norm() > kMapperRebaseDist ||
         std::abs(jump_aa.angle()) > kMapperRebaseAng) {
+      // Re-base: the mapper re-anchored ee_goal_ onto a new achieved pose (ARM
+      // switch / override release / resync / pose load — the mapper always
+      // re-bases onto achieved, never into free space). Adopt the fresh pose as
+      // the new target too: leaving the old leashed target stale would park the
+      // arm off by the quest→delta residual and effectively shift the limit box.
+      // Safe to adopt — the arm is already at the pose the mapper re-based onto.
       last_mapper_l_trans_ = trans;
       last_mapper_l_rot_ = rot_mat;
-      return; // re-base only — target unchanged
+      initial_l_.translation() = trans;
+      initial_l_.linear() = rot_mat;
+      accum_l_trans_ = Eigen::Vector3d::Zero();
+      accum_l_rot_ = Eigen::Quaterniond::Identity();
+      target_l_.translation() = trans;
+      target_l_.linear() = rot_mat;
+      raw_target_l_ = target_l_;  // §10: pre-clip target for quest slow->fast debug
+      return; // re-base adopted as the new target
     }
 
     last_mapper_l_trans_ = trans;
@@ -1479,9 +1492,22 @@ private:
     Eigen::AngleAxisd jump_aa(delta_rot);
     if (delta_trans.norm() > kMapperRebaseDist ||
         std::abs(jump_aa.angle()) > kMapperRebaseAng) {
+      // Re-base: the mapper re-anchored ee_goal_ onto a new achieved pose (ARM
+      // switch / override release / resync / pose load — the mapper always
+      // re-bases onto achieved, never into free space). Adopt the fresh pose as
+      // the new target too: leaving the old leashed target stale would park the
+      // arm off by the quest→delta residual and effectively shift the limit box.
+      // Safe to adopt — the arm is already at the pose the mapper re-based onto.
       last_mapper_r_trans_ = trans;
       last_mapper_r_rot_ = rot_mat;
-      return; // re-base only — target unchanged
+      initial_r_.translation() = trans;
+      initial_r_.linear() = rot_mat;
+      accum_r_trans_ = Eigen::Vector3d::Zero();
+      accum_r_rot_ = Eigen::Quaterniond::Identity();
+      target_r_.translation() = trans;
+      target_r_.linear() = rot_mat;
+      raw_target_r_ = target_r_;  // §10: pre-clip target for quest slow->fast debug
+      return; // re-base adopted as the new target
     }
 
     last_mapper_r_trans_ = trans;
@@ -1534,8 +1560,9 @@ private:
   // bounded per-tick velocity — the main-loop clip_target alone would be defeated
   // here because the next quest message overwrites its snap each tick. The
   // mapper's absolute orientation is authoritative, so clamp_target_angle is NOT
-  // applied. last_mapper_* is kept fresh so the first spacemouse delta after
-  // quest resumes has no phantom baseline jump.
+  // applied. last_mapper_* is parked on the applied (leashed) target — not the
+  // raw goal — so the first spacemouse delta after a quest→delta handoff starts
+  // from the pose the solver actually holds, with no leash-slack residual.
   void update_goal_pose_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
     if (solving_to_home_) {
@@ -1547,8 +1574,6 @@ private:
                            msg->pose.orientation.y, msg->pose.orientation.z);
     Eigen::Matrix3d rot_mat = rot.toRotationMatrix();
 
-    last_mapper_l_trans_ = trans;
-    last_mapper_l_rot_ = rot_mat;
     first_msg_l_ = false;
     last_goal_from_quest_l_ = true;
 
@@ -1571,6 +1596,22 @@ private:
             clamped_rot_l.toRotationMatrix() * achieved_l_.linear();
       }
     }
+
+    // Quest → delta handoff: same re-anchor as _r — the quest path never writes
+    // accum/initial, so park the delta baseline on the applied target so a resume
+    // continues from the quest pose instead of a stale pre-quest one.
+    initial_l_.translation() = target_l_.translation();
+    initial_l_.linear() = target_l_.linear();
+    accum_l_trans_ = Eigen::Vector3d::Zero();
+    accum_l_rot_ = Eigen::Quaterniond::Identity();
+
+    // last_mapper tracks the APPLIED (leashed) target, not the raw quest goal —
+    // at the quest→delta handoff the first mapper delta is compared against this
+    // baseline, so leaving it on the raw goal would inject the leash slack as a
+    // phantom residual (or, if over kMapperRebaseDist, a stale parked target).
+    last_mapper_l_trans_ = target_l_.translation();
+    last_mapper_l_rot_ = target_l_.linear();
+
     raw_target_l_ = target_l_;  // §10: pre-clip (leashed) target for quest slow->fast debug
   }
 
@@ -1585,8 +1626,6 @@ private:
                            msg->pose.orientation.y, msg->pose.orientation.z);
     Eigen::Matrix3d rot_mat = rot.toRotationMatrix();
 
-    last_mapper_r_trans_ = trans;
-    last_mapper_r_rot_ = rot_mat;
     first_msg_r_ = false;
     last_goal_from_quest_r_ = true;
 
@@ -1609,6 +1648,24 @@ private:
             clamped_rot_r.toRotationMatrix() * achieved_r_.linear();
       }
     }
+
+    // Quest → delta handoff: the quest path writes target but never accum/initial,
+    // so on resume update_goal_delta_r would rebuild a stale pre-quest baseline.
+    // Re-anchor the delta integrator onto the applied (leashed) target here — one
+    // quest message now updates BOTH the absolute target AND the delta baseline,
+    // so no stale record is left for the switch-back to resurrect.
+    initial_r_.translation() = target_r_.translation();
+    initial_r_.linear() = target_r_.linear();
+    accum_r_trans_ = Eigen::Vector3d::Zero();
+    accum_r_rot_ = Eigen::Quaterniond::Identity();
+
+    // last_mapper tracks the APPLIED (leashed) target, not the raw quest goal —
+    // at the quest→delta handoff the first mapper delta is compared against this
+    // baseline, so leaving it on the raw goal would inject the leash slack as a
+    // phantom residual (or, if over kMapperRebaseDist, a stale parked target).
+    last_mapper_r_trans_ = target_r_.translation();
+    last_mapper_r_rot_ = target_r_.linear();
+
     raw_target_r_ = target_r_;  // §10: pre-clip (leashed) target for quest slow->fast debug
   }
 

@@ -53,6 +53,11 @@ public:
     target_arm_ = this->get_parameter("target_arm").as_string();
     ee_orientation_slack_ = this->get_parameter("ee_orientation_slack_deg").as_double() * M_PI / 180.0;
 
+    // Remote control override: a single software bool that plays the role of the
+    // Quest engage gesture. When TRUE the spacemouse stream is suppressed at the
+    // source and the external /quest goal stream (ZMQ gateway) is authoritative.
+    this->declare_parameter("control_override_topic", "/control_override");
+
     // ── Quest override parameters (quest_teleop_plan §7, Task 2) ──
     this->declare_parameter("quest_state_topic", "/quest_state");
     this->declare_parameter("quest_achieved_pose_topic_l", "/ik_solver/achieved_ee_pose_l");
@@ -160,6 +165,31 @@ public:
     precision_sub_ = this->create_subscription<std_msgs::msg::Bool>(
       "/spacemouse/" + target_arm_ + "/precision_mode", 10, [this](const std_msgs::msg::Bool::SharedPtr msg) {
           precision_mode_ = msg->data;
+      });
+
+    // ── Remote control override (single bool gate, mirrors the Quest engage) ──
+    // One bool on /control_override replaces the 2 s trigger gesture: when TRUE,
+    // joy_hand stops publishing /spacemouse/<arm>/ee_target_pose entirely, so the
+    // gateway's /quest/<arm>/ee_target_pose goals become the only goal stream and
+    // win in the solver (no delta re-assert). No mutex: single executor thread,
+    // same pattern as precision_mode_.
+    control_override_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      this->get_parameter("control_override_topic").as_string(), 10,
+      [this](const std_msgs::msg::Bool::SharedPtr msg) {
+          bool now = msg->data;
+          // Override release edge (TRUE→FALSE): while the override held, the
+          // external /quest goal moved the arm out from under the frozen ee_goal_,
+          // so a plain resume would re-assert the pre-override pose. Adopt the
+          // real pose now — same re-base as the ARM switch (§11), so spacemouse
+          // deltas continue from where the arm actually is.
+          if (control_override_ && !now && current_mode_ == "ARM" &&
+              achieved_pose_valid_) {
+            ee_goal_ = achieved_pose_map_;
+            RCLCPP_INFO(this->get_logger(),
+              "Rebased ee_goal_ to achieved pose on override release (%s)",
+              target_arm_.c_str());
+          }
+          control_override_ = now;
       });
 
     // ── Achieved-pose subscription (quest_teleop_plan §5/§11, Task 1) ──
@@ -923,6 +953,14 @@ private:
   {
     if (current_mode_ == "BASE") return;
 
+    // ── Remote control override (single bool, mirrors the Quest engage) ──
+    // When TRUE the external /quest goal stream (ZMQ gateway) is authoritative:
+    // suppress the SpaceMouse velocity stream at the source so the solver keeps
+    // last_goal_from_quest_=true and nothing re-asserts the mapper hold pose.
+    if (control_override_) {
+      return;   // gateway /quest goals drive; spacemouse + quest-trigger silent
+    }
+
     // ── Quest override (quest_teleop_plan §4-§7, Task 2) ──
     // Runs every ARM tick, active or not. Its input is /quest_state, not /joy,
     // so it runs before the joy_received_ gate below. The single-threaded
@@ -1093,6 +1131,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr precision_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr control_override_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ee_lock_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr limit_profile_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_sub_;
@@ -1126,6 +1165,7 @@ private:
   double command_dt_ {0.01};
 
   bool precision_mode_ {false};
+  bool control_override_ {false};   // remote bool gate: suppresses spacemouse stream
 
   // ── EE lock state ───────────────────────────────────────────────
   std::mutex ee_lock_mutex_;

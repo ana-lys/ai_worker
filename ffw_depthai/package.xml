@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
   <!-- depthai is managed internally as a submodule and built locally -->
   <depend>nlohmann-json-dev</depend>
   <depend>fmt</depend>

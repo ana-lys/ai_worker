@@ -1,7 +1,7 @@
 """Launch the OAK-D 720p raw -> host-CPU x264 streamer (depthai_720p_udp_streamer).
 
 Raw NV12 720p frames come off USB and the host encodes them with x264enc
-(ultrafast/zerolatency) at a higher bitrate (~20 Mbps) than the OAK-D HW
+(veryfast/zerolatency) at a higher bitrate (~20 Mbps) than the OAK-D HW
 encoder's 8 Mbps CBR ceiling. Mutually exclusive with oakd_stream_launch.py
 because the OAK-D USB device only supports one DepthAI pipeline at a time.
 """
