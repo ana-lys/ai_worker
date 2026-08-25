@@ -122,7 +122,7 @@ int main(int argc, char **argv) {
     msg->header.stamp = node->now();
     msg->width  = w;
     msg->height = h;
-    msg->distortion_model = "plumb_bob";
+    msg->distortion_model = "rational_polynomial";
 
     auto K = calib.getCameraIntrinsics(dai::CameraBoardSocket::CAM_A, dai::Size2f(w, h));
     if (K.size() == 3 && K[0].size() == 3) {
@@ -138,9 +138,12 @@ int main(int argc, char **argv) {
     // r = identity: the pipeline applies no rectification rotation.
     msg->r[0] = msg->r[4] = msg->r[8] = 1.0f;
 
-    // DepthAI order [k1,k2,p1,p2,k3,...]; ROS plumb_bob wants exactly [k1,k2,p1,p2,k3].
+    // DepthAI stores OpenCV rational-polynomial coefficients (perspective model),
+    // ordered [k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4,taux,tauy]. ROS
+    // distortion_model="rational_polynomial" wants exactly the first 8; that
+    // reduces to plumb_bob when k4..k6 are zero, so this is correct either way.
     auto dist = calib.getDistortionCoefficients(dai::CameraBoardSocket::CAM_A);
-    if (dist.size() >= 5) msg->d.assign(dist.begin(), dist.begin() + 5);
+    if (dist.size() >= 8) msg->d.assign(dist.begin(), dist.begin() + 8);
     return msg;
   };
 
