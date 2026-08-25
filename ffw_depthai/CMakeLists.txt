@@ -43,7 +43,7 @@ target_include_directories(depthai_udp_streamer PUBLIC
 )
 target_compile_features(depthai_udp_streamer PUBLIC cxx_std_17)
 
-ament_target_dependencies(depthai_udp_streamer rclcpp)
+ament_target_dependencies(depthai_udp_streamer rclcpp sensor_msgs)
 
 target_link_libraries(depthai_udp_streamer
     depthai::core

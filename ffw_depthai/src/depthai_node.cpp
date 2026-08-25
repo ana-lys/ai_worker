@@ -7,8 +7,10 @@
 #include <sstream>
 #include <chrono>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <string>
 #include <memory>
+#include <mutex>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -93,6 +95,65 @@ int main(int argc, char **argv) {
   auto sysLogQueue = sysLog->out.createOutputQueue();
 
   pipeline.start();
+
+  // ── CameraInfo: intrinsics at the actual streamed resolution ─────────────
+  // DepthAI stores the factory calibration in EEPROM. getCameraIntrinsics()
+  // rescales it for the requested destShape with the same center-crop / aspect
+  // handling the Camera node applied to the frame (1920x1080 from the 4:3
+  // IMX378 sensor → 16:9 CROP model), so the K we publish matches the pixels
+  // the receiver decodes.
+  dai::CalibrationHandler calib;
+  try {
+    calib = device->readCalibration();
+  } catch (const std::exception &e) {
+    RCLCPP_WARN(node->get_logger(), "No EEPROM calibration (%s) — using defaults", e.what());
+    calib = device->readCalibrationOrDefault();
+  }
+
+  std::shared_ptr<sensor_msgs::msg::CameraInfo> camera_info;
+  std::mutex camera_info_mtx;
+  auto camera_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
+      "/oakd/camera_info", rclcpp::QoS(1).transient_local().reliable());
+
+  // Build a CameraInfo for the given output size from the factory calibration.
+  auto build_camera_info = [&](uint32_t w, uint32_t h) {
+    auto msg = std::make_shared<sensor_msgs::msg::CameraInfo>();
+    msg->header.frame_id = "oakd_cam_a";
+    msg->header.stamp = node->now();
+    msg->width  = w;
+    msg->height = h;
+    msg->distortion_model = "plumb_bob";
+
+    auto K = calib.getCameraIntrinsics(dai::CameraBoardSocket::CAM_A, dai::Size2f(w, h));
+    if (K.size() == 3 && K[0].size() == 3) {
+      for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+          msg->k[r * 3 + c] = K[r][c];
+      // p = K | 0 (no rectification offset — the optical center is the image center)
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) msg->p[r * 4 + c] = msg->k[r * 3 + c];
+        msg->p[r * 4 + 3] = 0.0f;
+      }
+    }
+    // r = identity: the pipeline applies no rectification rotation.
+    msg->r[0] = msg->r[4] = msg->r[8] = 1.0f;
+
+    // DepthAI order [k1,k2,p1,p2,k3,...]; ROS plumb_bob wants exactly [k1,k2,p1,p2,k3].
+    auto dist = calib.getDistortionCoefficients(dai::CameraBoardSocket::CAM_A);
+    if (dist.size() >= 5) msg->d.assign(dist.begin(), dist.begin() + 5);
+    return msg;
+  };
+
+  // Republish on a slow timer so late-joining subscribers get the current
+  // intrinsics (transient_local keeps the last message for brand-new joins;
+  // the timer just refreshes the stamp for liveness checks).
+  auto camera_info_timer = node->create_wall_timer(std::chrono::milliseconds(1000), [&]() {
+    std::lock_guard<std::mutex> lk(camera_info_mtx);
+    if (camera_info) {
+      camera_info->header.stamp = node->now();
+      camera_info_pub->publish(*camera_info);
+    }
+  });
 
   // ── Telemetry UDP Socket ─────────────────────────────────────────────────
   const std::string dest_ip = "192.168.0.241";
@@ -211,6 +272,26 @@ int main(int argc, char **argv) {
 
     if (videoFrame && !hasTimedOut) {
       const auto& data = videoFrame->getData();
+
+      // First frame: publish the CameraInfo for the streamed resolution once.
+      // The encoded ImgFrame still carries the source frame dimensions; fall
+      // back to the requested 1920x1080 if the metadata is unset.
+      {
+        uint32_t actual_w = videoFrame->getWidth();
+        uint32_t actual_h = videoFrame->getHeight();
+        if (actual_w == 0 || actual_h == 0) { actual_w = 1920; actual_h = 1080; }
+        std::lock_guard<std::mutex> lk(camera_info_mtx);
+        if (!camera_info) {
+          camera_info = build_camera_info(actual_w, actual_h);
+          camera_info_pub->publish(*camera_info);
+          RCLCPP_INFO(node->get_logger(),
+                      "Published intrinsics on /oakd/camera_info: %ux%u "
+                      "fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
+                      camera_info->width, camera_info->height,
+                      camera_info->k[0], camera_info->k[4],
+                      camera_info->k[2], camera_info->k[5]);
+        }
+      }
 
       GstBuffer *buffer = gst_buffer_new_allocate(nullptr, data.size(), nullptr);
       GstMapInfo map;
