@@ -324,17 +324,41 @@ def generate_launch_description():
     camera_timer_10s = TimerAction(period=10.0, actions=[camera_launch],
                                    condition=UnlessCondition(init_position))
 
-    # The D435 head camera sits in the ZED-M mount, so tie its optical frame into
-    # the robot TF tree via the ZED left optical frame. The head_joint1/2 chain
-    # then resolves d435_camera -> arm_base_link automatically, so detections in
-    # the D435 frame convert straight into the EEF/base frame.
-    # Identity assumes the D435 lens sits at the ZED left-lens optical origin;
-    # adjust --x/--y/--z (and rotation) if you measure an offset.
-    d435_camera_static_tf = Node(
+    # The OAK-D head camera sits at the center of the ZED-M module, i.e. the
+    # midpoint of the left/right optical frames. Both optical x-axes point along
+    # the 63 mm stereo baseline, so that midpoint is the ZED left optical frame
+    # shifted +31.5 mm in x (half the baseline). Keeping it optical-to-optical
+    # means no rotation math.
+    # Identity rotation assumes the OAK-D board's optical axes point the same
+    # way as the ZED's; add --roll/--pitch/--yaw if the board is rotated in the
+    # mount. Detection-frame standoff/approach details go in the grab planner.
+    oakd_cam_static_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         arguments=['--frame-id', 'zedm_left_camera_optical_frame',
-                   '--child-frame-id', 'd435_camera'],
+                   '--child-frame-id', 'head_camera_frame',
+                   '--x', '0.0315'],
+        output='screen',
+        condition=IfCondition(launch_cameras),
+    )
+
+    # Actively republish the resolved head_camera_frame -> control-frame
+    # transform on a topic, so the AI worker converts detections into the frame
+    # the robot is controlled in. Must be a topic message, NOT a TF broadcast:
+    # head_camera_frame already has a static parent above.
+    # control_frame: 'base_link' -- robot-fixed frame. base_link ->
+    # head_camera_frame is resolved purely from the robot model + head joint
+    # states, so the transform is always available and is clean to hand to a
+    # client: camera frame -> robot base_link (p_base = M * p_camera).
+    head_camera_tf_bridge_node = Node(
+        package='ffw_bringup',
+        executable='head_camera_tf_bridge',
+        name='head_camera_tf_bridge',
+        parameters=[{
+            'control_frame': 'base_link',
+            'camera_frame': 'head_camera_frame',
+            'update_rate': 30.0,
+        }],
         output='screen',
         condition=IfCondition(launch_cameras),
     )
@@ -428,7 +452,8 @@ def generate_launch_description():
             swerve_controller_switch_event_handler,
             camera_timer_20s,
             camera_timer_10s,
-            d435_camera_static_tf,
+            oakd_cam_static_tf,
+            head_camera_tf_bridge_node,
             lidar_timer_20s,
             lidar_timer_10s,
             head_eef_tracker_node,
