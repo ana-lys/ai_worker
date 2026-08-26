@@ -5,7 +5,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('rgb_source', default_value='oakd_lite_720p',
+        DeclareLaunchArgument('rgb_source', default_value='oakd_lite',
                               description='RGB source: zedm, d435, oakd_lite, or oakd_lite_720p'),
         DeclareLaunchArgument('headless', default_value='false'),
         DeclareLaunchArgument('oakd_codec', default_value='h264',

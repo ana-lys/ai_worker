@@ -22,7 +22,7 @@ def generate_launch_description():
     )
     rgb_source_arg = DeclareLaunchArgument(
         'rgb_source',
-        default_value='oakd_lite_720p',
+        default_value='oakd_lite',
         description='RGB camera source: d435, zedm, oakd_lite, or oakd_lite_720p'
     )
     use_h264_arg = DeclareLaunchArgument(
