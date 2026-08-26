@@ -95,7 +95,10 @@ int main(int argc, char **argv) {
   dai::Pipeline pipeline(device);
 
   auto cam = pipeline.create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_A);
-  cam->initialControl.setSharpness(6);     // same tuning as the 1080p fallback
+  // Sharpness 0: aruco markers are maximum-contrast binary grids — sharpening's
+  // overshoot/ringing fakes secondary edges around the corners and breaks
+  // detectMarkers. Disable it; the grid already has all the edge contrast it needs.
+  cam->initialControl.setSharpness(0);
   cam->initialControl.setLumaDenoise(1);
   cam->initialControl.setChromaDenoise(1);
 
