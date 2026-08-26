@@ -49,6 +49,11 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 
+// ROS node so this executable can publish the D435 intrinsics with zero-latency
+// (transient_local) QoS — same pattern as the OAK-D streamer's /oakd/camera_info.
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
+
 std::mutex cout_mutex;
 std::atomic<bool> g_running{true};
 
@@ -137,7 +142,9 @@ void destroy_gst_stream(GstEncoder &enc) {
 }
 
 void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, int port,
-                       int width, int height, int fps) {
+                       int width, int height, int fps,
+                       rclcpp::Node::SharedPtr node,
+                       rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub) {
   std::ostringstream hdr;
   hdr << "\n=== CAM (RGB ZED-Replacement) " << serial << " : rgb->udp:" << port
       << "  gst=h264 ===";
@@ -156,13 +163,39 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
     cfg.enable_device(serial);
     cfg.enable_stream(RS2_STREAM_COLOR, width, height, RS2_FORMAT_RGB8, fps);
 
-    pipe.start(cfg);
+    rs2::pipeline_profile profile = pipe.start(cfg);
+
+    // Publish the color intrinsics with zero latency: transient_local + reliable
+    // latches K so a late-joining consumer sees it immediately, refreshed at ~1 Hz.
+    // Same pattern as /oakd/camera_info (see depthai_720p_raw_streamer.cpp).
+    auto color_profile = profile.get_stream(RS2_STREAM_COLOR).as<rs2::video_stream_profile>();
+    rs2_intrinsics intr = color_profile.get_intrinsics();
+    auto ci = std::make_shared<sensor_msgs::msg::CameraInfo>();
+    ci->header.frame_id = "d435_camera";
+    ci->header.stamp = node->now();
+    ci->width = intr.width;
+    ci->height = intr.height;
+    ci->distortion_model = "plumb_bob";  // D435 OEM cal is Brown-Conrady, 5 coeffs
+    ci->k[0] = intr.fx; ci->k[2] = intr.ppx;
+    ci->k[4] = intr.fy; ci->k[5] = intr.ppy;
+    ci->k[8] = 1.0;
+    ci->d.assign(intr.coeffs, intr.coeffs + 5);
+    ci->r[0] = ci->r[4] = ci->r[8] = 1.0;  // identity rectification
+    for (int r = 0; r < 3; ++r) {
+      for (int c = 0; c < 3; ++c) ci->p[r * 4 + c] = ci->k[r * 3 + c];
+      ci->p[r * 4 + 3] = 0.0;              // no rectified offset
+    }
+    cam_info_pub->publish(*ci);
+    log("CAM RGB " + serial + " : published /d435/camera_info " +
+        std::to_string(intr.width) + "x" + std::to_string(intr.height) +
+        " fx=" + std::to_string(intr.fx) + " fy=" + std::to_string(intr.fy));
 
     size_t expected_size = width * height * 3;
     std::vector<uint8_t> rgb_buf(expected_size, 0);
     std::string cam_name = "RGB";
+    auto last_info_pub = std::chrono::steady_clock::now();
 
-    while (g_running) {
+    while (g_running && rclcpp::ok()) {
       rs2::frameset frames;
       try {
         frames = pipe.wait_for_frames(5000);
@@ -197,6 +230,15 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       if (!gst_encoder_push_frame(gst_enc, rgb_buf.data(), expected_size)) {
         log("CAM RGB " + serial + " : gst_encoder_push_frame failed, stopping");
         break;
+      }
+
+      // Refresh the latched camera_info at ~1 Hz so consumers see a live stamp
+      // (the first publish already happened after pipe.start above).
+      auto now_ci = std::chrono::steady_clock::now();
+      if (now_ci - last_info_pub > std::chrono::milliseconds(1000)) {
+        ci->header.stamp = node->now();
+        cam_info_pub->publish(*ci);
+        last_info_pub = now_ci;
       }
     }
 
@@ -359,7 +401,7 @@ void stream_camera(const std::string &serial, int index,
     std::vector<uint8_t> second_buf(width * height * second_bpp, 0);
     std::string cam_name = "CAM" + std::to_string(index);
 
-    while (g_running) {
+    while (g_running && rclcpp::ok()) {
       rs2::frameset frames;
       try {
         frames = pipe.wait_for_frames(5000);
@@ -508,6 +550,15 @@ int main(int argc, char **argv) {
 
   gst_init(nullptr, nullptr);
 
+  // Turn this executable into a ROS node so the D435 RGB stream can publish its
+  // intrinsics on /d435/camera_info with zero latency (transient_local, reliable).
+  // rclcpp's SIGINT handler makes rclcpp::ok() go false on Ctrl-C; the streaming
+  // threads check it alongside g_running so shutdown completes.
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<rclcpp::Node>("realsense_udp_streamer");
+  auto cam_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
+      "/d435/camera_info", rclcpp::QoS(1).transient_local().reliable());
+
   rs2::context ctx;
   auto devices = ctx.query_devices();
   if (devices.size() == 0) {
@@ -540,9 +591,10 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < serials.size(); ++i) {
     if (serials[i] == "941322072865") {
       if (d435_rgb_enabled) {
-        // The D435i replacing the ZED: Stream 1080p RGB to the ZED's port
+        // The D435i replacing the ZED: Stream 720p RGB to the ZED's port
         int rgb_port = base_port + 100;
-        threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port, 1920, 1080, 30);
+        threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
+                             1280, 720, 30, node, cam_info_pub);
       }
     } else if (enable_d405s) {
       int depth_port = base_port + cam_idx * 2;
@@ -572,7 +624,7 @@ int main(int argc, char **argv) {
   telemetry_addr.sin_port = htons(base_port + 200);
   inet_pton(AF_INET, dest_ip.c_str(), &telemetry_addr.sin_addr);
 
-  while (g_running) {
+  while (g_running && rclcpp::ok()) {
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
     auto now = std::chrono::steady_clock::now();
@@ -615,6 +667,7 @@ int main(int argc, char **argv) {
     close(telemetry_sock);
   }
 
+  rclcpp::shutdown();
   log("\n=== Done ===");
   return 0;
 }

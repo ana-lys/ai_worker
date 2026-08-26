@@ -26,7 +26,7 @@ target_include_directories(realsense_udp_streamer PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_compile_features(realsense_udp_streamer PUBLIC c_std_99 cxx_std_17)
-ament_target_dependencies(realsense_udp_streamer rclcpp)
+ament_target_dependencies(realsense_udp_streamer rclcpp sensor_msgs)
 target_include_directories(realsense_udp_streamer PRIVATE ${GST_INCLUDE_DIRS})
 target_compile_options(realsense_udp_streamer PRIVATE ${GST_CFLAGS_OTHER})
 target_link_libraries(realsense_udp_streamer
