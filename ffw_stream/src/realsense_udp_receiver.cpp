@@ -26,7 +26,7 @@ public:
     this->declare_parameter<bool>("enable_d405s", true);
     this->declare_parameter<int>("depthai_video_port", 9100);
     this->declare_parameter<int>("oakd_720p_video_port", 9110);
-    this->declare_parameter<std::string>("rgb_source", "zedm");
+    this->declare_parameter<std::string>("rgb_source", "oakd_lite_720p");
     this->declare_parameter<std::string>("oakd_codec", "h264");
 
     int base_port = this->get_parameter("base_port").as_int();

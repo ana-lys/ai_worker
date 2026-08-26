@@ -1,0 +1,39 @@
+%YAML:1.0
+# OAK-D CAM_A intrinsics, captured live from /oakd/camera_info (DOMAIN_ID=30).
+#
+# Resolution-specific: these K values are for the 1920x1080 stream only.
+# The streamer republishes per-resolution intrinsics, so re-capture after
+# switching streamers:
+#   source /opt/ros/jazzy/setup.bash
+#   ros2 topic echo --once /oakd/camera_info   # then save what it prints
+#
+# distortion_model: rational_polynomial — OpenCV rational-polynomial model,
+# 8 coefficients in DepthAI EEPROM order [k1,k2,p1,p2,k3,k4,k5,k6].
+# Coefficients are focal-length-normalized, so they are resolution-invariant:
+# rescaling K to another streamed size does NOT require rescaling d.
+---
+image_width: 1920
+image_height: 1080
+camera_name: oakd_cam_a
+frame_id: oakd_cam_a
+distortion_model: rational_polynomial
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1365.8978271484375, 0., 969.4403686523438, 0., 1366.0146484375, 544.395263671875, 0., 0., 1. ]
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 8
+   dt: d
+   data: [ -2.346155881881714, -5.335321426391602, -9.016176250042918e-07, -0.0006165971281006932, 30.168699264526367, -2.4624931812286377, -4.807162284851074, 29.297025680541992 ]
+rectification_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1., 0., 0., 0., 1., 0., 0., 0., 1. ]
+projection_matrix: !!opencv-matrix
+   rows: 3
+   cols: 4
+   dt: d
+   data: [ 1365.8978271484375, 0., 969.4403686523438, 0., 0., 1366.0146484375, 544.395263671875, 0., 0., 0., 1., 0. ]

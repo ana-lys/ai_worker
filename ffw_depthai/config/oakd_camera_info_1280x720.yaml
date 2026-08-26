@@ -1,0 +1,47 @@
+%YAML:1.0
+# OAK-D CAM_A intrinsics for the 720p stream (depthai_720p_udp_streamer).
+#
+# Derived, not live-captured: the 720p stream is the SAME 16:9 ISP center-crop
+# of the IMX378 sensor as the 1080p stream, scaled down by 1280/1920 = 2/3.
+# Both requestOutput() paths crop the sensor to 16:9 then scale uniformly, so
+# every K entry scales by exactly 2/3 (the DepthAI CalibrationHandler applies
+# this same uniform rescale inside getCameraIntrinsics(1280,720)). The
+# distortion coefficients are focal-length-normalized and resolution-invariant:
+# they are identical to the 1080p file, unchanged.
+#
+# Base values are the LIVE capture from the 1080p streamer
+# (config/oakd_camera_info_1920x1080.yaml), verified against /oakd/camera_info
+# on DOMAIN_ID=30. If you ever want the on-chip numbers pixel-exact, re-capture
+# while the 720p streamer runs:
+#   source /opt/ros/jazzy/setup.bash
+#   ros2 topic echo --once /oakd/camera_info   # then save what it prints
+# (Both streamers republish per-resolution intrinsics on /oakd/camera_info.)
+#
+# distortion_model: rational_polynomial — OpenCV rational-polynomial model,
+# 8 coefficients in DepthAI EEPROM order [k1,k2,p1,p2,k3,k4,k5,k6].
+---
+image_width: 1280
+image_height: 720
+camera_name: oakd_cam_a
+frame_id: oakd_cam_a
+distortion_model: rational_polynomial
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 910.5985514322917, 0., 646.2935791015625, 0., 910.6764322916667, 362.93017578125, 0., 0., 1. ]
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 8
+   dt: d
+   data: [ -2.346155881881714, -5.335321426391602, -9.016176250042918e-07, -0.0006165971281006932, 30.168699264526367, -2.4624931812286377, -4.807162284851074, 29.297025680541992 ]
+rectification_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1., 0., 0., 0., 1., 0., 0., 0., 1. ]
+projection_matrix: !!opencv-matrix
+   rows: 3
+   cols: 4
+   dt: d
+   data: [ 910.5985514322917, 0., 646.2935791015625, 0., 0., 910.6764322916667, 362.93017578125, 0., 0., 0., 1., 0. ]
