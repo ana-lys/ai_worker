@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
   // Build a CameraInfo for the given output size from the factory calibration.
   auto build_camera_info = [&](uint32_t w, uint32_t h) {
     auto msg = std::make_shared<sensor_msgs::msg::CameraInfo>();
-    msg->header.frame_id = "oakd_cam_a";
+    msg->header.frame_id = "head_camera_frame";
     msg->header.stamp = node->now();
     msg->width  = w;
     msg->height = h;

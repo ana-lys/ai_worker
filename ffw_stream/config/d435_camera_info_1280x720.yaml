@@ -1,0 +1,36 @@
+%YAML:1.0
+# D435 RGB intrinsics for the 1280x720 H264 stream (realsense_udp_streamer --d435-rgb).
+#
+# LIVE-captured from /d435/camera_info on DOMAIN_ID=30 while the streamer runs
+# (serial 941322072865, port base_port+100 = 9100):
+#   source /opt/ros/jazzy/setup.bash
+#   ros2 topic echo --once /d435/camera_info
+#
+# distortion_model: plumb_bob (5 coefficients, all zeros — factory calibration
+# leaves the RGB lens undistorted to within a fraction of a pixel).
+---
+image_width: 1280
+image_height: 720
+camera_name: d435_camera
+frame_id: d435_camera
+distortion_model: plumb_bob
+camera_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 917.8783569335938, 0., 645.2236328125, 0., 918.3494873046875, 348.2060546875, 0., 0., 1. ]
+distortion_coefficients: !!opencv-matrix
+   rows: 1
+   cols: 5
+   dt: d
+   data: [ 0., 0., 0., 0., 0. ]
+rectification_matrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1., 0., 0., 0., 1., 0., 0., 0., 1. ]
+projection_matrix: !!opencv-matrix
+   rows: 3
+   cols: 4
+   dt: d
+   data: [ 917.8783569335938, 0., 645.2236328125, 0., 0., 918.3494873046875, 348.2060546875, 0., 0., 0., 1., 0. ]

@@ -36,6 +36,20 @@ ControlCmd  (controller -> robot, SUB on tcp://*:CONTROL_PORT)
     ee0/ee1 are the two commanded end-effector poses (position + RPY
     orientation), right arm and left arm.
 
+HeadCamTf   (gateway_node -> controller, PUB on tcp://*:STATE_PORT)
+    layout: 16 doubles = 128 bytes, 4x4 homogeneous matrix, ROW-MAJOR
+      [0:4]   row 0 = [m00 m01 m02 m03]
+      [4:8]   row 1 = [m10 m11 m12 m13]
+      [8:12]  row 2 = [m20 m21 m22 m23]
+      [12:16] row 3 = [0   0   0   1   ]
+    The head-camera -> control-frame transform: maps a detection expressed in
+    camera coordinates into the frame the robot is controlled in (the control
+    frame, e.g. 'base_link'):
+        p_control = M * [p_camera, 1]
+    It is the resolved lookup_transform(control_frame, head_camera_frame)
+    from the head_camera_tf_bridge node: R in the upper-left 3x3 (row-major),
+    translation in column 3 (m03/m13/m23), last row fixed to [0 0 0 1].
+
 RPY convention: extrinsic XYZ / intrinsic ZYX, i.e. the rotation matrix is
 R = Rx(roll) * Ry(pitch) * Rz(yaw), matching the spacemouse teleop stack
 (joy_hand rpy_to_matrix). rpy_to_quat / quat_to_rpy use this convention.
@@ -55,6 +69,7 @@ N_JOINTS = 20
 MSG_ROBOT_STATE = 0   # robot_node -> controller: 20 joints pos/vel/acc
 MSG_EE_STATE = 1      # gateway_node -> controller: two 6-DOF EE poses
 MSG_CONTROL_CMD = 2   # controller -> robot: two 6-DOF EE targets
+MSG_HEAD_CAM_TF = 3   # gateway_node -> controller: camera->control 4x4
 
 # Header: type (int32) + timestamp (float64) = 12 bytes, little-endian.
 _HEADER = struct.Struct("<id")
@@ -62,12 +77,14 @@ _HEADER = struct.Struct("<id")
 # Payload structs (per type).
 _STATE_STRUCT = struct.Struct("<" + "d" * (3 * N_JOINTS))  # 480 bytes
 _CTRL_STRUCT = struct.Struct("<12d")                        # 96 bytes
+_TF_STRUCT = struct.Struct("<16d")                          # 128 bytes
 
 # Expected frame size per type (header + payload), for length validation.
 _FRAME_SIZES = {
     MSG_ROBOT_STATE: _HEADER.size + _STATE_STRUCT.size,
     MSG_EE_STATE: _HEADER.size + _CTRL_STRUCT.size,
     MSG_CONTROL_CMD: _HEADER.size + _CTRL_STRUCT.size,
+    MSG_HEAD_CAM_TF: _HEADER.size + _TF_STRUCT.size,
 }
 
 
@@ -119,6 +136,26 @@ class EEState:
         self.ee = ee
 
 
+class HeadCamTf:
+    """Head-camera -> control-frame transform as a row-major 4x4.
+
+    `matrix` is a 16-tuple, row-major homogeneous matrix:
+        row 0 = (m00 m01 m02 m03)   row 1 = (m10 m11 m12 m13)
+        row 2 = (m20 m21 m22 m23)   row 3 = (0   0   0   1   )
+    So p_control = M * [p_camera, 1]. Default is the identity.
+    """
+
+    __slots__ = ("matrix",)
+
+    _IDENTITY = (1.0, 0.0, 0.0, 0.0,
+                 0.0, 1.0, 0.0, 0.0,
+                 0.0, 0.0, 1.0, 0.0,
+                 0.0, 0.0, 0.0, 1.0)
+
+    def __init__(self, matrix=None):
+        self.matrix = tuple(matrix) if matrix is not None else self._IDENTITY
+
+
 def encode_robot_state(state: RobotState, ts=None) -> bytes:
     """Encode RobotState, auto-stamping the send time if ts is None."""
     payload = _STATE_STRUCT.pack(*(state.joint_pos + state.joint_vel +
@@ -162,6 +199,18 @@ def decode_ee_state(data: bytes):
     payload, ts = _unframe(data, MSG_EE_STATE, "EEState")
     vals = _CTRL_STRUCT.unpack(payload)
     return EEState((vals[0:6], vals[6:12])), ts
+
+
+def encode_head_cam_tf(tf: HeadCamTf, ts=None) -> bytes:
+    """Encode HeadCamTf, auto-stamping the send time if ts is None."""
+    payload = _TF_STRUCT.pack(*tf.matrix)
+    return _frame(MSG_HEAD_CAM_TF, payload, ts)
+
+
+def decode_head_cam_tf(data: bytes):
+    """Decode HeadCamTf. Returns (tf, ts) where ts is the sender's."""
+    payload, ts = _unframe(data, MSG_HEAD_CAM_TF, "HeadCamTf")
+    return HeadCamTf(_TF_STRUCT.unpack(payload)), ts
 
 
 def rpy_to_quat(rx, ry, rz):

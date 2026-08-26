@@ -42,6 +42,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import TransformStamped
 
 import zmq
 
@@ -61,6 +62,27 @@ def _declare_float(node, name, default):
 # protocol ee index -> arm/topic. ee0 = right, ee1 = left; flip the tuple to swap.
 _CMD_TOPIC = {0: "/quest/right/ee_target_pose", 1: "/quest/left/ee_target_pose"}
 _ACHIEVED_TOPIC = {0: "/ik_solver/achieved_ee_pose_r", 1: "/ik_solver/achieved_ee_pose_l"}
+# head_camera_tf_bridge republishes the resolved camera->control transform here;
+# the gateway forwards it on the ZMQ state stream as MSG_HEAD_CAM_TF.
+_CAM_TF_TOPIC = "/head_camera_tf"
+
+
+def _matrix_from_transform(msg):
+    """geometry_msgs/TransformStamped -> row-major 4x4 homogeneous (16 floats).
+
+    R is the standard quaternion->matrix (w,x,y,z), translation in column 3.
+    Matches protocol.py HeadCamTf: p_control = M * [p_camera, 1].
+    """
+    q = msg.transform.rotation
+    t = msg.transform.translation
+    x, y, z, w = q.x, q.y, q.z, q.w
+    return (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w), t.x,
+            2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w), t.y,
+            2.0 * (x * z - y * w), 2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y), t.z,
+            0.0, 0.0, 0.0, 1.0)
 
 
 class GatewayNode(Node):
@@ -80,6 +102,7 @@ class GatewayNode(Node):
         self._cmd_ts = 0.0             # sender timestamp from the frame header
         self._cmd_recv_ts = 0.0        # monotonic time it arrived (timeout basis)
         self._last_pub_data = None     # dedup: last full frame bytes we forwarded
+        self._cam_tf = None            # newest head-camera transform (TransformStamped)
 
         # ZMQ: state out (PUB latest-wins), control in (SUB keep-newest).
         self._ctx = zmq.Context()
@@ -91,11 +114,14 @@ class GatewayNode(Node):
         self._sub.setsockopt(zmq.CONFLATE, 1)
         self._sub.bind(f"tcp://*:{control_port}")
 
-        # ROS: current poses in, goal poses out.
+        # ROS: current poses in, goal poses out, camera transform in.
         for i, topic in _ACHIEVED_TOPIC.items():
             self.create_subscription(
                 PoseStamped, topic, lambda msg, idx=i: self._on_achieved(idx, msg), 10
             )
+        self.create_subscription(
+            TransformStamped, _CAM_TF_TOPIC, self._on_cam_tf, 10
+        )
         self._quest_pubs = {
             i: self.create_publisher(PoseStamped, topic, 10)
             for i, topic in _CMD_TOPIC.items()
@@ -137,12 +163,17 @@ class GatewayNode(Node):
         with self._lock:
             self._achieved[idx] = msg
 
+    def _on_cam_tf(self, msg):
+        with self._lock:
+            self._cam_tf = msg
+
     def _tick(self):
         with self._lock:
             achieved = list(self._achieved)
             cmd = self._cmd
             cmd_ts = self._cmd_ts
             cmd_recv_ts = self._cmd_recv_ts
+            cam_tf = self._cam_tf
         now = time.monotonic()
 
         # State out: both arms as one EEState (quat -> rpy on the wire).
@@ -156,6 +187,13 @@ class GatewayNode(Node):
                 ee.append((p.position.x, p.position.y, p.position.z, rx, ry, rz))
             if all(math.isfinite(v) for arm in ee for v in arm):
                 self._pub.send(proto.encode_ee_state(proto.EEState(tuple(ee))))
+
+        # State out: head-camera -> control-frame transform, so detections in
+        # camera coords convert straight into the frame EE goals are expressed
+        # in. Only sent once the bridge has resolved it (odom/head joints up).
+        if cam_tf is not None:
+            self._pub.send(proto.encode_head_cam_tf(
+                proto.HeadCamTf(_matrix_from_transform(cam_tf))))
 
         # Command in: newest ControlCmd -> /quest/<arm>/ee_target_pose.
         if cmd is not None and (now - cmd_recv_ts) < self._cmd_timeout:

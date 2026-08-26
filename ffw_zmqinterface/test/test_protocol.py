@@ -41,13 +41,33 @@ def test_ee_state_round_trip():
     assert ts == pytest.approx(99.0)
 
 
+def test_head_cam_tf_round_trip():
+    # Identity default
+    tf0 = proto.HeadCamTf()
+    back, ts = proto.decode_head_cam_tf(proto.encode_head_cam_tf(tf0, ts=42.0))
+    assert back.matrix == pytest.approx(tf0._IDENTITY)
+    assert ts == pytest.approx(42.0)
+
+    # Translation + 90 deg yaw about Z: R maps +X_cam to +Y_control.
+    m = (0.0, -1.0, 0.0, 1.0,
+         1.0, 0.0, 0.0, 2.0,
+         0.0, 0.0, 1.0, 3.0,
+         0.0, 0.0, 0.0, 1.0)
+    tf1 = proto.HeadCamTf(m)
+    back, ts = proto.decode_head_cam_tf(proto.encode_head_cam_tf(tf1, ts=7.0))
+    assert back.matrix == pytest.approx(m)
+    assert ts == pytest.approx(7.0)
+
+
 def test_wire_sizes():
     assert proto._HEADER.size == 12                      # int32 type + float64 ts
     assert proto._STATE_STRUCT.size == 3 * proto.N_JOINTS * 8
     assert proto._CTRL_STRUCT.size == 12 * 8
+    assert proto._TF_STRUCT.size == 16 * 8
     assert proto._FRAME_SIZES[proto.MSG_ROBOT_STATE] == 12 + 480
     assert proto._FRAME_SIZES[proto.MSG_EE_STATE] == 12 + 96
     assert proto._FRAME_SIZES[proto.MSG_CONTROL_CMD] == 12 + 96
+    assert proto._FRAME_SIZES[proto.MSG_HEAD_CAM_TF] == 12 + 128
 
 
 def test_bad_length_rejected():
@@ -57,6 +77,8 @@ def test_bad_length_rejected():
         proto.decode_robot_state(b"\x00" * 491)
     with pytest.raises(ValueError):
         proto.decode_ee_state(b"\x00" * 107)
+    with pytest.raises(ValueError):
+        proto.decode_head_cam_tf(b"\x00" * 139)   # 12+128 is 140
 
 
 def test_type_mismatch_rejected():
@@ -64,6 +86,7 @@ def test_type_mismatch_rejected():
     cmd = proto.ControlCmd(((0.0,) * 6, (0.0,) * 6))
     st = proto.EEState(((0.0,) * 6, (0.0,) * 6))
     rs = proto.RobotState()
+    tf = proto.HeadCamTf()
     with pytest.raises(ValueError):
         proto.decode_control(proto.encode_ee_state(st))
     with pytest.raises(ValueError):
@@ -72,6 +95,12 @@ def test_type_mismatch_rejected():
         proto.decode_ee_state(proto.encode_control(cmd))
     with pytest.raises(ValueError):
         proto.decode_robot_state(proto.encode_control(cmd))
+    with pytest.raises(ValueError):
+        proto.decode_head_cam_tf(proto.encode_control(cmd))
+    with pytest.raises(ValueError):
+        proto.decode_head_cam_tf(proto.encode_ee_state(st))
+    with pytest.raises(ValueError):
+        proto.decode_ee_state(proto.encode_head_cam_tf(tf))
 
 
 def test_timestamp_makes_frame_unique():
@@ -87,7 +116,7 @@ def test_timestamp_makes_frame_unique():
 
 def test_type_ids_distinct():
     assert len({proto.MSG_ROBOT_STATE, proto.MSG_EE_STATE,
-                proto.MSG_CONTROL_CMD}) == 3
+                proto.MSG_CONTROL_CMD, proto.MSG_HEAD_CAM_TF}) == 4
 
 
 def test_rpy_quat_pure_axes():

@@ -14,8 +14,8 @@
 ---
 image_width: 1920
 image_height: 1080
-camera_name: oakd_cam_a
-frame_id: oakd_cam_a
+camera_name: head_camera_frame
+frame_id: head_camera_frame
 distortion_model: rational_polynomial
 camera_matrix: !!opencv-matrix
    rows: 3

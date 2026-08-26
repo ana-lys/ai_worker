@@ -1,138 +1,296 @@
-# ffw_zmqinterface
+# ffw_zmqinterface — robot ↔ controller HIL link
 
-Robot-side ZMQ HIL (hardware-in-the-loop) link. The node runs on the machine
-attached to the robot and talks to the RL/controller side over ZMQ TCP.
+ZeroMQ TCP link between the robot machine and an external controller (RL agent,
+AI worker, HIL harness). The robot side binds two sockets; your controller
+`connect()`s to both. This document defines the wire so either end can be
+implemented independently. The canonical implementation lives in
+`ffw_zmqinterface/protocol.py`; if you implement from this document alone, the
+byte layout below is the contract.
 
-The wire carries **framed structs**: every ZMQ message is a fixed 12-byte header
-followed by the payload. ZMQ preserves message boundaries, so the header is the
-only framing needed. `ffw_zmqinterface/protocol.py` is the reference
-implementation (encoders/decoders + byte layout); the layout below is what the
-other end of the link must match.
+## 30-second summary
 
-## Link
+| direction          | endpoint                 | socket / pattern   | messages |
+|--------------------|--------------------------|--------------------|----------|
+| robot → controller | `tcp://<robot-ip>:6001`  | PUB, latest-wins (CONFLATE) | `EEState`, `HeadCamTf` |
+| controller → robot | `tcp://<robot-ip>:6002`  | SUB, keep-newest (CONFLATE) | `ControlCmd` |
 
-| direction        | socket | port  | pattern                | message      |
-|------------------|--------|-------|------------------------|--------------|
-| robot -> control | PUB    | 6001  | latest-wins (CONFLATE) | `RobotState` or `EEState` |
-| control -> robot | SUB    | 6002  | keep newest (CONFLATE) | `ControlCmd` |
+- Every ZMQ message is **one framed struct**: a fixed **12-byte header** + a
+  **fixed-size payload**. ZMQ preserves message boundaries, so no extra framing.
+- Units are **SI throughout**: meters, radians, seconds.
+- End-effector (EE) indices: **`ee0` = right arm, `ee1` = left arm.**
+- EE poses and goals (`EEState`, `ControlCmd`) are expressed in the robot's
+  **`map` frame**; the `HeadCamTf` transform lands in the robot-fixed
+  **`base_link`** frame (see §3).
 
-Both sockets `bind` on the robot machine; the controller `connect`s. `robot_node`
-and `gateway_node` are mutually exclusive (both bind 6001/6002).
+---
 
-## Wire protocol
-
-One message == one frame:
-
-```
-[0:4]    type      (int32,  little-endian)   -- message type id, see below
-[4:12]   timestamp (float64, little-endian)  -- seconds since epoch, sender clock
-[12:12+len] payload (little-endian doubles)
-```
-
-| type | message       | payload                     | frame size |
-|------|---------------|-----------------------------|-----------|
-| 0    | `RobotState`  | 60 doubles = 480 B          | **492 B**  |
-| 1    | `EEState`     | 12 doubles = 96 B           | **108 B**  |
-| 2    | `ControlCmd`  | 12 doubles = 96 B           | **108 B**  |
-
-Payload layouts:
-
-- **`RobotState`** (robot -> controller): 20 joints x (pos, vel, acc).
-  `[0:20]` joint_pos (rad / m), `[20:40]` joint_vel (rad/s / m/s),
-  `[40:60]` joint_acc (rad/s^2 / m/s^2).
-- **`EEState`** (gateway -> controller): two 6-DOF poses, `ee0` + `ee1`.
-- **`ControlCmd`** (controller -> robot): two 6-DOF target poses, `ee0` + `ee1`.
-
-Each 6-DOF pose is `(x, y, z, rx, ry, rz)` — position in **meters**, orientation
-as **RPY in radians, extrinsic XYZ** (`R = Rx(roll) * Ry(pitch) * Rz(yaw)`),
-matching the spacemouse teleop stack. `ee0` is the **right** arm, `ee1` the
-**left** arm. Units are SI throughout.
-
-### The header timestamp
-
-The timestamp is part of the frame, so two messages with the same payload but
-different timestamps are **different bytes**. The gateway byte-dedup drops only
-an exact retransmission (same type + ts + payload):
-
-- Controller re-asserting the same goal at 25 Hz with a **fresh** timestamp per
-  send -> every frame passes the dedup. This is what walks the solver's leash.
-- Controller reusing the **same** timestamp -> frames are byte-identical and
-  only the first is forwarded (stuck-sender guard).
-
-So the controller must stamp every send with the current send time. The
-reference `encode_*` functions auto-stamp with `time.time()` when `ts=None`;
-passing an explicit stale `ts` reproduces the stuck-sender behavior.
-
-### Decoder rules
-
-Receivers validate length and type and drop the frame on mismatch:
-- wrong total length for the declared type -> `ValueError`
-- header type id != the type the decoder expects -> `ValueError`
-- `EEState` and `ControlCmd` share the 96-B payload but have distinct type ids,
-  so a receiver cannot mistake one for the other (the old "reuse the ControlCmd
-  decoder" shortcut is gone).
-
-## Node: `gateway_node` (live robot link)
-
-Bridges the ZMQ link to the spacemouse teleop stack on the robot machine:
-
-- subscribes `/ik_solver/achieved_ee_pose_r` / `..._l` (achieved EE poses, map
-  frame) and publishes them as **one `EEState`** on 6001 every tick (both arms;
-  publishes only after both are seen). Position comes through directly;
-  orientation is converted quat -> RPY for the wire.
-- subscribes 6002 and forwards the newest `ControlCmd` as absolute goals on
-  `/quest/right/ee_target_pose` / `/quest/left/ee_target_pose` (map frame,
-  `PoseStamped`, RPY -> quat). Forwarded frames are byte-deduped as above.
-- drops frames with non-finite values (with a warning) and malformed frames.
-- `cmd_timeout` (default **0.5 s**): stops forwarding once no `ControlCmd` has
-  arrived for that long. The solver then holds its last quest goal until the
-  spacemouse moves again.
-
-The `/quest/<arm>/ee_target_pose` path consumes an absolute map-frame goal
-directly, leashed ~6 cm/tick, and is NOT gated on the quest being active — the
-correct injection point for remote commands. The delta path
-`/spacemouse/<arm>/ee_target_pose` treats a large jump as a mapper re-base, so
-it is not used here.
-
-Parameters:
+## 1. The link
 
 ```
-ros2 run ffw_zmqinterface gateway_node --ros-args \
-    -p state_port:=6001 -p control_port:=6002 -p hz:=100.0 -p cmd_timeout:=0.5
+  Controller (your code)                    Robot machine
+  ───────────────────────                   ───────────────────────────────
+  ZMQ SUB connect :6001  ◄────────────────  gateway_node  PUB bind :6001
+  ZMQ PUB connect :6002  ────────────────►  gateway_node  SUB bind :6002
 ```
 
-The ee-index <-> arm mapping is `ee0 -> right, ee1 -> left`; to swap, flip the
-`_CMD_TOPIC` / `_ACHIEVED_TOPIC` dicts in `gateway_node.py`.
+Both robot sockets `bind`; the controller `connect`s. `CONFLATE=1` means the
+robot side keeps only the newest outbound message and newest inbound message —
+subscribing late or missing ticks is fine; you always get the latest state.
 
-## Node: `robot_node` (baseline / no-ROS)
+---
 
-Publishes a synthetic sine-wave `RobotState` on 6001 and drains `ControlCmd`
-from 6002 (keeps the newest), so the link works with no hardware or ROS.
-Replace `build_state()` with real joint reads (e.g. `/joint_states`) to go live.
+## 2. Wire protocol
+
+### 2.1 Header (every message, 12 bytes, little-endian)
 
 ```
-python3 ffw_zmqinterface/robot_node.py [--state-port 6001] [--control-port 6002] [--hz 100]
+[0:4]    type      int32    -- message type id (see §2.2)
+[4:12]   timestamp float64  -- seconds since epoch, sender clock
 ```
 
-## Controller-side (the other machine)
+The type id dispatches the decoder. The timestamp is part of the frame — it
+makes each message byte-unique even when the payload is unchanged, and the robot
+side uses it for dedup and liveness (see §2.7).
 
-Implement or copy the framed wire above. The safest path: copy
-`ffw_zmqinterface/protocol.py` over your controller's `protocol.py` (e.g. SERL
-`hil-serl`) — the encoders/decoders are the only thing that must match across
-the link. If reimplementing, honor exactly: little-endian, the `<id` header,
-the three type ids, the frame sizes (492 / 108 / 108 B), and the extrinsic-XYZ
-RPY convention. The reference `rpy_to_quat` / `quat_to_rpy` helpers use that
-convention and are provided for converting to/from quaternions on either end.
+### 2.2 Message types
 
-Runtime requirements on the robot machine: `python3-zmq`, `rclpy`,
-`geometry_msgs`. The controller side needs only a ZMQ lib (no ROS).
+| type | message        | direction                     | payload            | frame size |
+|------|----------------|-------------------------------|--------------------|-----------|
+| 0    | `RobotState`   | robot → controller (baseline node only) | 60 doubles = 480 B | **492 B** |
+| 1    | `EEState`      | robot → controller            | 12 doubles = 96 B  | **108 B** |
+| 2    | `ControlCmd`   | controller → robot            | 12 doubles = 96 B  | **108 B** |
+| 3    | `HeadCamTf`    | robot → controller            | 16 doubles = 128 B | **140 B** |
 
-## Test
+All payload values are `float64`, little-endian.
+
+> **What you will actually see on a live link:** the gateway (`gateway_node`)
+> publishes **`EEState`** and **`HeadCamTf`** on 6001. `RobotState` is emitted
+> only by the baseline `robot_node`, which is an offline stand-in, not part of
+> the live bring-up — if you connect to the robot you can rely on types 1 and 3
+> flowing, and you send type 2.
+
+### 2.3 `EEState` — current end-effector poses (robot → controller)
+
+Payload: two 6-DOF poses, 12 doubles:
+
+```
+[0:6]   ee0 = (x, y, z, rx, ry, rz)   right arm, in meters + radians
+[6:12]  ee1 = (x, y, z, rx, ry, rz)   left arm
+```
+
+These are the robot's current (achieved) EE poses in the `map` frame.
+
+### 2.4 `ControlCmd` — commanded end-effector poses (controller → robot)
+
+Identical layout to `EEState`:
+
+```
+[0:6]   ee0 = (x, y, z, rx, ry, rz)   right arm goal
+[6:12]  ee1 = (x, y, z, rx, ry, rz)   left arm goal
+```
+
+Commands are **absolute goals in the `map` frame** — not deltas. The robot
+solver walks toward the goal (leashed, roughly 6 cm per solver tick), so a
+distant target is approached in steps; re-assert the goal each cycle to keep it
+moving. If the controller goes silent for **0.5 s** (configurable), the robot
+stops forwarding and holds its last goal. Values must be finite — non-finite
+frames are dropped.
+
+### 2.5 `HeadCamTf` — head-camera → robot base_link transform (robot → controller)
+
+The transform that converts a detection in **head-camera coordinates** into the
+robot's **`base_link` frame** — the robot-fixed frame the machine is physically
+controlled in. Payload is a 4×4 homogeneous matrix, **row-major**, 16 doubles:
+
+```
+[0:4]   row 0 = [m00 m01 m02 m03]
+[4:8]   row 1 = [m10 m11 m12 m13]
+[8:12]  row 2 = [m20 m21 m22 m23]
+[12:16] row 3 = [0   0   0   1   ]   (always the identity row)
+```
+
+The rotation `R` is the upper-left 3×3 (row-major); the translation is column 3
+(`m03`, `m13`, `m23`). Mapping a camera-space point to a base_link-space point:
+
+```
+x_base = m00*x_c + m01*y_c + m02*z_c + m03
+y_base = m10*x_c + m11*y_c + m12*z_c + m13
+z_base = m20*x_c + m21*y_c + m22*z_c + m23
+```
+
+i.e. `p_base = M · [p_camera, 1]`. So: detect an object in the camera image,
+estimate `(x_c, y_c, z_c)` in camera coordinates, apply this matrix, and the
+result is the object's position in the robot `base_link` frame — no TF, no ROS,
+no frame juggling on your side. (`EEState`/`ControlCmd` are expressed in the
+`map` frame; see §3.)
+
+The transform is resolved live on the robot from the current head pose
+(`base_link` → `head_camera_frame` needs only the robot model + head joint
+states), so it reflects head motion; keep using the newest frame.
+
+### 2.6 `RobotState` — 20 joint state (baseline node only)
+
+Payload: 60 doubles, 20 joints × (pos, vel, acc):
+
+```
+[0:20]   joint_pos (rad / m)
+[20:40]  joint_vel (rad/s / m/s)
+[40:60]  joint_acc (rad/s² / m/s²)
+```
+
+Emitted by the offline `robot_node` baseline only (synthetic sine waves).
+
+### 2.7 The timestamp contract (important for the controller)
+
+Every frame carries a `float64` sender-clock timestamp in the header. The robot
+side byte-dedups inbound `ControlCmd`: **two frames with identical
+(type, timestamp, payload) are treated as one retransmission** and only the
+first is forwarded. This means:
+
+- To re-assert the same goal (which you normally do every cycle to walk the
+  leash), stamp each send with the **current time** → every frame passes.
+- Reusing a stale/identical timestamp for a re-send → that frame is swallowed
+  (stuck-sender guard).
+
+So: **always timestamp your sends with `time.time()`.** A fresh timestamp per
+send is free; a reused one silently drops your command.
+
+### 2.8 Decoder validation
+
+Receivers validate the frame before decoding and drop it on mismatch:
+
+- total length ≠ expected frame size for the declared type → error;
+- header type id ≠ the type the decoder expects → error.
+
+`EEState` and `ControlCmd` share the 96-B payload but have **distinct type ids**,
+so they cannot be confused. Always dispatch on the header type id, never on
+payload size alone.
+
+### 2.9 RPY / quaternion convention
+
+Orientations are encoded as **RPY in radians, extrinsic XYZ / intrinsic ZYX**:
+
+```
+R = Rx(roll) · Ry(pitch) · Rz(yaw)
+```
+
+This is the convention used by the robot's teleop stack. If you work in
+quaternions, convert with the standard formulas implemented in
+`protocol.py::rpy_to_quat` / `quat_to_rpy` (they use exactly this convention) —
+or copy `protocol.py` wholesale.
+
+---
+
+## 3. Typical use: vision → grab
+
+1. Receive video frames on the **separate UDP video stream** (this ZMQ link does
+   *not* carry pixels — RGB is streamed separately, e.g. port 9000).
+2. Detect the object and estimate its 3-D position in **camera coordinates**
+   `(x_c, y_c, z_c)` using the camera intrinsics.
+3. Read the newest `HeadCamTf` frame; compute `p_base = M · [p_camera, 1]` —
+   the object's position in the robot `base_link` frame.
+4. Read the newest `EEState` for the current EE poses and send `ControlCmd`
+   goals. Note the frame split: the transform output is `base_link`, while EE
+   poses/goals on the wire are in the robot's `map` frame; the `map`↔`base_link`
+   relationship is the robot's localization, and the two coincide when the robot
+   is at the map origin. Plan your goal in whichever frame you prefer and
+   convert if you mix the two.
+5. Send the goal as a `ControlCmd` on 6002 with a fresh timestamp, re-asserting
+   each cycle until the pose is reached.
+
+---
+
+## 4. Rates / liveness (defaults)
+
+| stream          | default rate | notes |
+|-----------------|--------------|-------|
+| `EEState`       | 100 Hz       | gateway `hz` parameter; published once both EE poses are seen |
+| `HeadCamTf`     | 30 Hz        | bridge `update_rate`; published once the robot-side transform resolves |
+| `ControlCmd`    | yours        | send as fast as you want to re-assert goals (≤ ~100 Hz) |
+
+Nothing on the wire is guaranteed to arrive in a fixed order — dispatch on the
+header type id. `EEState` and `HeadCamTf` are independent messages on the same
+socket.
+
+---
+
+## 5. Minimum controller implementation
+
+`protocol.py` in this package is the reference and is deliberately dependency-
+free (pure stdlib: `struct`, `time`). Two ways to consume it:
+
+**A. Copy `protocol.py`** (recommended). Drop it into your project and use
+`decode_ee_state`, `decode_head_cam_tf`, `encode_control`, etc. The module
+docstring documents every layout. Only the encoders/decoders need to match
+across the link.
+
+**B. Implement from this document.** The two things you need:
+
+```python
+import struct, time
+import zmq
+
+HDR = struct.Struct("<id")            # int32 type + float64 timestamp
+
+SUB = zmq.Context().socket(zmq.SUB)   # robot -> you
+SUB.connect("tcp://<robot-ip>:6001")
+SUB.setsockopt(zmq.SUBSCRIBE, b"")
+
+PUB = zmq.Context().socket(zmq.PUB)   # you -> robot
+PUB.connect("tcp://<robot-ip>:6002")
+
+def recv():
+    frame = SUB.recv()
+    t, ts = HDR.unpack_from(frame, 0)
+    vals = struct.unpack(f"<{len(frame) - 12}d", frame[12:])
+    return t, ts, vals
+
+def send_goal(ee0, ee1):              # ee0=(x,y,z,rx,ry,rz), ee1 likewise
+    pub_frame = HDR.pack(2, time.time()) + struct.pack("<12d", *(ee0 + ee1))
+    PUB.send(pub_frame)
+
+while True:
+    t, ts, v = recv()
+    if t == 1:      # EEState: v[0:6]=right, v[6:12]=left
+        pass
+    elif t == 3:    # HeadCamTf: 16 doubles, row-major 4x4
+        pass
+    elif t == 0:    # RobotState: 60 doubles (baseline only)
+        pass
+```
+
+Runtime requirements: a ZMQ binding (e.g. `pyzmq`). No ROS is needed on the
+controller side.
+
+---
+
+## 6. Robot-side nodes (context, not required reading)
+
+- **`gateway_node`** — the live link. Subscribes the solver's achieved EE poses
+  (map frame) and publishes them as `EEState`; subscribes `/head_camera_tf`
+  (a ROS topic carrying the resolved camera→base_link transform) and
+  republishes it as `HeadCamTf`; receives `ControlCmd` and forwards each frame
+  as an absolute map-frame goal to the arm solver
+  (`/quest/<arm>/ee_target_pose`). Dedup and `cmd_timeout` behave as described
+  in §2.7 / §2.4.
+- **`robot_node`** — baseline stand-in for bring-up/testing with no hardware:
+  publishes synthetic sine-wave `RobotState`, drains `ControlCmd`. Not part of
+  the live bring-up.
+
+## 7. Test
 
 ```
 python3 -m pytest test/
 ```
 
-pyzmq (`python3-zmq`) is required at runtime but not for the protocol tests
-(`test/test_protocol.py` covers round-trips, wire sizes, type/length rejection,
-timestamp-uniqueness, and the RPY/quat conversions).
+Covers round-trips for all four types, wire sizes (492/108/108/140 B), length
+and type-mismatch rejection, timestamp uniqueness, and the RPY/quat
+conversions. Uses only stdlib + pytest.
+
+## 8. Examples
+
+`examples/` holds live-robot demos that drive the arm through this link —
+see `examples/README.md`. `rectangle_sweep.py` moves the right EE around a
+rectangle via `ControlCmd` re-assertions (the "move the arm in a square" demo).
+These are robot-side dev tools, not part of the controller contract; they need
+ROS + the running stack and must only be run against a live robot deliberately.
