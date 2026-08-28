@@ -83,6 +83,12 @@ def generate_launch_description():
                               description='Base UDP port for UDP Streamer'),
         DeclareLaunchArgument('use_h264', default_value='true',
                               description='OAK-D codec: true=H264 Baseline (default), false=MJPEG'),
+        DeclareLaunchArgument('color_exposure', default_value='23000',
+                              description='Fixed color exposure (us) for the right D405 RGB; '
+                                          'disables auto-exposure and auto white balance'),
+        DeclareLaunchArgument('color_wb', default_value='3000',
+                              description='Fixed manual white balance (K) for the right D405 RGB; '
+                                          '0 = leave SDK default white balance (AWB stays off)'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -101,6 +107,8 @@ def generate_launch_description():
     dest_ip = LaunchConfiguration('dest_ip')
     base_port = LaunchConfiguration('base_port')
     use_h264 = LaunchConfiguration('use_h264')
+    color_exposure = LaunchConfiguration('color_exposure')
+    color_wb = LaunchConfiguration('color_wb')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -315,6 +323,8 @@ def generate_launch_description():
             'base_port': base_port,
             'rgb_source': 'oakd_lite',
             'use_h264': use_h264,
+            'color_exposure': color_exposure,
+            'color_wb': color_wb,
         }.items(),
         condition=IfCondition(launch_cameras)
     )
