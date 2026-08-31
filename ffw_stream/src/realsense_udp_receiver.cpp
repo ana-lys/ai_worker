@@ -410,7 +410,7 @@ private:
     std::string feed_name;
     std::string pipeline;
 
-    if (rgb_source_ == "oakd_lite" || rgb_source_ == "oakd_lite_720p") {
+    if (rgb_source_ == "oakd_lite" || rgb_source_ == "oakd_lite_720p" || rgb_source_ == "oakd_lite_720p_hw") {
       // The 1080p HW fallback (when it is running) is always received on 9100.
       // In 720p mode this feed just idles while the display prefers OAK-D-720p.
       feed_name = "OAK-D";

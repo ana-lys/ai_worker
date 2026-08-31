@@ -66,8 +66,25 @@ target_link_libraries(depthai_720p_udp_streamer
     ${GSTREAMER_LIBRARIES}
 )
 
+# ── 720p on-device HW-encode streamer (new) ─────────────────────────────────
+add_executable(depthai_720p_hw_streamer src/depthai_720p_hw_streamer.cpp)
+target_include_directories(depthai_720p_hw_streamer PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    ${GSTREAMER_INCLUDE_DIRS}
+)
+target_compile_features(depthai_720p_hw_streamer PUBLIC cxx_std_17)
+
+ament_target_dependencies(depthai_720p_hw_streamer rclcpp sensor_msgs)
+
+target_link_libraries(depthai_720p_hw_streamer
+    depthai::core
+    ${GSTREAMER_LIBRARIES}
+)
+
 # Install
-install(TARGETS depthai_udp_streamer depthai_720p_udp_streamer DESTINATION lib/${PROJECT_NAME})
+install(TARGETS depthai_udp_streamer depthai_720p_udp_streamer depthai_720p_hw_streamer
+    DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY ${DEPTHAI_INSTALL_DIR}/lib/ DESTINATION lib/)
 
 ament_package()

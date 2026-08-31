@@ -23,7 +23,7 @@ def generate_launch_description():
     rgb_source_arg = DeclareLaunchArgument(
         'rgb_source',
         default_value='oakd_lite',
-        description='RGB camera source: d435, zedm, oakd_lite, or oakd_lite_720p'
+        description='RGB camera source: d435, zedm, oakd_lite, oakd_lite_720p, or oakd_lite_720p_hw'
     )
     use_h264_arg = DeclareLaunchArgument(
         'use_h264',
@@ -39,6 +39,11 @@ def generate_launch_description():
         'oakd_bitrate_kbps',
         default_value='20000',
         description='OAK-D 720p host x264enc bitrate in kbps'
+    )
+    oakd_hw_bitrate_arg = DeclareLaunchArgument(
+        'oakd_hw_bitrate_kbps',
+        default_value='8000',
+        description='OAK-D 720p on-device HW-encoder CBR bitrate in kbps (default 8000 = 8 Mbps)'
     )
     color_exposure_arg = DeclareLaunchArgument(
         'color_exposure',
@@ -63,6 +68,7 @@ def generate_launch_description():
         color_wb = LaunchConfiguration('color_wb').perform(context)
         oakd_video_port = LaunchConfiguration('oakd_video_port').perform(context)
         oakd_bitrate = LaunchConfiguration('oakd_bitrate_kbps').perform(context)
+        oakd_hw_bitrate = LaunchConfiguration('oakd_hw_bitrate_kbps').perform(context)
         actions = []
 
         # RealSense streamer can be used for D405s and/or D435 RGB.
@@ -134,10 +140,30 @@ def generate_launch_description():
                     }.items()
                 )
             )
+        elif rgb_source == 'oakd_lite_720p_hw':
+            # New: OAK-D native 720p @ 20 fps on-device HW-encode (H264-Baseline
+            # zero-lag, same profile as the 1080p fallback). Intentional fixed
+            # 720p20 stream — does NOT take the global fps arg (its own launch
+            # file defaults fps=20; pass fps there to change it).
+            actions.append(
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(
+                        os.path.join(
+                            get_package_share_directory('ffw_stream'),
+                            'launch', 'oakd_720p_hw_stream_launch.py'
+                        )
+                    ),
+                    launch_arguments={
+                        'dest_ip': dest_ip,
+                        'video_port': oakd_video_port,
+                        'bitrate_kbps': oakd_hw_bitrate,
+                    }.items()
+                )
+            )
         elif rgb_source != 'd435':
             raise RuntimeError(
                 f"Unsupported rgb_source '{rgb_source}'. "
-                "Use d435, zedm, oakd_lite, or oakd_lite_720p."
+                "Use d435, zedm, oakd_lite, oakd_lite_720p, or oakd_lite_720p_hw."
             )
 
         return actions
@@ -151,6 +177,7 @@ def generate_launch_description():
         use_h264_arg,
         oakd_video_port_arg,
         oakd_bitrate_arg,
+        oakd_hw_bitrate_arg,
         color_exposure_arg,
         color_wb_arg,
         OpaqueFunction(function=launch_setup)
