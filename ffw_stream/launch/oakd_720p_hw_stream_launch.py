@@ -1,10 +1,10 @@
 """Launch the OAK-D 720p on-device HW-encode streamer (depthai_720p_hw_streamer).
 
-Native 720p @ 20 fps, encoded on the OAK-D's MyriadX VideoEncoder with the same
-H264-Baseline zero-lag profile as the 1080p fallback (no B-frames, IDR every 1s,
-CBR). USB only carries the ~1 MB/s encoded bitstream instead of raw NV12. Mutually
-exclusive with the other OAK-D profiles — the OAK-D USB device supports one
-DepthAI pipeline at a time.
+Default: native 720p @ 30 fps MJPEG (intra-only, zero-latency). Pass codec:=h264
+(and fps:=20 for the legacy 720p20 cadence) for the H264-Baseline zero-lag profile
+(no B-frames, IDR every 1s, CBR). USB only carries the encoded bitstream instead
+of raw NV12. Mutually exclusive with the other OAK-D profiles — the OAK-D USB
+device supports one DepthAI pipeline at a time.
 """
 
 from launch import LaunchDescription
@@ -18,8 +18,8 @@ def generate_launch_description():
     video_port_arg = DeclareLaunchArgument('video_port', default_value='9110')
     fps_arg = DeclareLaunchArgument(
         'fps',
-        default_value='20',
-        description='Stream framerate (native 720p @ 20 fps default)'
+        default_value='30',
+        description='Stream framerate (native 720p @ 30 fps default)'
     )
     bitrate_arg = DeclareLaunchArgument(
         'bitrate_kbps',
@@ -28,8 +28,8 @@ def generate_launch_description():
     )
     codec_arg = DeclareLaunchArgument(
         'codec',
-        default_value='h264',
-        description='Stream codec: h264 (default, H264-Baseline zero-lag) or mjpeg (intra-only zero-latency)'
+        default_value='mjpeg',
+        description='Stream codec: mjpeg (default, intra-only zero-latency) or h264 (H264-Baseline zero-lag)'
     )
 
     return LaunchDescription([

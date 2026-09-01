@@ -314,7 +314,7 @@ def generate_launch_description():
         launch_arguments={
             'dest_ip': dest_ip,
             'base_port': base_port,
-            'rgb_source': 'oakd_lite_720p_hw',
+            'rgb_source': 'oakd_lite_720p_mjpeg',
             'use_h264': use_h264,
             'color_exposure': color_exposure,
             'color_wb': color_wb,

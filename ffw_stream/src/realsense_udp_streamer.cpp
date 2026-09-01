@@ -513,7 +513,7 @@ int main(int argc, char **argv) {
               << " <dest_ip> <base_port> [width=480] [height=270] [fps=30] "
                  "[max_depth_m=1.0] [--enable-d405s|--disable-d405s] "
                  "[--d435-rgb|--no-d435-rgb] [--color-exposure <us>] "
-                 "[--color-wb <K>] [--mjpeg]"
+                 "[--color-wb <K>] [--mjpeg|--h264] (default MJPEG)"
               << std::endl;
     return 1;
   }
@@ -521,7 +521,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> positional_args;
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
-  bool mjpeg = false;          // --mjpeg → jpegenc intra-only zero-latency
+  bool mjpeg = true;           // default MJPEG (jpegenc, intra-only zero-latency); --h264 → x264enc
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   int color_wb = -1;           // -1 = leave SDK default white balance
   for (int i = 1; i < argc; ++i) {
@@ -544,6 +544,8 @@ int main(int argc, char **argv) {
       }
     } else if (arg == "--mjpeg") {
       mjpeg = true;
+    } else if (arg == "--h264") {
+      mjpeg = false;
     } else {
       positional_args.push_back(arg);
     }

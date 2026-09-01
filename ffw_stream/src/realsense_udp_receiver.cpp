@@ -27,8 +27,8 @@ public:
     this->declare_parameter<int>("depthai_video_port", 9100);
     this->declare_parameter<int>("oakd_720p_video_port", 9110);
     this->declare_parameter<std::string>("rgb_source", "oakd_lite");
-    this->declare_parameter<std::string>("oakd_codec", "h264");
-    this->declare_parameter<std::string>("rs_codec", "h264");
+    this->declare_parameter<std::string>("oakd_codec", "mjpeg");
+    this->declare_parameter<std::string>("rs_codec", "mjpeg");
 
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
