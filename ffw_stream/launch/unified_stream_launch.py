@@ -23,7 +23,7 @@ def generate_launch_description():
     rgb_source_arg = DeclareLaunchArgument(
         'rgb_source',
         default_value='oakd_lite',
-        description='RGB camera source: d435, zedm, oakd_lite, oakd_lite_720p, or oakd_lite_720p_hw'
+        description='RGB camera source: d435, zedm, oakd_lite, oakd_lite_720p, oakd_lite_720p_hw, or oakd_lite_720p_mjpeg'
     )
     use_h264_arg = DeclareLaunchArgument(
         'use_h264',
@@ -77,6 +77,8 @@ def generate_launch_description():
             d405_flag = '--enable-d405s' if enable_d405s else '--disable-d405s'
             d435_flag = '--d435-rgb' if rgb_source == 'd435' else '--no-d435-rgb'
             cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag]
+            if rgb_source == 'oakd_lite_720p_mjpeg':
+                cmd += ['--mjpeg']
             if color_exposure != '0':
                 cmd += ['--color-exposure', color_exposure]
             if color_wb != '0':
@@ -160,10 +162,29 @@ def generate_launch_description():
                     }.items()
                 )
             )
+        elif rgb_source == 'oakd_lite_720p_mjpeg':
+            # New profile: all-MJPEG zero-latency — OAK-D 720p@30 on-device
+            # HW-encode (MJPEG q90) over the same 9110 feed as oakd_lite_720p_hw.
+            actions.append(
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(
+                        os.path.join(
+                            get_package_share_directory('ffw_stream'),
+                            'launch', 'oakd_720p_hw_stream_launch.py'
+                        )
+                    ),
+                    launch_arguments={
+                        'dest_ip': dest_ip,
+                        'video_port': oakd_video_port,
+                        'fps': fps,
+                        'codec': 'mjpeg',
+                    }.items()
+                )
+            )
         elif rgb_source != 'd435':
             raise RuntimeError(
                 f"Unsupported rgb_source '{rgb_source}'. "
-                "Use d435, zedm, oakd_lite, oakd_lite_720p, or oakd_lite_720p_hw."
+                "Use d435, zedm, oakd_lite, oakd_lite_720p, oakd_lite_720p_hw, or oakd_lite_720p_mjpeg."
             )
 
         return actions

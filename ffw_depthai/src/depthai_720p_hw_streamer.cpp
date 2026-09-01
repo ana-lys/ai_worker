@@ -14,11 +14,17 @@
 //   setRateControlMode(CBR)           → steady output rate
 //   monotonic PTS = DTS from OAK-D hardware timestamps
 //
-// Args (positional, after ROS args): <dest_ip> <video_port> <fps> <bitrate_kbps>
+// MJPEG zero-latency profile (codec=mjpeg):
+//   intra-only frames → no GOP/reorder delay, instant decode, per-frame loss recovery
+//   setQuality(90); PTS/DTS = GST_CLOCK_TIME_NONE (do-timestamp=true owns the RTP timeline)
+//   cost is ~2-3× H264 bitrate, accepted for latency
+//
+// Args (positional, after ROS args): <dest_ip> <video_port> <fps> <bitrate_kbps> <codec>
 //   dest_ip      default 192.168.0.241
 //   video_port   default 9110  (the 1080p fallback owns 9100; receiver auto-displays 9110)
 //   fps          default 20    (passed to requestOutput + encoder preset + GStreamer caps)
-//   bitrate_kbps default 8000  (8 Mbps CBR — the same budget as the 1080p fallback)
+//   bitrate_kbps default 8000  (8 Mbps CBR — same budget as the 1080p fallback; H264 only)
+//   codec        default h264  (h264 | mjpeg)
 //
 // Telemetry (FPS / worst-delay / host clock TW) goes to video_port+200, same
 // format as the fallback so the unified receiver can show it.
@@ -75,6 +81,10 @@ int main(int argc, char **argv) {
   const int  video_port         = (argc > 2) ? std::atoi(argv[2]) : 9110;
   const int  fps                = (argc > 3) ? std::max(1, std::atoi(argv[3])) : 20;
   const int  bitrate_kbps       = (argc > 4) ? std::atoi(argv[4]) : 8000;
+  const std::string codec       = (argc > 5) ? argv[5] : "h264";
+  const bool mjpeg              = (codec == "mjpeg");
+  const std::string codec_label = mjpeg ? std::string("MJPEG-HW@q90")
+                                        : "H264-Baseline @ " + std::to_string(bitrate_kbps) + " kbps CBR";
   const int  telemetry_port     = video_port + 200;
 
   // Streamed output size — the one place to change resolution. Feeds
@@ -95,8 +105,8 @@ int main(int argc, char **argv) {
   }
 
   RCLCPP_INFO(node->get_logger(),
-              "USB Speed: %d  |  codec: on-device H264-Baseline @ %d kbps CBR | %dx%d@%d",
-              static_cast<int>(device->getUsbSpeed()), bitrate_kbps,
+              "USB Speed: %d  |  codec: on-device %s | %dx%d@%d",
+              static_cast<int>(device->getUsbSpeed()), codec_label.c_str(),
               k_out_width, k_out_height, fps);
 
   dai::Pipeline pipeline(device);
@@ -117,12 +127,19 @@ int main(int argc, char **argv) {
 
   auto videoEnc = pipeline.create<dai::node::VideoEncoder>();
 
-  // ── H264 Baseline: no B-frames → strictly linear PTS order ───────────────
-  videoEnc->setDefaultProfilePreset(static_cast<float>(fps), dai::VideoEncoderProperties::Profile::H264_BASELINE);
-  videoEnc->setNumBFrames(0);           // explicitly disable B-frames (safety)
-  videoEnc->setKeyframeFrequency(fps);  // IDR every 1s → fast recovery on packet loss
-  videoEnc->setBitrateKbps(bitrate_kbps); // CBR keeps encoder at steady output rate
-  videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
+  // ── Encoder: MJPEG (intra-only) or H264 Baseline (no B-frames) ───────────
+  videoEnc->setDefaultProfilePreset(static_cast<float>(fps),
+                                    mjpeg ? dai::VideoEncoderProperties::Profile::MJPEG
+                                          : dai::VideoEncoderProperties::Profile::H264_BASELINE);
+  if (mjpeg) {
+    videoEnc->setQuality(90);             // MJPEG: intra-only frames at quality 90
+  } else {
+    // H264 Baseline: no B-frames → strictly linear PTS order
+    videoEnc->setNumBFrames(0);           // explicitly disable B-frames (safety)
+    videoEnc->setKeyframeFrequency(fps);  // IDR every 1s → fast recovery on packet loss
+    videoEnc->setBitrateKbps(bitrate_kbps); // CBR keeps encoder at steady output rate
+    videoEnc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
+  }
 
   videoOut->link(videoEnc->input);
 
@@ -252,6 +269,11 @@ int main(int argc, char **argv) {
   cal_thread.detach();
 
   // ── GStreamer Pipeline ───────────────────────────────────────────────────
+  // MJPEG zero-latency sender (codec=mjpeg):
+  //   - image/jpeg caps + do-timestamp=true: GStreamer stamps the RTP timeline
+  //     from its clock (frames pushed with PTS/DTS = GST_CLOCK_TIME_NONE)
+  //   - rtpjpegpay: RFC 2435, default payload type 26, no image-size limit
+  //   - intra-only → no GOP/reorder delay, instant decode, per-frame loss recovery
   // H264 RTP sender (same zero-lag profile as the 1080p fallback):
   //   - video/x-h264 caps tell GStreamer the format before h264parse
   //   - stream-format=byte-stream + alignment=au = one complete AU per buffer
@@ -260,15 +282,26 @@ int main(int argc, char **argv) {
   //     recover from late join or packet loss every IDR period (1s)
   //   - block=false: if GStreamer can't keep up, we drop frames rather than stall
   GError *error = nullptr;
-  std::string gst_pipeline_str =
-    "appsrc name=src is-live=true format=3 do-timestamp=false block=false "
-    "caps=\"video/x-h264,stream-format=byte-stream,alignment=au,"
-    "framerate=" + std::to_string(fps) + "/1,width=" + std::to_string(k_out_width) +
-    ",height=" + std::to_string(k_out_height) + ",profile=baseline\" ! "
-    "h264parse ! "
-    "rtph264pay config-interval=1 pt=96 ! "
-    "udpsink host=" + dest_ip + " port=" + std::to_string(video_port) +
-    " sync=false async=false";
+  std::string gst_pipeline_str;
+  if (mjpeg) {
+    gst_pipeline_str =
+      "appsrc name=src is-live=true format=3 do-timestamp=true block=false "
+      "caps=\"image/jpeg,framerate=" + std::to_string(fps) + "/1,width=" +
+      std::to_string(k_out_width) + ",height=" + std::to_string(k_out_height) + "\" ! "
+      "rtpjpegpay ! "
+      "udpsink host=" + dest_ip + " port=" + std::to_string(video_port) +
+      " sync=false async=false";
+  } else {
+    gst_pipeline_str =
+      "appsrc name=src is-live=true format=3 do-timestamp=false block=false "
+      "caps=\"video/x-h264,stream-format=byte-stream,alignment=au,"
+      "framerate=" + std::to_string(fps) + "/1,width=" + std::to_string(k_out_width) +
+      ",height=" + std::to_string(k_out_height) + ",profile=baseline\" ! "
+      "h264parse ! "
+      "rtph264pay config-interval=1 pt=96 ! "
+      "udpsink host=" + dest_ip + " port=" + std::to_string(video_port) +
+      " sync=false async=false";
+  }
 
   GstElement *gst_pipeline = gst_parse_launch(gst_pipeline_str.c_str(), &error);
   if (error) {
@@ -282,8 +315,9 @@ int main(int argc, char **argv) {
   gst_element_set_state(gst_pipeline, GST_STATE_PLAYING);
 
   RCLCPP_INFO(node->get_logger(),
-              "Streaming OAK-D 720p HW-encode (H264-Baseline) over UDP to %s:%d, "
+              "Streaming OAK-D 720p HW-encode (%s) over UDP to %s:%d, "
               "telemetry -> %s:%d",
+              (mjpeg ? "MJPEG-HW@q90" : "H264-Baseline"),
               dest_ip.c_str(), video_port, dest_ip.c_str(), telemetry_port);
 
   // ── Frame loop ───────────────────────────────────────────────────────────
@@ -330,18 +364,26 @@ int main(int argc, char **argv) {
         gst_buffer_unmap(buffer, &map);
       }
 
-      // Set monotonic PTS from OAK-D hardware timestamp so GStreamer has a
-      // proper, strictly-increasing timeline. This is the key fix that
-      // prevents the decoder from getting confused about frame order.
-      double hw_ms = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6;
-      if (hw_base_ms < 0.0) {
-        hw_base_ms = hw_ms;
+      if (mjpeg) {
+        // MJPEG: do-timestamp=true covers the timeline — push NONE so GStreamer
+        // stamps buffers from its own clock (zero-latency, no reorder dependency).
+        GST_BUFFER_PTS(buffer) = GST_CLOCK_TIME_NONE;
+        GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+        GST_BUFFER_DURATION(buffer) = GST_SECOND / fps; // 1/fps s in ns
+      } else {
+        // Set monotonic PTS from OAK-D hardware timestamp so GStreamer has a
+        // proper, strictly-increasing timeline. This is the key fix that
+        // prevents the decoder from getting confused about frame order.
+        double hw_ms = videoFrame->getTimestampDevice().time_since_epoch().count() / 1e6;
+        if (hw_base_ms < 0.0) {
+          hw_base_ms = hw_ms;
+        }
+        double elapsed_ms = hw_ms - hw_base_ms;
+        GstClockTime pts = (GstClockTime)(elapsed_ms * 1e6); // ms -> ns
+        GST_BUFFER_PTS(buffer) = pts;
+        GST_BUFFER_DTS(buffer) = pts;
+        GST_BUFFER_DURATION(buffer) = GST_SECOND / fps; // 1/fps s in ns
       }
-      double elapsed_ms = hw_ms - hw_base_ms;
-      GstClockTime pts = (GstClockTime)(elapsed_ms * 1e6); // ms -> ns
-      GST_BUFFER_PTS(buffer) = pts;
-      GST_BUFFER_DTS(buffer) = pts;
-      GST_BUFFER_DURATION(buffer) = GST_SECOND / fps; // 1/fps s in ns
 
       GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(appsrc), buffer);
       if (ret != GST_FLOW_OK) {
@@ -371,7 +413,8 @@ int main(int argc, char **argv) {
         std::ostringstream ss;
         ss << "[OAK-720p-HW] FPS: " << std::fixed << std::setprecision(1) << fps_val
            << " | Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay_ms << " ms"
-           << " | Codec: H264-HW-Baseline@" << bitrate_kbps / 1000 << "Mbps"
+           << " | Codec: " << (mjpeg ? std::string("MJPEG-HW@q90")
+                                     : std::string("H264-HW-Baseline@") + std::to_string(bitrate_kbps / 1000) + "Mbps")
            << " | TW:" << std::fixed << std::setprecision(1) << send_host_ms;
         sendUdpText(telemetry_sock, telemetry_addr, ss.str());
         last_reported_count = frame_count;

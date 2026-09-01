@@ -76,13 +76,19 @@ struct GstEncoder {
   GstElement *pipeline = nullptr;
   GstElement *appsrc    = nullptr;
   uint64_t    pts_counter = 0;
+  bool        mjpeg     = false;   // MJPEG pipeline → stamp real ns PTS for jpegenc
+  uint64_t    frame_interval_ns = 0;
 };
 
-// Build an appsrc-based H264 encoding + UDP streaming pipeline.
+// Build an appsrc-based encoding + UDP streaming pipeline.
 // rgb_mode=true → RGB24 input; false → GRAY8 input.
+// mjpeg=true → jpegenc q90 (intra-only zero-latency); false → x264enc
+// ultrafast/zerolatency H264. Shared videoconvert→I420 stage feeds both.
 GstEncoder create_gst_stream(const std::string &ip, int port, int width, int height,
-                            int fps, bool rgb_mode) {
+                            int fps, bool rgb_mode, bool mjpeg) {
   GstEncoder enc;
+  enc.mjpeg = mjpeg;
+  enc.frame_interval_ns = GST_SECOND / fps;
   std::string fmt = rgb_mode ? "RGB" : "GRAY8";
   std::ostringstream caps;
   caps << "video/x-raw,format=" << fmt
@@ -93,11 +99,18 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
   pipe << "appsrc name=src is-live=true format=3 do-timestamp=false block=false "
        << "caps=\"" << caps.str() << "\" ! "
        << "videoconvert ! "
-       << "video/x-raw,format=I420 ! "
-       << "x264enc speed-preset=ultrafast tune=zerolatency key-int-max=" << fps << " ! "
-       << "h264parse config-interval=-1 ! "
-       << "rtph264pay pt=96 ! "
-       << "udpsink host=" << ip << " port=" << port << " sync=false async=false";
+       << "video/x-raw,format=I420 ! ";
+  if (mjpeg) {
+    // Intra-only frames → no GOP/reorder delay, instant decode, per-frame loss recovery
+    pipe << "jpegenc quality=90 ! "
+         << "rtpjpegpay ! "
+         << "udpsink host=" << ip << " port=" << port << " sync=false async=false";
+  } else {
+    pipe << "x264enc speed-preset=ultrafast tune=zerolatency key-int-max=" << fps << " ! "
+         << "h264parse config-interval=-1 ! "
+         << "rtph264pay pt=96 ! "
+         << "udpsink host=" << ip << " port=" << port << " sync=false async=false";
+  }
 
   GError *error = nullptr;
   enc.pipeline = gst_parse_launch(pipe.str().c_str(), &error);
@@ -123,8 +136,17 @@ bool gst_encoder_push_frame(GstEncoder &enc, const uint8_t *data, size_t size) {
     gst_buffer_unmap(buffer, &map);
   }
 
-  GST_BUFFER_PTS(buffer)      = enc.pts_counter++;
-  GST_BUFFER_DURATION(buffer) = GST_SECOND / 30;
+  if (enc.mjpeg) {
+    // Proper monotonic PTS in ns. jpegenc/rtpjpegpay stamp the RTP timeline from the
+    // 90 kHz clock; a raw frame-index counter (µs-scale "ns") would collapse to ~0.
+    // H264 path keeps the frame-index behavior exactly as before.
+    GST_BUFFER_PTS(buffer)      = enc.pts_counter * enc.frame_interval_ns;
+    enc.pts_counter++;
+    GST_BUFFER_DURATION(buffer) = enc.frame_interval_ns;
+  } else {
+    GST_BUFFER_PTS(buffer)      = enc.pts_counter++;
+    GST_BUFFER_DURATION(buffer) = GST_SECOND / 30;
+  }
 
   GstFlowReturn ret = gst_app_src_push_buffer(GST_APP_SRC(enc.appsrc), buffer);
   return ret == GST_FLOW_OK;
@@ -142,15 +164,15 @@ void destroy_gst_stream(GstEncoder &enc) {
 }
 
 void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, int port,
-                       int width, int height, int fps,
+                       int width, int height, int fps, bool mjpeg,
                        rclcpp::Node::SharedPtr node,
                        rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub) {
   std::ostringstream hdr;
   hdr << "\n=== CAM (RGB ZED-Replacement) " << serial << " : rgb->udp:" << port
-      << "  gst=h264 ===";
+      << "  gst=" << (mjpeg ? "mjpeg" : "h264") << " ===";
   log(hdr.str());
 
-  GstEncoder gst_enc = create_gst_stream(dest_ip, port, width, height, fps, true);
+  GstEncoder gst_enc = create_gst_stream(dest_ip, port, width, height, fps, true, mjpeg);
 
   if (!gst_enc.pipeline) {
     log("CAM RGB " + serial + " : failed to create GStreamer pipeline");
@@ -256,15 +278,16 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
 void stream_camera(const std::string &serial, int index,
                    const std::string &dest_ip, int depth_port, int ir_port,
                    int width, int height, int fps, float max_depth_m,
-                   bool rgb_mode = false, int color_exposure_us = -1,
+                   bool mjpeg = false, bool rgb_mode = false, int color_exposure_us = -1,
                    int color_wb = -1) {
   std::ostringstream hdr;
   hdr << "\n=== CAM" << index << " " << serial << " : depth->udp:" << depth_port
-      << "  " << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port << "  gst=h264 ===";
+      << "  " << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port
+      << "  gst=" << (mjpeg ? "mjpeg" : "h264") << " ===";
   log(hdr.str());
 
-  GstEncoder depth_enc = create_gst_stream(dest_ip, depth_port, width, height, fps, false);
-  GstEncoder second_enc = create_gst_stream(dest_ip, ir_port, width, height, fps, rgb_mode);
+  GstEncoder depth_enc = create_gst_stream(dest_ip, depth_port, width, height, fps, false, mjpeg);
+  GstEncoder second_enc = create_gst_stream(dest_ip, ir_port, width, height, fps, rgb_mode, mjpeg);
 
   if (!depth_enc.pipeline || !second_enc.pipeline) {
     log("CAM" + std::to_string(index) +
@@ -490,7 +513,7 @@ int main(int argc, char **argv) {
               << " <dest_ip> <base_port> [width=480] [height=270] [fps=30] "
                  "[max_depth_m=1.0] [--enable-d405s|--disable-d405s] "
                  "[--d435-rgb|--no-d435-rgb] [--color-exposure <us>] "
-                 "[--color-wb <K>]"
+                 "[--color-wb <K>] [--mjpeg]"
               << std::endl;
     return 1;
   }
@@ -498,6 +521,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> positional_args;
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
+  bool mjpeg = false;          // --mjpeg → jpegenc intra-only zero-latency
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   int color_wb = -1;           // -1 = leave SDK default white balance
   for (int i = 1; i < argc; ++i) {
@@ -518,6 +542,8 @@ int main(int argc, char **argv) {
       if (i + 1 < argc) {
         color_wb = std::atoi(argv[++i]);
       }
+    } else if (arg == "--mjpeg") {
+      mjpeg = true;
     } else {
       positional_args.push_back(arg);
     }
@@ -581,6 +607,7 @@ int main(int argc, char **argv) {
   log("Destination: " + dest_ip + "  base_port=" + std::to_string(base_port) +
       "  " + std::to_string(width) + "x" + std::to_string(height) + "@" +
       std::to_string(fps) + "  max_depth=" + std::to_string(max_depth_m) + "m" +
+      "  codec=" + std::string(mjpeg ? "mjpeg" : "h264") +
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
       "  color_exposure_us=" + std::to_string(color_exposure_us) +
@@ -594,7 +621,7 @@ int main(int argc, char **argv) {
         // The D435i replacing the ZED: Stream 720p RGB to the ZED's port
         int rgb_port = base_port + 100;
         threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
-                             1280, 720, 30, node, cam_info_pub);
+                             1280, 720, 30, mjpeg, node, cam_info_pub);
       }
     } else if (enable_d405s) {
       int depth_port = base_port + cam_idx * 2;
@@ -603,7 +630,7 @@ int main(int argc, char **argv) {
       bool rgb_mode = (cam_idx == 1);
       threads.emplace_back(stream_camera, serials[i], cam_idx,
                            dest_ip, depth_port, ir_port, width, height, fps,
-                           max_depth_m, rgb_mode, color_exposure_us, color_wb);
+                           max_depth_m, mjpeg, rgb_mode, color_exposure_us, color_wb);
       cam_idx++;
     }
   }

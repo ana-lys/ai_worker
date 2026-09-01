@@ -28,6 +28,7 @@ public:
     this->declare_parameter<int>("oakd_720p_video_port", 9110);
     this->declare_parameter<std::string>("rgb_source", "oakd_lite");
     this->declare_parameter<std::string>("oakd_codec", "h264");
+    this->declare_parameter<std::string>("rs_codec", "h264");
 
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
@@ -36,6 +37,7 @@ public:
     int oakd_720p_video_port = this->get_parameter("oakd_720p_video_port").as_int();
     rgb_source_ = this->get_parameter("rgb_source").as_string();
     oakd_codec_ = this->get_parameter("oakd_codec").as_string();
+    rs_codec_ = this->get_parameter("rs_codec").as_string();
 
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
@@ -107,9 +109,21 @@ private:
     // Camera 1 (right D405) sends RGB on the "IR" port (base+3) instead of IR
     bool is_rgb = (cam_index == 1 && type == "IR");
 
-    std::string pipeline = "udpsrc port=" + std::to_string(port) +
-      " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
-      "rtpjitterbuffer latency=10 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
+    std::string pipeline;
+    if (rs_codec_ == "mjpeg") {
+      // MJPEG zero-latency: intra-only → no jitter buffer, instant decode.
+      // buffer-size kept: a 480×270 q90 frame is ~10-30 KB but a lost datagram
+      // mid-frame would corrupt the whole JPEG, so the socket must hold a frame.
+      pipeline = "udpsrc port=" + std::to_string(port) +
+        " buffer-size=2147483647 caps=\"application/x-rtp, media=video, encoding-name=JPEG, payload=26\" ! "
+        "rtpjpegdepay ! jpegdec ! videoconvert ! "
+        "queue max-size-buffers=1 leaky=downstream ! "
+        "appsink drop=true sync=false";
+    } else {
+      pipeline = "udpsrc port=" + std::to_string(port) +
+        " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+        "rtpjitterbuffer latency=10 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
+    }
 
     std::string feed_name = "Cam" + std::to_string(cam_index) + "_" + type;
 
@@ -410,7 +424,8 @@ private:
     std::string feed_name;
     std::string pipeline;
 
-    if (rgb_source_ == "oakd_lite" || rgb_source_ == "oakd_lite_720p" || rgb_source_ == "oakd_lite_720p_hw") {
+    if (rgb_source_ == "oakd_lite" || rgb_source_ == "oakd_lite_720p" || rgb_source_ == "oakd_lite_720p_hw" ||
+        rgb_source_ == "oakd_lite_720p_mjpeg") {
       // The 1080p HW fallback (when it is running) is always received on 9100.
       // In 720p mode this feed just idles while the display prefers OAK-D-720p.
       feed_name = "OAK-D";
@@ -483,15 +498,30 @@ private:
 
   void oakd720pStreamLoop(int port) {
     std::string feed_name = "OAK-D-720p";
-    // Same low-latency H264 receiver as the fallback OAK-D feed:
-    //   - latency=20 on jitter buffer, decode ASAP
-    //   - queue leaky=downstream: if decode is slow, drop old frames not new ones
-    std::string pipeline = "udpsrc port=" + std::to_string(port) +
-      " buffer-size=2147483647 "
-      "caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
-      "rtpjitterbuffer latency=20 ! rtph264depay ! decodebin ! videoconvert ! "
-      "queue max-size-buffers=1 leaky=downstream ! "
-      "appsink drop=true sync=false async=false max-buffers=1";
+    std::string pipeline;
+    if (oakd_codec_ == "mjpeg") {
+      // MJPEG zero-latency: intra-only → no GOP/reorder delay, instant decode.
+      // buffer-size=2147483647 is MANDATORY here: 720p30 q90 frames are 50-150 KB
+      // → 40-110 RTP packets each; the default ~208 KB socket buffer risks dropping
+      // a datagram mid-frame (corrupting the whole JPEG).
+      pipeline = "udpsrc port=" + std::to_string(port) +
+        " buffer-size=2147483647 "
+        "caps=\"application/x-rtp, media=video, encoding-name=JPEG, payload=26\" ! "
+        "rtpjpegdepay ! jpegdec ! videoconvert ! "
+        "queue max-size-buffers=1 leaky=downstream ! "
+        "appsink drop=true sync=false async=false max-buffers=1";
+      RCLCPP_INFO(this->get_logger(), "[%s] Using MJPEG receiver pipeline (no jitter buffer)", feed_name.c_str());
+    } else {
+      // Same low-latency H264 receiver as the fallback OAK-D feed:
+      //   - latency=20 on jitter buffer, decode ASAP
+      //   - queue leaky=downstream: if decode is slow, drop old frames not new ones
+      pipeline = "udpsrc port=" + std::to_string(port) +
+        " buffer-size=2147483647 "
+        "caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+        "rtpjitterbuffer latency=20 ! rtph264depay ! decodebin ! videoconvert ! "
+        "queue max-size-buffers=1 leaky=downstream ! "
+        "appsink drop=true sync=false async=false max-buffers=1";
+    }
     RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
 
     while (running_ && rclcpp::ok()) {
@@ -689,6 +719,7 @@ private:
   int num_cameras_;
   std::string rgb_source_;
   std::string oakd_codec_;
+  std::string rs_codec_;
 
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_depth_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_ir_;

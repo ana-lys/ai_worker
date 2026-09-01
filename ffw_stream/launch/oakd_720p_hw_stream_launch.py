@@ -24,7 +24,12 @@ def generate_launch_description():
     bitrate_arg = DeclareLaunchArgument(
         'bitrate_kbps',
         default_value='8000',
-        description='On-device H264 CBR bitrate in kbps (8000 = 8 Mbps, same budget as the 1080p fallback)'
+        description='On-device H264 CBR bitrate in kbps (H264 mode only; 8000 = 8 Mbps, same budget as the 1080p fallback)'
+    )
+    codec_arg = DeclareLaunchArgument(
+        'codec',
+        default_value='h264',
+        description='Stream codec: h264 (default, H264-Baseline zero-lag) or mjpeg (intra-only zero-latency)'
     )
 
     return LaunchDescription([
@@ -32,6 +37,7 @@ def generate_launch_description():
         video_port_arg,
         fps_arg,
         bitrate_arg,
+        codec_arg,
         Node(
             package='ffw_depthai',
             executable='depthai_720p_hw_streamer',
@@ -42,6 +48,7 @@ def generate_launch_description():
                 LaunchConfiguration('video_port'),
                 LaunchConfiguration('fps'),
                 LaunchConfiguration('bitrate_kbps'),
+                LaunchConfiguration('codec'),
             ]
         )
     ])
