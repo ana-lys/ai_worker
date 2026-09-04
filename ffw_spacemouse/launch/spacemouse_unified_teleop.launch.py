@@ -293,6 +293,7 @@ def launch_setup(context):
     # IK Solver Teleop Node
     quest_debug_solver_str = LaunchConfiguration('quest_debug_solver').perform(context)
     quest_debug_solver = quest_debug_solver_str.lower() in ('true', '1', 'yes')
+    goal_source = LaunchConfiguration('goal_source').perform(context)
     nodes.append(
         Node(
             package='ffw_collision_checker',
@@ -303,6 +304,7 @@ def launch_setup(context):
                 'hardware_mode': hardware_mode,
                 'robot_model': robot_model,
                 'quest_debug_solver': quest_debug_solver,
+                'goal_source': goal_source,
             }]
         )
     )
@@ -369,6 +371,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'robot_model', default_value='bg2',
             description='Robot model variant: bg2 (RH-P12-RN-A grippers) or smtm (XM430 right gripper).'),
+        DeclareLaunchArgument(
+            'goal_source', default_value='ee',
+            description="IK solver teleop goal source: 'ee' (spacemouse/quest, default) or 'rail' "
+                        "(external controller streams qpos on /qpos_rail). Runtime-flippable via "
+                        "`ros2 param set` or the /teleop_goal_source topic."),
         DeclareLaunchArgument(
             'left_device_id', default_value='0',
             description='SDL joystick index for left SpaceMouse (auto-detected if left at default).'),
