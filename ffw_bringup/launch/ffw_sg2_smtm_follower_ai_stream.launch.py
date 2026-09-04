@@ -89,6 +89,9 @@ def generate_launch_description():
         DeclareLaunchArgument('color_wb', default_value='3000',
                               description='Fixed manual white balance (K) for the right D405 RGB; '
                                           '0 = leave SDK default white balance (AWB stays off)'),
+        DeclareLaunchArgument('stream_to_server', default_value='false',
+                              description='If true, stream all cameras to the AI server 192.168.0.249 '
+                                          'instead of dest_ip (default 192.168.0.241)'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -109,6 +112,7 @@ def generate_launch_description():
     use_h264 = LaunchConfiguration('use_h264')
     color_exposure = LaunchConfiguration('color_exposure')
     color_wb = LaunchConfiguration('color_wb')
+    stream_to_server = LaunchConfiguration('stream_to_server')
 
     robot_description_content = Command([
         PathJoinSubstitution([FindExecutable(name='xacro')]),
@@ -325,6 +329,7 @@ def generate_launch_description():
             'use_h264': use_h264,
             'color_exposure': color_exposure,
             'color_wb': color_wb,
+            'stream_to_server': stream_to_server,
         }.items(),
         condition=IfCondition(launch_cameras)
     )

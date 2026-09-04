@@ -57,9 +57,19 @@ def generate_launch_description():
         description='Fixed manual white balance (K) for the D405 RGB stream; '
                     '0 = leave SDK default white balance'
     )
+    stream_to_server_arg = DeclareLaunchArgument(
+        'stream_to_server',
+        default_value='false',
+        description='Retarget ALL camera streams to the AI server 192.168.0.249 '
+                    'instead of dest_ip (default base station 192.168.0.241)'
+    )
 
     def launch_setup(context, *args, **kwargs):
         dest_ip = LaunchConfiguration('dest_ip').perform(context)
+        # stream_to_server=true retargets every stream from dest_ip (default:
+        # base station 192.168.0.241) to the AI server 192.168.0.249.
+        if LaunchConfiguration('stream_to_server').perform(context).lower() == 'true':
+            dest_ip = '192.168.0.249'
         base_port = LaunchConfiguration('base_port').perform(context)
         fps = LaunchConfiguration('fps').perform(context)
         enable_d405s = LaunchConfiguration('enable_d405s').perform(context).lower() == 'true'
@@ -207,5 +217,6 @@ def generate_launch_description():
         oakd_hw_bitrate_arg,
         color_exposure_arg,
         color_wb_arg,
+        stream_to_server_arg,
         OpaqueFunction(function=launch_setup)
     ])
