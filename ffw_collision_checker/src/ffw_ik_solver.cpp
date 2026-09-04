@@ -687,6 +687,74 @@ StepResult IKSolver::solveStep(
 }
 
 // ============================================================
+// f1 — dual-arm EE-velocity -> joint-velocity diagnostic map
+// ============================================================
+
+Eigen::VectorXd IKSolver::dlsMap(const Eigen::MatrixXd& J, const Eigen::VectorXd& v,
+                                  double damping, const Eigen::VectorXd& weights) {
+    Eigen::MatrixXd JtW = J.transpose() * weights.asDiagonal();
+    Eigen::MatrixXd A = JtW * J;
+    A.diagonal().array() += damping * damping;
+    Eigen::VectorXd rhs = JtW * v;
+
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+    if (ldlt.info() == Eigen::Success) {
+        Eigen::VectorXd dq = ldlt.solve(rhs);
+        if (dq.allFinite()) return dq;
+    }
+    return Eigen::FullPivLU<Eigen::MatrixXd>(A).solve(rhs);
+}
+
+Eigen::VectorXd IKSolver::mapEeTwistToDq(mjData* d, const Eigen::VectorXd& ee_twist,
+                                          const SolverConfig& cfg) const {
+    if (ee_twist.size() != 12) {
+        throw std::invalid_argument(
+            "mapEeTwistToDq: ee_twist must be 12D [v_l(3);w_l(3);v_r(3);w_r(3)]");
+    }
+
+    // Function-local scratch (not the member jacp_/jacr_ buffers): this call
+    // must stay pure/stateless and reentrant, unlike solveStep's warm-started
+    // mode-A path.
+    std::vector<mjtNum> jacp_l(3 * nv_), jacr_l(3 * nv_);
+    std::vector<mjtNum> jacp_r(3 * nv_), jacr_r(3 * nv_);
+    mj_jacSite(m_, d, jacp_l.data(), jacr_l.data(), id_l_);
+    mj_jacSite(m_, d, jacp_r.data(), jacr_r.data(), id_r_);
+
+    using RowMat3xN = Eigen::Matrix<mjtNum, 3, Eigen::Dynamic, Eigen::RowMajor>;
+    Eigen::MatrixXd J(12, nv_);
+    J.block(0, 0, 3, nv_) = Eigen::Map<const RowMat3xN>(jacp_l.data(), 3, nv_).cast<double>();
+    J.block(3, 0, 3, nv_) = Eigen::Map<const RowMat3xN>(jacr_l.data(), 3, nv_).cast<double>();
+    J.block(6, 0, 3, nv_) = Eigen::Map<const RowMat3xN>(jacp_r.data(), 3, nv_).cast<double>();
+    J.block(9, 0, 3, nv_) = Eigen::Map<const RowMat3xN>(jacr_r.data(), 3, nv_).cast<double>();
+
+    // Row weights mirror solveStep's task weighting (no dynamic "reach then
+    // align" modulation — there is no target/error for a one-shot velocity
+    // query).
+    const double ori_w = cfg.track_orientation ? cfg.ori_weight : 0.0;
+    Eigen::VectorXd w(12);
+    w.segment<3>(0).setConstant(cfg.pos_weight * cfg.left_weight_scale);
+    w.segment<3>(3).setConstant(ori_w * cfg.left_weight_scale);
+    w.segment<3>(6).setConstant(cfg.pos_weight * cfg.right_weight_scale);
+    w.segment<3>(9).setConstant(ori_w * cfg.right_weight_scale);
+
+    // Zero columns for frozen joints so they never appear in the ranking.
+    for (int i = 0; i < nv_; ++i) {
+        int jid = m_->dof_jntid[i];
+        const char* jname = mj_id2name(m_, mjOBJ_JOINT, jid);
+        if (!jname) continue;
+        std::string name_str(jname);
+        for (const auto& frozen_name : cfg.frozen_joints) {
+            if (name_str.find(frozen_name) != std::string::npos) {
+                J.col(i).setZero();
+                break;
+            }
+        }
+    }
+
+    return dlsMap(J, ee_twist, cfg.damping, w);
+}
+
+// ============================================================
 // Logging
 // ============================================================
 

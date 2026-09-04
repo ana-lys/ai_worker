@@ -187,6 +187,27 @@ public:
   std::string getKinematicTree(mjData *d) const;
   std::vector<std::string> getJointNames() const;
 
+  // ----------------------------------------------------------
+  // f1 — dual-arm EE-velocity -> joint-velocity diagnostic map.
+  // Pure DLS map: does NOT mutate d->qpos (no write, no mj_forward —
+  // d must already be kinematically consistent).
+  //   ee_twist: 12D world-frame [v_l(3); w_l(3); v_r(3); w_r(3)] — the
+  //             same stacked task-row shape solveStep builds for the
+  //             two EE sites. Query a single arm by passing zeros for
+  //             the other arm's six rows.
+  // Returns the full nv_ dq; joints not ancestral to the driven
+  // site(s) come out ~0, so ranking |dq_i| shows which motor
+  // contributes most.
+  // ----------------------------------------------------------
+  Eigen::VectorXd mapEeTwistToDq(mjData *d, const Eigen::VectorXd &ee_twist,
+                                 const SolverConfig &cfg = SolverConfig{}) const;
+
+  // Pure math core (testable without MuJoCo):
+  //   dq = (J^T W J + damping^2 I)^-1 J^T W v
+  static Eigen::VectorXd dlsMap(const Eigen::MatrixXd &J,
+                                const Eigen::VectorXd &v, double damping,
+                                const Eigen::VectorXd &weights);
+
 private:
   mjModel *m_;
   int nv_;

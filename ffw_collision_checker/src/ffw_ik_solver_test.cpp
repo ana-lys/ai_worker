@@ -473,16 +473,187 @@ void run_benchmark_parallel(mjModel* m, int num_tests, const ffw_ik::SolverConfi
 }
 
 // ============================================================
+// f1 unit tests (headless, no viewer/ROS): dlsMap pure math +
+// mapEeTwistToDq end-to-end on the bg2 model.
+// ============================================================
+
+namespace {
+
+struct UnitTestReporter {
+  int checks = 0;
+  int failures = 0;
+  void check(bool cond, const std::string &name) {
+    ++checks;
+    if (!cond) {
+      ++failures;
+      std::cerr << "[UNIT TEST FAIL] " << name << "\n";
+    } else {
+      std::cout << "[UNIT TEST PASS] " << name << "\n";
+    }
+  }
+};
+
+void run_dls_map_tests(UnitTestReporter &rep) {
+  // Identity J, unit weights: dq = v / (1 + damping^2), closed form.
+  {
+    const int n = 4;
+    Eigen::MatrixXd J = Eigen::MatrixXd::Identity(n, n);
+    Eigen::VectorXd v = Eigen::VectorXd::Ones(n) * 2.0;
+    Eigen::VectorXd w = Eigen::VectorXd::Ones(n);
+    const double damping = 0.5;
+    Eigen::VectorXd dq = ffw_ik::IKSolver::dlsMap(J, v, damping, w);
+    Eigen::VectorXd expected = v / (1.0 + damping * damping);
+    rep.check((dq - expected).norm() < 1e-9,
+              "dlsMap: identity J matches closed form dq = v/(1+damping^2)");
+  }
+
+  // Rank-deficient J (a dof with a zero column, i.e. it cannot affect the
+  // task): must still return a finite dq, and that dof's dq must be ~0.
+  {
+    const int n = 4;
+    Eigen::MatrixXd J = Eigen::MatrixXd::Zero(3, n);
+    J.block(0, 0, 3, 3) = Eigen::MatrixXd::Identity(3, 3);
+    Eigen::VectorXd v = Eigen::VectorXd::Ones(3);
+    Eigen::VectorXd w = Eigen::VectorXd::Ones(3);
+    Eigen::VectorXd dq = ffw_ik::IKSolver::dlsMap(J, v, 0.1, w);
+    rep.check(dq.allFinite(), "dlsMap: rank-deficient J still returns finite dq");
+    rep.check(std::abs(dq(3)) < 1e-9,
+              "dlsMap: zero-column dof (unobservable) maps to ~0 dq");
+  }
+
+  // Zero-weighted rows must not influence the solution at all (this is what
+  // "zero rotational weights -> translational-only response" reduces to).
+  {
+    Eigen::MatrixXd J(4, 2);
+    J << 1, 0, 0, 1, 1, 0, 0, 1;
+    Eigen::VectorXd v(4);
+    v << 1.0, 0.0, 100.0, 100.0; // rows 2-3 wildly different target, zero-weighted
+    Eigen::VectorXd w(4);
+    w << 1.0, 1.0, 0.0, 0.0;
+    Eigen::VectorXd dq_full = ffw_ik::IKSolver::dlsMap(J, v, 0.01, w);
+    Eigen::VectorXd dq_top_only =
+        ffw_ik::IKSolver::dlsMap(J.topRows(2), v.head(2), 0.01, w.head(2));
+    rep.check((dq_full - dq_top_only).norm() < 1e-6,
+              "dlsMap: zero-weighted rows do not affect dq");
+  }
+}
+
+void run_map_ee_twist_tests(mjModel *m, mjData *d, UnitTestReporter &rep) {
+  const int left_id = mj_name2id(m, mjOBJ_SITE, "left_gripper_site");
+  const int right_id = mj_name2id(m, mjOBJ_SITE, "right_gripper_site");
+  rep.check(left_id >= 0 && right_id >= 0,
+            "mapEeTwistToDq: gripper sites resolve");
+  if (left_id < 0 || right_id < 0) return;
+
+  ffw_ik::IKSolver solver(m);
+
+  mju_zero(d->qpos, m->nq);
+  mju_zero(d->qvel, m->nv);
+  if (m->nq >= 7 && m->jnt_type[0] == mjJNT_FREE) d->qpos[3] = 1.0;
+  mj_forward(m, d);
+
+  std::vector<mjtNum> qpos_before(m->nq);
+  mju_copy(qpos_before.data(), d->qpos, m->nq);
+
+  // Zero twist -> dq ~= 0.
+  {
+    Eigen::VectorXd zero_twist = Eigen::VectorXd::Zero(12);
+    Eigen::VectorXd dq = solver.mapEeTwistToDq(d, zero_twist);
+    rep.check(dq.norm() < 1e-9, "mapEeTwistToDq: zero twist maps to ~0 dq");
+  }
+
+  // Pure left x-translation, right block zeroed, frozen_joints cleared so
+  // head's ~0 contribution below tests true kinematic non-ancestry rather
+  // than the frozen-joint column zeroing.
+  Eigen::VectorXd twist = Eigen::VectorXd::Zero(12);
+  twist(0) = 1.0; // v_l.x
+  ffw_ik::SolverConfig cfg;
+  cfg.frozen_joints.clear();
+  Eigen::VectorXd dq = solver.mapEeTwistToDq(d, twist, cfg);
+
+  rep.check((int)dq.size() == m->nv, "mapEeTwistToDq: dq has nv entries");
+
+  bool qpos_unchanged = true;
+  for (int i = 0; i < m->nq; ++i) {
+    if (d->qpos[i] != qpos_before[i]) { qpos_unchanged = false; break; }
+  }
+  rep.check(qpos_unchanged, "mapEeTwistToDq: does not mutate d->qpos");
+
+  // Driven-row residual: J_l * dq should track the commanded linear velocity.
+  {
+    std::vector<mjtNum> jacp_l(3 * m->nv);
+    mj_jacSite(m, d, jacp_l.data(), nullptr, left_id);
+    using RowMat3xN = Eigen::Matrix<mjtNum, 3, Eigen::Dynamic, Eigen::RowMajor>;
+    Eigen::MatrixXd Jp = Eigen::Map<const RowMat3xN>(jacp_l.data(), 3, m->nv).cast<double>();
+    Eigen::Vector3d v_pred = Jp * dq;
+    Eigen::Vector3d v_cmd(1.0, 0.0, 0.0);
+    rep.check((v_pred - v_cmd).norm() < 0.05,
+              "mapEeTwistToDq: driven left-arm linear velocity tracked");
+  }
+
+  // dof-index helpers by joint name substring.
+  auto dof_indices_for = [&](const std::string &substr) {
+    std::vector<int> idx;
+    for (int i = 0; i < m->nv; ++i) {
+      int jid = m->dof_jntid[i];
+      const char *jname = mj_id2name(m, mjOBJ_JOINT, jid);
+      if (jname && std::string(jname).find(substr) != std::string::npos)
+        idx.push_back(i);
+    }
+    return idx;
+  };
+
+  // head_joint1/2: not ancestral to either gripper site -> ~0 dq even
+  // without being frozen.
+  for (int i : dof_indices_for("head_joint1")) rep.check(std::abs(dq(i)) < 1e-9, "mapEeTwistToDq: head_joint1 non-ancestor dq ~= 0");
+  for (int i : dof_indices_for("head_joint2")) rep.check(std::abs(dq(i)) < 1e-9, "mapEeTwistToDq: head_joint2 non-ancestor dq ~= 0");
+
+  // |dq|-energy: left arm (driven) should dominate; right arm (excluding
+  // lift, which is ancestral to both sites) should be near-silent.
+  double left_energy = 0.0, right_energy = 0.0, lift_energy = 0.0;
+  for (int i : dof_indices_for("arm_l_joint")) left_energy += std::abs(dq(i));
+  for (int i : dof_indices_for("arm_r_joint")) right_energy += std::abs(dq(i));
+  for (int i : dof_indices_for("lift_joint")) lift_energy += std::abs(dq(i));
+  rep.check(left_energy > 10.0 * right_energy,
+            "mapEeTwistToDq: |dq| energy concentrates in the driven (left) arm");
+  (void)lift_energy; // lift legitimately participates (ancestral to both sites) — no zero assertion.
+
+  // Malformed input must throw, not silently misbehave.
+  bool threw = false;
+  try {
+    Eigen::VectorXd bad_twist = Eigen::VectorXd::Zero(6);
+    solver.mapEeTwistToDq(d, bad_twist);
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  rep.check(threw, "mapEeTwistToDq: non-12D twist throws invalid_argument");
+}
+
+int run_unit_tests(mjModel *m, mjData *d) {
+  UnitTestReporter rep;
+  run_dls_map_tests(rep);
+  run_map_ee_twist_tests(m, d, rep);
+  std::cout << "\n[UNIT TESTS] " << (rep.checks - rep.failures) << "/"
+            << rep.checks << " checks passed.\n";
+  return rep.failures == 0 ? 0 : 1;
+}
+
+}  // namespace
+
+// ============================================================
 // main
 // ============================================================
 
 int main(int argc, char **argv) {
   bool is_benchmark = false;
+  bool is_unit_tests = false;
   int num_tests = 1000;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--benchmark")
       is_benchmark = true;
+    else if (arg == "--unit-tests")
+      is_unit_tests = true;
     else if (arg.find("--num-tests=") == 0) {
       num_tests = std::stoi(arg.substr(12));
     }
@@ -505,6 +676,13 @@ int main(int argc, char **argv) {
   if (m->nq >= 7 && m->jnt_type[0] == mjJNT_FREE)
     d->qpos[3] = 1.0;
   mj_forward(m, d);
+
+  if (is_unit_tests) {
+    int rc = run_unit_tests(m, d);
+    mj_deleteData(d);
+    mj_deleteModel(m);
+    return rc;
+  }
 
   // IK configuration
   ffw_ik::SolverConfig solver_cfg;
