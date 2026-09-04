@@ -1,6 +1,6 @@
 """Launch the OAK-D 720p on-device HW-encode streamer (depthai_720p_hw_streamer).
 
-Default: native 720p @ 20 fps H264-Baseline zero-lag (no B-frames, IDR every 1s,
+Default: native 720p @ 30 fps H264-Baseline zero-lag (no B-frames, IDR every 1s,
 CBR). Pass codec:=mjpeg for the intra-only zero-latency MJPEG profile. USB only
 carries the encoded bitstream instead of raw NV12. Mutually exclusive with the
 other OAK-D profiles — the OAK-D USB device supports one DepthAI pipeline at a
@@ -18,8 +18,8 @@ def generate_launch_description():
     video_port_arg = DeclareLaunchArgument('video_port', default_value='9110')
     fps_arg = DeclareLaunchArgument(
         'fps',
-        default_value='20',
-        description='Stream framerate (native 720p @ 20 fps default)'
+        default_value='30',
+        description='Stream framerate (native 720p @ 30 fps default)'
     )
     bitrate_arg = DeclareLaunchArgument(
         'bitrate_kbps',

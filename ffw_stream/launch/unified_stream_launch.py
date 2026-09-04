@@ -147,10 +147,10 @@ def generate_launch_description():
                 )
             )
         elif rgb_source == 'oakd_lite_720p_hw':
-            # New: OAK-D native 720p @ 20 fps on-device HW-encode (H264-Baseline
-            # zero-lag, same profile as the 1080p fallback). Intentional fixed
-            # 720p20 stream — does NOT take the global fps arg (its own launch
-            # file defaults fps=20; pass fps there to change it).
+            # New: OAK-D native 720p @ 30 fps on-device HW-encode (H264-Baseline
+            # zero-lag, same profile as the 1080p fallback). Takes the global
+            # fps arg like the other OAK-D profiles; on-device CBR bitrate comes
+            # from oakd_hw_bitrate_kbps.
             actions.append(
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(
@@ -162,7 +162,7 @@ def generate_launch_description():
                     launch_arguments={
                         'dest_ip': dest_ip,
                         'video_port': oakd_video_port,
-                        'fps': '20',
+                        'fps': fps,
                         'bitrate_kbps': oakd_hw_bitrate,
                         'codec': 'h264',
                     }.items()
