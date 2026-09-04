@@ -629,10 +629,85 @@ void run_map_ee_twist_tests(mjModel *m, mjData *d, UnitTestReporter &rep) {
   rep.check(threw, "mapEeTwistToDq: non-12D twist throws invalid_argument");
 }
 
+void run_clear_to_margin_tests(mjModel *m, mjData *d, UnitTestReporter &rep) {
+  ffw_ik::IKSolver solver(m);
+  ffw_ik::SolverConfig cfg;
+  cfg.step_size = 0.15;
+  ffw_ik::CollisionCostConfig col;
+  col.collision_margin = 0.10;
+  col.cbf_alpha = 1.0;
+
+  Eigen::VectorXd home_q(m->nq);
+  mju_zero(d->qpos, m->nq);
+  mju_zero(d->qvel, m->nv);
+  if (m->nq >= 7 && m->jnt_type[0] == mjJNT_FREE) d->qpos[3] = 1.0;
+  mj_forward(m, d);
+  home_q = Eigen::Map<const Eigen::VectorXd>(d->qpos, m->nq);
+
+  // Rejection-sample a pose that collides with the static pole (or any
+  // obstacle) at a real margin, i.e. min_dist well under the 0.10 margin —
+  // not a borderline case.
+  std::mt19937 rng(12345);
+  Eigen::VectorXd q_start;
+  double start_dist = 0.0;
+  bool found_bad = false;
+  for (int t = 0; t < 5000; ++t) {
+    Eigen::VectorXd cand = sampleRandomPose(m, home_q, rng);
+    mju_copy(d->qpos, cand.data(), m->nq);
+    mju_zero(d->qvel, m->nv);
+    mj_forward(m, d);
+    double dist = minContactDist(d);
+    if (dist < col.collision_margin - 0.02) {
+      q_start = cand;
+      start_dist = dist;
+      found_bad = true;
+      break;
+    }
+  }
+  rep.check(found_bad, "clearToMargin: found a colliding test pose to correct from");
+  if (!found_bad) return;
+
+  mju_copy(d->qpos, q_start.data(), m->nq);
+  mju_zero(d->qvel, m->nv);
+  mj_forward(m, d);
+  rep.check(start_dist < col.collision_margin,
+            "clearToMargin: pre-clear min_dist < margin (sanity)");
+
+  double final_min_dist = 0.0;
+  auto t_start = std::chrono::high_resolution_clock::now();
+  bool cleared = solver.clearToMargin(d, cfg, col, 50, &final_min_dist);
+  auto t_end = std::chrono::high_resolution_clock::now();
+  double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  std::cout << "[clearToMargin timing] " << elapsed_ms
+            << " ms for this correction (informational — against a 10ms/tick budget at 100Hz)\n";
+
+  rep.check(cleared, "clearToMargin: reaches margin within max_steps");
+  rep.check(final_min_dist >= col.collision_margin - 1e-3,
+            "clearToMargin: final_min_dist at/above margin (within tol)");
+
+  Eigen::VectorXd q_end = Eigen::Map<const Eigen::VectorXd>(d->qpos, m->nq);
+  double disp = (q_end - q_start).norm();
+  rep.check(disp > 1e-6, "clearToMargin: pose actually moved");
+  rep.check(disp < 2.0,
+            "clearToMargin: displacement stays local (nearest-safe, not equilibrium)");
+  rep.check(final_min_dist < col.collision_margin + 0.05,
+            "clearToMargin: stops near the boundary, not deep in free space");
+
+  // Frozen joints (default {"head"}) must not move during the correction.
+  for (const char *jname : {"head_joint1", "head_joint2"}) {
+    int jid = mj_name2id(m, mjOBJ_JOINT, jname);
+    if (jid < 0) continue;
+    int qadr = m->jnt_qposadr[jid];
+    rep.check(std::abs(q_end(qadr) - q_start(qadr)) < 1e-9,
+              std::string("clearToMargin: frozen ") + jname + " does not move");
+  }
+}
+
 int run_unit_tests(mjModel *m, mjData *d) {
   UnitTestReporter rep;
   run_dls_map_tests(rep);
   run_map_ee_twist_tests(m, d, rep);
+  run_clear_to_margin_tests(m, d, rep);
   std::cout << "\n[UNIT TESTS] " << (rep.checks - rep.failures) << "/"
             << rep.checks << " checks passed.\n";
   return rep.failures == 0 ? 0 : 1;

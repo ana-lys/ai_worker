@@ -755,6 +755,152 @@ Eigen::VectorXd IKSolver::mapEeTwistToDq(mjData* d, const Eigen::VectorXd& ee_tw
 }
 
 // ============================================================
+// f2 — bounded push-out to the nearest collision-safe pose
+// ============================================================
+
+bool IKSolver::buildClearQP(mjData* d, const SolverConfig& cfg, const CollisionCostConfig& col,
+                             const ContactResult& contacts, double margin, double band,
+                             double h, Eigen::VectorXd& dq_out) {
+    // Active set: prefix scan (contacts are ascending by dist) of contacts
+    // within the band, with a usable Jacobian row.
+    int n_active = 0;
+    for (const ContactInfo& ci : contacts.closest) {
+        if (ci.dist > margin + band) break;
+        if ((int)ci.Jdist_row.size() != nv_) continue;
+        ++n_active;
+    }
+    if (n_active <= 0) return false;
+
+    const int n_var = nv_ + n_active;
+    const int n_ineq = nv_ + 2 * n_active;
+
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(n_var, n_var);
+    H.topLeftCorner(nv_, nv_) = Eigen::MatrixXd::Identity(nv_, nv_); // pure least-norm displacement
+    H.bottomRightCorner(n_active, n_active) =
+        Eigen::MatrixXd::Identity(n_active, n_active) * col.slack_penalty;
+
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(n_var); // no EE task, no nullspace, no attractor
+
+    Eigen::MatrixXd C = Eigen::MatrixXd::Zero(n_ineq, n_var);
+    Eigen::VectorXd lb = Eigen::VectorXd::Constant(n_ineq, -1e20);
+    Eigen::VectorXd ub = Eigen::VectorXd::Constant(n_ineq, 1e20);
+
+    // Joint-bound rows: solveStep's arithmetic (558-587), with h in place of
+    // cfg.step_size; frozen joints get fixed (min=max=0) rows.
+    C.topLeftCorner(nv_, nv_) = Eigen::MatrixXd::Identity(nv_, nv_);
+    for (int i = 0; i < nv_; ++i) {
+        int jid = m_->dof_jntid[i];
+        double min_vel = -cfg.joint_vel_limit;
+        double max_vel =  cfg.joint_vel_limit;
+        if (m_->jnt_limited[jid]) {
+            double q_min  = m_->jnt_range[jid * 2];
+            double q_max  = m_->jnt_range[jid * 2 + 1];
+            double q_curr = d->qpos[m_->jnt_qposadr[jid]];
+            min_vel = std::max(min_vel, (q_min - q_curr) / h);
+            max_vel = std::min(max_vel, (q_max - q_curr) / h);
+        }
+
+        const char* jname = mj_id2name(m_, mjOBJ_JOINT, jid);
+        if (jname) {
+            std::string name_str(jname);
+            for (const auto& frozen_name : cfg.frozen_joints) {
+                if (name_str.find(frozen_name) != std::string::npos) {
+                    min_vel = 0.0;
+                    max_vel = 0.0;
+                    break;
+                }
+            }
+        }
+        lb(i) = min_vel;
+        ub(i) = max_vel;
+    }
+
+    // Slack >= 0 rows.
+    C.bottomRightCorner(n_active, n_active) = Eigen::MatrixXd::Identity(n_active, n_active);
+    for (int k = 0; k < n_active; ++k) lb(nv_ + n_active + k) = 0.0;
+
+    // CBF rows — same form as solveStep (599-616), but UNCAPPED: a violator
+    // (dist < margin) gets a positive lb forcing separation at
+    // cbf_alpha*(margin-dist); a near-safe band contact (margin <= dist <=
+    // margin+band) gets lb = 0, a wall that stops the push-out from trading
+    // one violation for another. This is the one-line difference from
+    // solveStep's std::min(repulsion, 0.0) "solid wall, never force away".
+    int k = 0;
+    for (const ContactInfo& ci : contacts.closest) {
+        if (ci.dist > margin + band) break;
+        if ((int)ci.Jdist_row.size() != nv_) continue;
+
+        Eigen::VectorXd Jdist =
+            Eigen::Map<const Eigen::Matrix<mjtNum, 1, Eigen::Dynamic>>(ci.Jdist_row.data(), nv_)
+                .cast<double>();
+        C.block(nv_ + k, 0, 1, nv_) = Jdist.transpose();
+        C(nv_ + k, nv_ + k) = 1.0;
+
+        double repulsion = -col.cbf_alpha * (ci.dist - margin);
+        lb(nv_ + k) = std::max(repulsion, 0.0);
+        ++k;
+    }
+
+    proxsuite::proxqp::dense::QP<double> qp(n_var, 0, n_ineq);
+    qp.settings.verbose = cfg.qp_verbose;
+    qp.init(H, g, std::nullopt, std::nullopt, C, lb, ub);
+    qp.solve();
+
+    if (qp.results.info.status != proxsuite::proxqp::QPSolverOutput::PROXQP_SOLVED)
+        return false;
+
+    dq_out = qp.results.x.head(nv_);
+    return true;
+}
+
+bool IKSolver::clearToMargin(mjData* d, const SolverConfig& cfg, const CollisionCostConfig& col,
+                              int max_steps, double* final_min_dist) {
+    const double h = std::min(0.1, std::max(1e-3, cfg.step_size));
+    constexpr double tol = 1e-3;
+    constexpr double band = 0.02;
+    constexpr double stall_eps = 1e-4;  // min per-step improvement to not count as a plateau
+    constexpr int stall_patience = 3;   // consecutive plateaued steps before early exit
+
+    double prev_dist = -std::numeric_limits<double>::infinity();
+    int stalled_steps = 0;
+
+    for (int step = 0; step < max_steps; ++step) {
+        mj_forward(m_, d);
+        ContactResult all;
+        computeContacts(d, std::max(1, d->ncon), all);
+
+        double min_dist = all.closest.empty() ? 0.30 : all.closest.front().dist;
+        if (final_min_dist) *final_min_dist = min_dist;
+
+        if (all.closest.empty() || min_dist >= col.collision_margin - tol)
+            return true;
+
+        // Plateau check: don't grind out the full step budget once progress
+        // stalls (e.g. QP-infeasible corner) — hand back to the caller early
+        // so it can fall back (interpolation toward a known-safe pose)
+        // instead of burning the tick on a correction that won't converge.
+        if (min_dist - prev_dist < stall_eps) {
+            if (++stalled_steps >= stall_patience) return false;
+        } else {
+            stalled_steps = 0;
+        }
+        prev_dist = min_dist;
+
+        Eigen::VectorXd dq;
+        if (!buildClearQP(d, cfg, col, all, col.collision_margin, band, h, dq))
+            return false;
+        mj_integratePos(m_, d->qpos, dq.data(), h);
+    }
+
+    mj_forward(m_, d);
+    ContactResult all;
+    computeContacts(d, std::max(1, d->ncon), all);
+    double min_dist = all.closest.empty() ? 0.30 : all.closest.front().dist;
+    if (final_min_dist) *final_min_dist = min_dist;
+    return all.closest.empty() || min_dist >= col.collision_margin - tol;
+}
+
+// ============================================================
 // Logging
 // ============================================================
 

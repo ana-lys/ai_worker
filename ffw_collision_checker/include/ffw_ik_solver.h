@@ -208,6 +208,25 @@ public:
                                 const Eigen::VectorXd &v, double damping,
                                 const Eigen::VectorXd &weights);
 
+  // ----------------------------------------------------------
+  // f2 — bounded push-out to the nearest collision-safe pose
+  // ("goal-from-correction" solve, function B). From the current
+  // d->qpos, iteratively integrates a push-out least-norm QP (no EE
+  // task, no nullspace, no arm-fold attractor) driving every contact
+  // to >= col.collision_margin, and STOPS as soon as all-contact
+  // min_dist >= margin - tol, or a step-to-step improvement plateau
+  // is detected, or max_steps is hit — it never chases equilibrium.
+  // Mutates d->qpos (mj_forward + mj_integratePos) regardless of the
+  // return value: a false return still leaves d at whatever partial
+  // progress was made, for the caller to use (e.g. an interpolation
+  // fallback against a known-safe pose).
+  // Returns true iff a safe pose (min_dist >= margin - tol) was
+  // reached; *final_min_dist = clearance of the pose it leaves d in.
+  // ----------------------------------------------------------
+  bool clearToMargin(mjData *d, const SolverConfig &cfg,
+                     const CollisionCostConfig &col, int max_steps = 50,
+                     double *final_min_dist = nullptr);
+
 private:
   mjModel *m_;
   int nv_;
@@ -258,6 +277,14 @@ private:
                               int &n_within_out);
   void buildJointBounds(mjData *d, const SolverConfig &cfg);
   void solveQP(const SolverConfig &cfg);
+
+  // f2 support: builds and solves a function-local (never the warm-started
+  // member qp_) least-norm push-out QP for one clearToMargin step.
+  // contacts must be ALL contacts (ascending by dist), not just top-k.
+  bool buildClearQP(mjData *d, const SolverConfig &cfg,
+                    const CollisionCostConfig &col,
+                    const ContactResult &contacts, double margin, double band,
+                    double h, Eigen::VectorXd &dq_out);
 
   // Dynamic Null-Space Injection State
   double nullspace_time_ = 0.0;
