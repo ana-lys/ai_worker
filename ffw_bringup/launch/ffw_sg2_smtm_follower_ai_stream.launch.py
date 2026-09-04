@@ -56,7 +56,7 @@ def generate_launch_description():
                               description='Whether to launch cameras.'),
         DeclareLaunchArgument('launch_lidar', default_value='true',
                               description='Whether to launch lidar.'),
-        DeclareLaunchArgument('init_position', default_value='true',
+        DeclareLaunchArgument('init_position', default_value='false',
                               description='Whether to launch the init_position node.'),
         DeclareLaunchArgument('model', default_value='ffw_sg2_smtm',
                               description='Robot model name.'),
