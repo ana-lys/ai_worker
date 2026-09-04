@@ -22,8 +22,8 @@ def generate_launch_description():
     )
     rgb_source_arg = DeclareLaunchArgument(
         'rgb_source',
-        default_value='oakd_lite_720p_mjpeg',
-        description='RGB camera source (default all-MJPEG): oakd_lite_720p_mjpeg, d435, zedm, oakd_lite, oakd_lite_720p, or oakd_lite_720p_hw'
+        default_value='oakd_lite_720p_hw',
+        description='RGB camera source (default OAK-D 720p HW-encode H264 + D405 H264): oakd_lite_720p_hw, d435, zedm, oakd_lite, oakd_lite_720p, or oakd_lite_720p_mjpeg'
     )
     use_h264_arg = DeclareLaunchArgument(
         'use_h264',
@@ -77,8 +77,8 @@ def generate_launch_description():
             d405_flag = '--enable-d405s' if enable_d405s else '--disable-d405s'
             d435_flag = '--d435-rgb' if rgb_source == 'd435' else '--no-d435-rgb'
             cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag]
-            # MJPEG is now the streamer default; keep the flag explicit for the
-            # mjpeg profile and make every other profile opt out to H264.
+            # H264 is the streamer default again; every non-mjpeg profile passes
+            # --h264 explicitly and the all-MJPEG profile opts in with --mjpeg.
             if rgb_source == 'oakd_lite_720p_mjpeg':
                 cmd += ['--mjpeg']
             else:

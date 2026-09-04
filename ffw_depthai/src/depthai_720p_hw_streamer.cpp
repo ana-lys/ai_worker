@@ -1,11 +1,12 @@
 // depthai_720p_hw_streamer.cpp
 //
 // Clone of depthai_node.cpp (the 1080p HW-encoded OAK-D streamer, kept as the
-// fallback), streaming NATIVE 720p @ 30 fps (MJPEG default) / 20 fps (H264 mode)
-// encoded on the OAK-D's on-device MyriadX VideoEncoder — NOT the host-CPU x264
-// path that depthai_720p_udp_streamer uses. The encoded bitstream is far gentler
-// on USB than raw NV12 (~28 MiB/s), which matters because the OAK-D must stay on
-// the USB3 direct root port (2-1/5000), not the USB2-only hub.
+// fallback), streaming NATIVE 720p @ 20 fps encoded on the OAK-D's on-device
+// MyriadX VideoEncoder — NOT the host-CPU x264 path that depthai_720p_udp_streamer
+// uses. The OAK-D's HW encoder has plenty of headroom here (720p20 ≈ 18.4 Mpix/s
+// vs ~249 Mpix/s for 4K30), and the encoded bitstream (~1 MB/s at 8 Mbps CBR) is
+// far gentler on USB than raw NV12 720p20 (~28 MiB/s), which matters because the
+// OAK-D must stay on the USB3 direct root port (2-1/5000), not the USB2-only hub.
 //
 // H264 zero-lag profile (identical to the 1080p fallback):
 //   H264_BASELINE + setNumBFrames(0)  → no B-frames, strictly linear PTS order
@@ -21,9 +22,9 @@
 // Args (positional, after ROS args): <dest_ip> <video_port> <fps> <bitrate_kbps> <codec>
 //   dest_ip      default 192.168.0.241
 //   video_port   default 9110  (the 1080p fallback owns 9100; receiver auto-displays 9110)
-//   fps          default 30    (passed to requestOutput + encoder preset + GStreamer caps)
+//   fps          default 20    (passed to requestOutput + encoder preset + GStreamer caps)
 //   bitrate_kbps default 8000  (8 Mbps CBR — same budget as the 1080p fallback; H264 only)
-//   codec        default mjpeg  (mjpeg | h264)
+//   codec        default h264  (h264 | mjpeg)
 //
 // Telemetry (FPS / worst-delay / host clock TW) goes to video_port+200, same
 // format as the fallback so the unified receiver can show it.
@@ -78,9 +79,9 @@ int main(int argc, char **argv) {
   // ── Positional args (fall back to defaults if not supplied) ─────────────
   const std::string dest_ip     = (argc > 1) ? argv[1] : "192.168.0.241";
   const int  video_port         = (argc > 2) ? std::atoi(argv[2]) : 9110;
-  const int  fps                = (argc > 3) ? std::max(1, std::atoi(argv[3])) : 30;
+  const int  fps                = (argc > 3) ? std::max(1, std::atoi(argv[3])) : 20;
   const int  bitrate_kbps       = (argc > 4) ? std::atoi(argv[4]) : 8000;
-  const std::string codec       = (argc > 5) ? argv[5] : "mjpeg";
+  const std::string codec       = (argc > 5) ? argv[5] : "h264";
   const bool mjpeg              = (codec == "mjpeg");
   const std::string codec_label = mjpeg ? std::string("MJPEG-HW@q90")
                                         : "H264-Baseline @ " + std::to_string(bitrate_kbps) + " kbps CBR";
