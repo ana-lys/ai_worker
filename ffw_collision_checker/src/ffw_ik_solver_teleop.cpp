@@ -393,6 +393,14 @@ public:
     this->declare_parameter<std::string>("robot_model", "bg2");
     robot_model_ = this->get_parameter("robot_model").as_string();
 
+    // Qpos-rail mode: "ee" (default) keeps spacemouse/quest control; "rail"
+    // hands the tick to /qpos_rail. Launch-time default here; runtime flip via
+    // either `ros2 param set` (below) or /teleop_goal_source (near real_joint_sub_).
+    this->declare_parameter<std::string>("goal_source", "ee");
+    if (this->get_parameter("goal_source").as_string() == "rail") {
+      goal_source_ = GoalSource::RAIL;
+    }
+
     left_arm_enabled_ = true;
     right_arm_enabled_ = true;
     lift_enabled_ = true;
@@ -420,6 +428,18 @@ public:
               std::lock_guard<std::mutex> lock(pose_mutex_);
               collision_debug_ = param.as_bool();
               RCLCPP_INFO(this->get_logger(), "collision_debug set to %s", collision_debug_ ? "true" : "false");
+            } else if (param.get_name() == "goal_source") {
+              const std::string v = param.as_string();
+              if (v == "rail") {
+                goal_source_ = GoalSource::RAIL;
+              } else if (v == "ee") {
+                goal_source_ = GoalSource::EE;
+              } else {
+                result.successful = false;
+                result.reason = "goal_source must be 'ee' or 'rail'";
+                continue;
+              }
+              RCLCPP_INFO(this->get_logger(), "goal_source set to %s", v.c_str());
             }
           }
           return result;
@@ -600,6 +620,44 @@ public:
           latest_real_joints_ = *msg;
           joint_msg_count_++;
         });
+
+    // Qpos rail: external controller streams a desired joint-state every
+    // tick while goal_source_ == RAIL. JointState-by-name (not a new message
+    // type) so apply_rail_sync can reuse the same name->qposadr loop as
+    // apply_hardware_sync, and partial commands (head/arms/lift optionally)
+    // just work. Keep-newest; consumed (and rail_dirty_ cleared) once per
+    // fresh message by apply_rail_sync on the main-loop thread — protected by
+    // rail_mutex_, not pose_mutex_, since it's written on this (ROS spin)
+    // thread and read on the main-loop thread.
+    qpos_rail_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+        "/qpos_rail", 10,
+        [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+          std::lock_guard<std::mutex> lock(rail_mutex_);
+          latest_rail_joints_ = *msg;
+          rail_seen_ = true;
+          rail_dirty_ = true;
+          rail_stamp_ = this->now();
+        });
+
+    // Runtime goal-source flip via topic (the natural channel for a
+    // continuous external controller); `ros2 param set goal_source` (above)
+    // covers manual/launch-time flipping.
+    goal_source_sub_ = this->create_subscription<std_msgs::msg::String>(
+        "/teleop_goal_source", 10,
+        [this](const std_msgs::msg::String::SharedPtr msg) {
+          if (msg->data == "rail") {
+            goal_source_ = GoalSource::RAIL;
+            RCLCPP_INFO(this->get_logger(), "goal_source (topic) set to rail");
+          } else if (msg->data == "ee") {
+            goal_source_ = GoalSource::EE;
+            RCLCPP_INFO(this->get_logger(), "goal_source (topic) set to ee");
+          } else {
+            RCLCPP_WARN(this->get_logger(),
+                        "/teleop_goal_source: ignoring unknown value '%s' (want 'ee' or 'rail')",
+                        msg->data.c_str());
+          }
+        });
+
     // Full machine-state resync request (fired by joy_base on joint-state
     // recovery): re-run apply_hardware_sync to snap MuJoCo back to the real
     // robot joints and re-base the arm targets — same primitive as the
@@ -1005,6 +1063,165 @@ public:
     if (h2 >= 0) d->qpos[m->jnt_qposadr[h2]] = latest_head_pos_[1];
   }
 
+  // Qpos-rail mode (mode B): snap -> FK-adopt -> (re-clamp) -> clear for one
+  // /qpos_rail tick. Returns true exactly when a fresh rail message was
+  // applied this tick (false = hold — nothing moved between rail ticks).
+  bool apply_rail_sync(mjModel *m, mjData *d, ffw_ik::IKSolver &solver,
+                       const ffw_ik::SolverConfig &cfg,
+                       const ffw_ik::CollisionCostConfig &col) {
+    if (!rail_goal_source()) return false;
+
+    sensor_msgs::msg::JointState msg;
+    {
+      std::lock_guard<std::mutex> lock(rail_mutex_);
+      if (!rail_dirty_) return false;  // no fresh command -> hold
+      msg = latest_rail_joints_;
+      rail_dirty_ = false;  // one-shot: a rejected message WARNs once, not every tick
+    }
+
+    // Coverage rule: the message must name every joint the robot model
+    // expects (solver.getJointNames()), and every name in the message must
+    // be a recognized joint — or the gripper scalars, which (per
+    // apply_hardware_sync) have no MuJoCo joint in this model and are simply
+    // not applicable to a qpos rail. A single missing or unrecognized name
+    // rejects the whole message; the external controller is responsible for
+    // always sending a complete, matching set.
+    std::map<std::string, double> rail_vals;
+    for (size_t i = 0; i < msg.name.size() && i < msg.position.size(); ++i) {
+      rail_vals[msg.name[i]] = msg.position[i];
+    }
+    for (const auto &n : msg.name) {
+      if (n == "gripper_l_joint1" || n == "gripper_r_joint1") continue;
+      if (mj_name2id(m, mjOBJ_JOINT, n.c_str()) < 0) {
+        RCLCPP_WARN(this->get_logger(),
+                    "/qpos_rail: rejecting message - unrecognized joint '%s'",
+                    n.c_str());
+        return false;
+      }
+    }
+    std::vector<std::string> expected = solver.getJointNames();
+    for (const auto &jname : expected) {
+      if (rail_vals.find(jname) == rail_vals.end()) {
+        RCLCPP_WARN(this->get_logger(),
+                    "/qpos_rail: rejecting message - missing joint '%s'",
+                    jname.c_str());
+        return false;
+      }
+    }
+
+    // Build q_cmd from the current state so anything outside `expected`
+    // (there is none on bg2 — no free joint) is left untouched.
+    std::vector<mjtNum> q_cmd(m->nq);
+    mju_copy(q_cmd.data(), d->qpos, m->nq);
+    for (const auto &jname : expected) {
+      int jid = mj_name2id(m, mjOBJ_JOINT, jname.c_str());
+      int qadr = m->jnt_qposadr[jid];
+      double v = rail_vals[jname];
+      if (m->jnt_limited[jid]) {
+        v = std::clamp(v, static_cast<double>(m->jnt_range[jid * 2]),
+                       static_cast<double>(m->jnt_range[jid * 2 + 1]));
+      }
+      q_cmd[qadr] = v;
+    }
+
+    // Snapshot the last known-good state — the rollback / interpolation
+    // fallback baseline below.
+    std::vector<mjtNum> prev_qpos(m->nq);
+    mju_copy(prev_qpos.data(), d->qpos, m->nq);
+
+    // The snap.
+    mju_copy(d->qpos, q_cmd.data(), m->nq);
+    mj_forward(m, d);
+
+    // Critical check over ALL contacts (not just top-k) — a 6th-closest
+    // violator must not be invisible.
+    ffw_ik::ContactResult all;
+    solver.computeContacts(d, std::max(1, d->ncon), all);
+    double min_dist = all.closest.empty() ? 0.30 : all.closest.front().dist;
+
+    if (all.closest.empty() || min_dist >= col.collision_margin) {
+      // Safe as commanded — keep it verbatim, skip correction.
+    } else {
+      ffw_ik::SolverConfig clear_cfg = cfg;
+      clear_cfg.nullspace_weight = 0.0;
+      clear_cfg.inertia_weight = 0.0;
+      clear_cfg.step_size = std::min(cfg.step_size, 0.05);  // land close to the boundary
+
+      double final_min = 0.0;
+      bool cleared = solver.clearToMargin(d, clear_cfg, col, 50, &final_min);
+
+      if (!cleared) {
+        // Interpolation fallback: walk from the (partially) corrected pose
+        // back toward the last known-safe pose at decreasing fractions
+        // (90%, 80%, ... 0%), taking the first (highest) fraction that
+        // clears. Each candidate is one cheap mj_forward + contact check, no
+        // QP. Always terminates at a provably safe pose (frac=0 ==
+        // prev_qpos is always tested), instead of throwing away whatever
+        // partial progress clearToMargin made.
+        std::vector<mjtNum> corrected(m->nq);
+        mju_copy(corrected.data(), d->qpos, m->nq);
+        bool found_safe = false;
+        for (int step = 9; step >= 0 && !found_safe; --step) {
+          double frac = step / 10.0;
+          for (int i = 0; i < m->nq; ++i)
+            d->qpos[i] = prev_qpos[i] + frac * (corrected[i] - prev_qpos[i]);
+          mj_forward(m, d);
+          ffw_ik::ContactResult probe;
+          solver.computeContacts(d, std::max(1, d->ncon), probe);
+          double probe_dist = probe.closest.empty() ? 0.30 : probe.closest.front().dist;
+          if (probe.closest.empty() || probe_dist >= col.collision_margin) {
+            found_safe = true;
+          }
+        }
+        if (!found_safe) {
+          // Even prev_qpos (frac=0, already tested above) failed the check —
+          // nothing better is available; hold it anyway, same as any other
+          // rail failure mode.
+          mju_copy(d->qpos, prev_qpos.data(), m->nq);
+          mj_forward(m, d);
+        }
+        RCLCPP_WARN(this->get_logger(),
+                    "/qpos_rail: correction did not fully converge "
+                    "(final_min_dist=%.4f) - interpolated toward last-safe pose",
+                    final_min);
+      }
+    }
+
+    // FK-adopt (same reads as apply_hardware_sync) — the snap updated the
+    // goal, so any pending EE goal is ignored.
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    int left_id = mj_name2id(m, mjOBJ_SITE, "left_gripper_site");
+    int right_id = mj_name2id(m, mjOBJ_SITE, "right_gripper_site");
+    if (left_id >= 0) {
+      initial_l_.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * left_id);
+      initial_l_.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              d->site_xmat + 9 * left_id)
+              .cast<double>();
+      target_l_ = initial_l_;
+      accum_l_trans_.setZero();
+      accum_l_rot_.setIdentity();
+      last_mapper_l_trans_ = target_l_.translation();
+      last_mapper_l_rot_ = target_l_.linear();
+      last_goal_from_quest_l_ = false;
+    }
+    if (right_id >= 0) {
+      initial_r_.translation() = Eigen::Vector3d::Map(d->site_xpos + 3 * right_id);
+      initial_r_.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              d->site_xmat + 9 * right_id)
+              .cast<double>();
+      target_r_ = initial_r_;
+      accum_r_trans_.setZero();
+      accum_r_rot_.setIdentity();
+      last_mapper_r_trans_ = target_r_.translation();
+      last_mapper_r_rot_ = target_r_.linear();
+      last_goal_from_quest_r_ = false;
+    }
+
+    return true;
+  }
+
   bool get_obstacle_pose(Eigen::Vector3d& pos, Eigen::Quaterniond& quat) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
     if (!obstacle_pose_received_) return false;
@@ -1407,8 +1624,8 @@ private:
   }
   void update_goal_delta_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
-    if (solving_to_home_) {
-      return;
+    if (solving_to_home_ || rail_goal_source()) {
+      return; // rail mode owns the tick — ignore any EE goal
     }
     Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
                           msg->pose.position.z);
@@ -1466,8 +1683,8 @@ private:
 
   void update_goal_delta_r(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
-    if (solving_to_home_) {
-      return;
+    if (solving_to_home_ || rail_goal_source()) {
+      return; // rail mode owns the tick — ignore any EE goal
     }
     Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
                           msg->pose.position.z);
@@ -1565,8 +1782,8 @@ private:
   // from the pose the solver actually holds, with no leash-slack residual.
   void update_goal_pose_l(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
-    if (solving_to_home_) {
-      return;
+    if (solving_to_home_ || rail_goal_source()) {
+      return; // rail mode owns the tick — ignore any EE goal
     }
     Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
                           msg->pose.position.z);
@@ -1617,8 +1834,8 @@ private:
 
   void update_goal_pose_r(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     std::lock_guard<std::mutex> lock(pose_mutex_);
-    if (solving_to_home_) {
-      return;
+    if (solving_to_home_ || rail_goal_source()) {
+      return; // rail mode owns the tick — ignore any EE goal
     }
     Eigen::Vector3d trans(msg->pose.position.x, msg->pose.position.y,
                           msg->pose.position.z);
@@ -1922,6 +2139,37 @@ private:
   std::vector<double> latest_head_pos_{0.0, 0.0};
   std::vector<double> head_target_pos_{0.0, 0.0};
 
+  // ----------------------------------------------------------
+  // Qpos-rail mode (goal_source == RAIL): an external controller streams a
+  // desired qpos every tick; the FK-of-qpos goal replaces the EE goal each
+  // tick. goal_source_ is atomic (read from EE-callback threads without
+  // locking); everything else the /qpos_rail callback touches is a separate
+  // rail_mutex_ (not pose_mutex_, which is already heavily contended) since
+  // it's written on the ROS spin thread and read on the main-loop thread.
+  // ----------------------------------------------------------
+  enum class GoalSource { EE, RAIL };
+  std::atomic<GoalSource> goal_source_{GoalSource::EE};
+
+  std::mutex rail_mutex_;
+  sensor_msgs::msg::JointState latest_rail_joints_;
+  bool rail_seen_ = false;   // at least one /qpos_rail message ever received
+  bool rail_dirty_ = false;  // a fresh message is waiting to be consumed
+  rclcpp::Time rail_stamp_;  // receipt time of latest_rail_joints_
+  static constexpr double kRailTimeout = 0.5;  // seconds
+
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr qpos_rail_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr goal_source_sub_;
+
+  // mode only: which branch owns the tick.
+  bool rail_goal_source() const { return goal_source_.load() == GoalSource::RAIL; }
+  // mode AND freshness: gates the mapper-affecting reads / stale-rail hold.
+  bool rail_active() {
+    if (!rail_goal_source()) return false;
+    std::lock_guard<std::mutex> lock(rail_mutex_);
+    if (!rail_seen_) return false;
+    return (this->now() - rail_stamp_).seconds() < kRailTimeout;
+  }
+
 public:
   bool is_hardware_mode() const { return hardware_mode_; }
   bool quest_debug_solver() const { return quest_debug_solver_; }
@@ -1939,6 +2187,14 @@ public:
   int get_homing_ticks() const { return homing_ticks_; }
   void increment_homing_ticks() { homing_ticks_++; }
   void reset_homing_ticks() { homing_ticks_ = 0; }
+
+  bool is_rail_mode() const { return rail_goal_source(); }
+  // EE -> rail transition: a pending hardware-sync/homing must not fight the
+  // rail's snap this tick.
+  void on_rail_engage() {
+    hardware_sync_requested_ = false;
+    stop_solving_to_home();
+  }
 
   bool is_left_arm_enabled() {
     std::lock_guard<std::mutex> lock(pose_mutex_);
@@ -2202,8 +2458,20 @@ int main(int argc, char **argv) {
   int step_counter = 0;
   Eigen::Isometry3d prev_target_l = init_l;
   Eigen::Isometry3d prev_target_r = init_r;
+  bool prev_rail_gs = node->is_rail_mode();
 
   while (viewer.enabled() && rclcpp::ok()) {
+    // Rail mode owns the tick: read once, gate everything below on it.
+    bool rail_gs = node->is_rail_mode();
+    if (rail_gs != prev_rail_gs) {
+      if (rail_gs) {
+        node->on_rail_engage();  // EE -> rail: don't let a pending sync/homing fight the snap
+      } else if (node->is_hardware_mode()) {
+        node->request_hardware_sync();  // rail -> EE: resume synced to the real robot
+      }
+      prev_rail_gs = rail_gs;
+    }
+
     solver_cfg.frozen_joints = node->get_frozen_joints();
     solver_cfg.left_weight_scale = node->is_left_arm_enabled() ? 1.0 : 0.0;
     solver_cfg.right_weight_scale = node->is_right_arm_enabled() ? 1.0 : 0.0;
@@ -2235,7 +2503,8 @@ int main(int argc, char **argv) {
       }
     }
 
-    node->apply_continuous_head_sync(m, d);
+    // A real /joint_states-driven head snap must not fight the rail.
+    if (!rail_gs) node->apply_continuous_head_sync(m, d);
 
     Eigen::Isometry3d current_target_l, current_target_r;
     node->get_targets(current_target_l, current_target_r);
@@ -2255,12 +2524,25 @@ int main(int argc, char **argv) {
       active_cfg.joint_vel_limit = 0.5; // limit to 0.5 rad/s for slow/safe homing/solving
     }
 
-    ffw_ik::StepResult res =
-        solver.solveStep(d, current_target_l, current_target_r, active_cfg,
-                         col_cfg, err_hist, dist_hist);
+    ffw_ik::StepResult res;
+    if (!rail_gs) {
+      res = solver.solveStep(d, current_target_l, current_target_r, active_cfg,
+                             col_cfg, err_hist, dist_hist);
+    } else {
+      // Rail mode owns the tick: apply_rail_sync's correction (function B,
+      // exits on its own critical check) *is* this tick's solve — never
+      // stack solveStep's equilibrium chase on top of it. apply_rail_sync
+      // gates itself on rail_dirty_ (hold on a stale tick, nothing moves).
+      // Still refresh contacts for the viewer/collision-debug code below.
+      node->apply_rail_sync(m, d, solver, active_cfg, col_cfg);
+      solver.computeContacts(d, active_cfg.topk_contacts, res.contacts);
+      res.min_dist = res.contacts.closest.empty() ? 0.30 : res.contacts.closest.front().dist;
+    }
 
-    // Apply soft joint locks (project joints within slack deadband)
-    node->apply_soft_joint_locks(m, d);
+    // Apply soft joint locks (project joints within slack deadband). Rail
+    // overrides an active lock by design (confirmed with user) — skip it
+    // while rail owns the tick.
+    if (!rail_gs) node->apply_soft_joint_locks(m, d);
 
     if (node->is_solving_to_home()) {
       node->increment_homing_ticks();
@@ -2332,11 +2614,16 @@ int main(int argc, char **argv) {
 
     node->update_grippers(m, d);
 
-    node->apply_home_reset(m, d);
-    node->apply_pose_load(m, d);
+    // A homing trigger or a real /joint_states snapshot must not fight the
+    // rail; a request made during rail mode stays pending and is processed
+    // once rail mode is exited.
+    if (!rail_gs) {
+      node->apply_home_reset(m, d);
+      node->apply_pose_load(m, d);
 
-    // Process any hardware sync requests before mj_forward
-    node->apply_hardware_sync(m, d);
+      // Process any hardware sync requests before mj_forward
+      node->apply_hardware_sync(m, d);
+    }
 
     // Sync grippers and mimics to MuJoCo qpos
     node->apply_gripper_sync(m, d);
