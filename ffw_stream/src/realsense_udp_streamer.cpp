@@ -283,7 +283,7 @@ void stream_camera(const std::string &serial, int index,
                    int color_wb = -1, bool enable_depth = true) {
   std::ostringstream hdr;
   hdr << "\n=== CAM" << index << " " << serial << " : "
-      << (enable_depth ? ("depth->udp:" + std::to_string(depth_port) + "  ") : "depth=off  ")
+      << (enable_depth ? ("depth->udp:" + std::to_string(depth_port) + "  ") : "depth=captured,not-sent  ")
       << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port
       << "  gst=" << (mjpeg ? "mjpeg" : "h264") << " ===";
   log(hdr.str());
@@ -308,9 +308,15 @@ void stream_camera(const std::string &serial, int index,
     rs2::pipeline pipe;
     rs2::config cfg;
     cfg.enable_device(serial);
-    if (enable_depth) {
-      cfg.enable_stream(RS2_STREAM_DEPTH, width, height, RS2_FORMAT_Z16, fps);
-    }
+    // Always capture depth from the device, even when enable_depth (transmit
+    // depth over UDP) is false: the D405 synthesizes its "color" stream from
+    // the same stereo-IR imager pipeline that produces depth, and requesting
+    // color WITHOUT depth is a much less common combo — the device silently
+    // negotiates a far lower framerate for it (observed ~5 fps instead of the
+    // requested 30). Capturing depth unconditionally keeps the device on its
+    // well-supported combined depth+color profile; enable_depth only gates
+    // whether the depth frame gets encoded and sent over the network.
+    cfg.enable_stream(RS2_STREAM_DEPTH, width, height, RS2_FORMAT_Z16, fps);
     if (rgb_mode) {
       cfg.enable_stream(RS2_STREAM_COLOR, width, height, RS2_FORMAT_RGB8, fps);
     } else {
@@ -441,7 +447,7 @@ void stream_camera(const std::string &serial, int index,
       }
 
       rs2::depth_frame depth = frames.get_depth_frame();
-      if (enable_depth && !depth) continue;
+      if (!depth) continue;  // always requested from the device (see cfg above)
 
       rs2::frame second_base;
       if (rgb_mode) {
