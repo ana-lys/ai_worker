@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Teleop Data Interactions — IK × SpaceMouse × Quest × ZMQ</title>
+<style>
+  :root{
+    --ink:#1c2430; --sub:#5b6573; --line:#d7dce3; --stripe:#f4f6f9;
+    --solv:#0b6e4f; --sm:#1d4ed8; --quest:#7c2d92; --zmq:#b45309; --base:#334155;
+    --mono:#0f172a; --codebg:#f1f4f8;
+  }
+  *{box-sizing:border-box}
+  body{color:var(--ink);font:10.2px/1.5 "DejaVu Sans",Helvetica,Arial,sans-serif;margin:0}
+  @page{size:A4;margin:13mm 11mm 15mm 11mm}
+  h1{font-size:19px;margin:0 0 2px;line-height:1.25}
+  h2{font-size:13.5px;margin:20px 0 7px;padding:4px 8px;background:#eef1f6;
+     border-left:4px solid var(--ink);border-radius:3px}
+  h3{font-size:11.5px;margin:13px 0 5px}
+  p{margin:4px 0}
+  .lede{color:var(--sub);font-size:10.5px;margin:2px 0 0}
+  .meta{font-size:9px;color:var(--sub);border-top:1px solid var(--line);
+     margin-top:8px;padding-top:5px}
+  table{border-collapse:collapse;width:100%;margin:6px 0 4px;font-size:9.4px}
+  th{background:#e8ebf0;text-align:left;padding:3px 6px;border:1px solid var(--line);
+     font-size:9.2px;letter-spacing:.02em}
+  td{padding:3px 6px;border:1px solid var(--line);vertical-align:top}
+  tr:nth-child(even) td{background:var(--stripe)}
+  code{font-family:"DejaVu Sans Mono",Consolas,monospace;font-size:8.8px;
+     background:var(--codebg);padding:0 3px;border-radius:2px;color:var(--mono)}
+  pre{font-family:"DejaVu Sans Mono",Consolas,monospace;font-size:8.2px;line-height:1.35;
+     background:var(--codebg);border:1px solid var(--line);border-radius:4px;
+     padding:7px 9px;overflow-x:auto;white-space:pre}
+  .tag{display:inline-block;font-size:8px;font-weight:bold;color:#fff;border-radius:3px;
+     padding:0 4px;margin-right:4px;vertical-align:1px}
+  .t-solv{background:var(--solv)} .t-sm{background:var(--sm)}
+  .t-quest{background:var(--quest)} .t-zmq{background:var(--zmq)} .t-base{background:var(--base)}
+  .note{font-size:9.2px;color:var(--sub)}
+  .warn{background:#fff7ed;border:1px solid #fdba74;border-left:4px solid #f97316;
+     padding:6px 9px;border-radius:4px;margin:7px 0;font-size:9.4px}
+  .cap{font-size:8.8px;color:var(--sub);margin:0 0 6px}
+  ul{margin:4px 0 4px 18px;padding:0}
+  li{margin:1.5px 0}
+  .k{font-family:"DejaVu Sans Mono",Consolas,monospace;font-size:8.8px;white-space:nowrap}
+</style>
+</head>
+<body>
+
+<h1>Teleop Stack — Data-Interaction Map</h1>
+<div class="lede">Every input/output interaction between the <b>IK solver</b>, the <b>SpaceMouse group</b>, the <b>Quest</b>, and the <b>ZMQ interface</b> — ROS&nbsp;2 (Jazzy) HIL teleop.</div>
+<div class="lede">Scope: <code>ffw_collision_checker</code> (solver), <code>ffw_spacemouse</code> (mapper&nbsp;/&nbsp;base&nbsp;/&nbsp;quest bridge), <code>ffw_zmqinterface</code> (gateway). Top-level launch: <code>spacemouse_unified_teleop.launch.py</code>.</div>
+<div class="meta">Generated 2026-09-04 · source-verified against current tree · all constants cross-checked from code</div>
+
+<div class="warn"><b>Read this first — one hard-won correction:</b> the quest TRACK leash is <b>6&nbsp;cm</b> (<code>kQuestMaxDist&nbsp;=&nbsp;0.06</code>), not 3&nbsp;cm. APPROACH is 1.5&nbsp;cm (<code>kQuestApproachMaxDist&nbsp;=&nbsp;0.015</code>). Any earlier note saying “3&nbsp;cm TRACK” is stale.</div>
+
+<h2>1 · Subsystems and their roles</h2>
+<table>
+<tr><th style="width:22%">Subsystem</th><th>Package / executable</th><th>Role in the interaction graph</th></tr>
+<tr><td><span class="tag t-solv">IK</span> ffw_ik_solver_teleop</td>
+<td><code>ffw_collision_checker</code> · node <code>ffw_ik_solver_teleop</code></td>
+<td>MuJoCo IK engine, 100&nbsp;Hz. Consumes <b>both</b> goal rails (<span class="k">/spacemouse/&lt;arm&gt;/ee_target_pose</span> deltas and <span class="k">/quest/&lt;arm&gt;/ee_target_pose</span> absolute poses), the quest per-arm state+trigger, raw <code>Joy</code> for buttons, <code>/joint_states</code> for real-state IK. Produces achieved EE poses, EE error, joint-trajectory commands, and the <span class="k">/teleop/pose_changed</span> re-base signal.</td></tr>
+<tr><td><span class="tag t-sm">SM</span> Mapper (per arm)</td>
+<td><code>ffw_spacemouse</code> · <code>joy_node</code> + <code>joy_hand</code>, namespaced <code>left</code>/<code>right</code></td>
+<td>One <code>joy_hand</code> per arm reads the raw <code>Joy</code> of its SpaceMouse, applies soft locks + limit-profile clamps, and publishes <b>incremental</b> goal deltas. It is also the <b>quest controller host</b>: it runs the APPROACH/TRACK state machine on <code>/quest_state</code> telemetry and publishes the <b>absolute</b> quest goals on the second rail.</td></tr>
+<tr><td><span class="tag t-base">BASE</span> joy_base</td>
+<td><code>ffw_spacemouse</code> · <code>joy_base</code></td>
+<td>Base/head teleop + ARM↔BASE mode switching. Emits <code>/cmd_vel</code>, head trajectory, <code>/teleop_mode</code>, <code>/teleop_resync</code>, per-arm <code>precision_mode</code> Bool. Joint-state failsafe → full shutdown in hardware mode.</td></tr>
+<tr><td><span class="tag t-base">LOG</span> logitech_base_teleop.py <i>(optional)</i></td>
+<td><code>ffw_spacemouse</code> · script node + <code>joy_node_logitech</code></td>
+<td>Logitech Extreme&nbsp;3D&nbsp;Pro (<code>046d:c215</code>) as an alternative base-control source. Re-publishes base <code>/cmd_vel</code>, <code>/logitech/base_active</code>, and elevation joystick onto <code>/left/joy</code>.</td></tr>
+<tr><td><span class="tag t-quest">Q</span> quest_to_ros2.py</td>
+<td><code>ffw_spacemouse</code> · script, <code>ExecuteProcess</code></td>
+<td><b>Pure telemetry bridge</b> (no control logic). Meta Quest → raw UDP CSV on :9500 → ROS: controller/head poses + <code>/quest_state</code> (38 floats). A second <code>joy_hand</code>-side stream only when <code>use_quest:=true</code>.</td></tr>
+<tr><td><span class="tag t-zmq">ZMQ</span> gateway_node</td>
+<td><code>ffw_zmqinterface</code> · node <code>zmq_spacemouse_gateway</code></td>
+<td>The HIL link. Obs (EE+grippers+joints) PUB 6001, Priv (head-cam&nbsp;tf + per-tick EEDelta) PUB 6003, Control SUB 6002. Forwards ZMQ <code>ControlCmd</code> → <span class="k">/quest/&lt;arm&gt;/ee_target_pose</span>+<code>trigger</code> (the <b>same absolute rail the quest drives</b>) and <code>OverrideCmd</code> → <span class="k">/control_override</span> latch.</td></tr>
+<tr><td><span class="tag">HW</span> Peripheral / robot side</td>
+<td>2× SpaceMouse (3Dconnexion <code>256f:c63a</code>) · Meta Quest · real robot or Gazebo; optional baseline <code>robot_node.py</code> on the robot machine</td>
+<td>Raw inputs to joy_node(s) and to the bridge; sink of trajectory commands; source of <code>/joint_states</code>. <code>robot_node.py</code> is the alternate ZMQ peer with synthetic Obs (no CONFLATE on Obs PUB, CONFLATE on Control SUB).</td></tr>
+</table>
+
+<h2>2 · Data-flow architecture</h2>
+<pre>
+                                ┌──────── HARDWARE / SENSOR LAYER ────────┐
+  2× SpaceMouse (256f:c63a)      Logitech 3D Pro* (046d:c215)   Meta Quest*
+        │ raw SDL/js                  │ raw SDL/js                     │ UDP CSV :9500
+        ▼                             ▼                                ▼
+  joy_node left / right        joy_node_logitech ──/joy─remap──┐  quest_to_ros2.py (bridge)
+        │ /left/joy /right/joy  (raw Joy, 100 Hz)  /joy_logitech│    │ publishes (frame "map")
+        ▼                                                       ▼    ▼
+  ┌──────────────────────────── joy_base (base/head/mode) ────────────────┐
+  │ /cmd_vel · head JointTrajectory · /teleop_mode · /teleop_resync       │
+  │ /spacemouse/{left,right}/precision_mode Bool   ◄── /joint_states       │
+  └──────┬────────────────────────────────────────────────────────────────┘
+         │ /teleop_mode · /teleop_resync
+         ▼
+  joy_hand left ──────────────────┐       ┌──────────────── joy_hand right
+  subs: /left/joy  /quest_state  │       │  subs: /right/joy  /quest_state
+        /ik_solver/achieved_ee_pose_l     │        /ik_solver/achieved_ee_pose_r
+        /teleop_mode /teleop_resync       │        /teleop_mode /teleop_resync
+        /teleop/pose_changed /ik_solver/ee_lock /teleop/limit_profile
+        /spacemouse/<arm>/precision_mode /control_override
+  pubs (left shown):                        pubs (right mirrored, _l→_r):
+   /spacemouse/left/ee_target_pose (delta)   /spacemouse/right/ee_target_pose
+   /spacemouse/left/ee_target_delta          /spacemouse/right/ee_target_delta
+   /quest/left/ee_target_pose (absolute)     /quest/right/ee_target_pose
+   /quest/left/trigger · /quest/left/state · /quest/left/active
+   /ffw_control/notification (left only)
+        │                                    │
+        ▼                                    ▼
+  ┌────────────────────── ffw_ik_solver_teleop (MuJoCo IK, 100 Hz) ─────────────────────┐
+  │ subs: /spacemouse/{l,r}/ee_target_pose   /quest/{l,r}/ee_target_pose (goals)        │
+  │       /quest/{l,r}/state · /quest/{l,r}/trigger · /{left,right}/joy (buttons)       │
+  │       /teleop_mode · /joint_states · /teleop_resync · /teleop_locks                 │
+  │       /dynamic_obstacle_pose · /leader/joystick_controller_left/joint_trajectory    │
+  │ pubs: /ik_solver/achieved_ee_pose_{l,r}  /ik_solver/real_ee_error_{l,r}             │
+  │       /ik_solver/collision_debug · /teleop/pose_changed                             │
+  │       4 traj: /leader/joint_trajectory_command_broadcaster_{left,right}/…           │
+  │              /leader/joystick_controller_{right→lift,left→head}/joint_trajectory    │
+  └───────┬────────────────────────────────────────────────────────────────────────────┘
+          │ /joint_states loop │ achieved EE poses         │ /joint_states
+          ▼                     ▼                          ▼
+  robot/Gazebo controllers ──► ┌──────────────────── gateway_node (zmq_spacemouse_gateway) ─┐
+                                │ subs: achieved_ee_pose_{r,l} · ee_target_delta_{r,l}       │
+                                │       /joint_states · /head_camera_tf                      │
+                                │ pubs: /quest/{r,l}/ee_target_pose · /quest/{r,l}/trigger   │
+                                │       /control_override (latch)                            │
+                                └───┬ ZMQ ─┬─────────────────────────────────────────────────┘
+                    Obs (PUB 6001)   │ Priv (PUB 6003)      ControlCmd+OverrideCmd (SUB 6002)
+                                     ▼
+                        external controller (SERL hil-serl · or robot_node.py peer)
+  * optional: logitech + quest sub-launches gated by use_logitech / use_quest; all paths in
+    this diagram launch together only in the unified launch file shown.
+</pre>
+<p class="note">The three consumer rails the solver listens on are deliberately shaped: the SpaceMouse rail is <b>incremental</b>, the quest rail is <b>absolute</b>, and the gateway writes into the <b>quest</b> rail so an external controller and a physical quest can never both be live (override latch arbitrates). See §6.</p>
+
+<h2>3 · Subsystem I/O tables</h2>
+
+<h3><span class="tag t-solv">IK</span> 3.1 ffw_ik_solver_teleop — inputs</h3>
+<table>
+<tr><th style="width:27%">Topic</th><th style="width:16%">Type</th><th style="width:13%">Producer</th><th>Consumed as</th></tr>
+<tr><td class="k">/spacemouse/{left,right}/ee_target_pose</td><td>geometry_msgs/PoseStamped</td><td>joy_hand (SM path)</td><td><b>Incremental deltas</b>: solver re-bases its internal goal by differencing consecutive goals (accum/leash invariant, §6.1). Never treated as an absolute target.</td></tr>
+<tr><td class="k">/quest/{left,right}/ee_target_pose</td><td>geometry_msgs/PoseStamped</td><td>joy_hand (quest path) <i>or</i> gateway_node (ZMQ ControlCmd)</td><td><b>Absolute pose</b> in frame <code>map</code> — replaces the internal goal directly, then leash-checked.</td></tr>
+<tr><td class="k">/quest/{left,right}/state</td><td>std_msgs/String</td><td>joy_hand</td><td>QuestState enum (SM_CONTROL / QUEST_APPROACH / QUEST_TRACK). Selects the leash: APPROACH 1.5&nbsp;cm, TRACK 6&nbsp;cm (§6.4).</td></tr>
+<tr><td class="k">/quest/{left,right}/trigger</td><td>std_msgs/Float32</td><td>joy_hand or gateway_node</td><td>Normalized gripper command 0→1, <b>honoured only while TRACK</b> (§6.5).</td></tr>
+<tr><td class="k">/{left,right}/joy</td><td>sensor_msgs/Joy</td><td>joy_node (namespace)</td><td>Buttons for non-TRACK gripper step open/close and misc control; not used for cartesian deltas.</td></tr>
+<tr><td class="k">/teleop_mode</td><td>std_msgs/String</td><td>joy_base (or logitech)</td><td>ARM/BASE switching context.</td></tr>
+<tr><td class="k">/joint_states</td><td>sensor_msgs/JointState</td><td>robot / Gazebo bridge</td><td>Real/current joint state for IK start point; feeds achieved-EE error.</td></tr>
+<tr><td class="k">/teleop_resync</td><td>std_msgs/Empty</td><td>joy_base</td><td>Re-sync IK after joint-state recovery.</td></tr>
+<tr><td class="k">/teleop_locks</td><td>std_msgs/String</td><td>supervisor</td><td>Comma list toggling joint soft locks (<code>soft_locked_joints_</code>, capture pending).</td></tr>
+<tr><td class="k">/dynamic_obstacle_pose</td><td>geometry_msgs/PoseStamped</td><td>obstacle tracker</td><td>Latest obstacle pose for collision checks during solve.</td></tr>
+<tr><td class="k">/leader/joystick_controller_left/joint_trajectory</td><td>trajectory_msgs/JointTrajectory</td><td>joy_base / logitech / solver head out</td><td>Head-joint feedback (<code>head_joint1/2</code> → <code>latest_head_pos_</code>), skipped while solving to home.</td></tr>
+</table>
+
+<h3><span class="tag t-solv">IK</span> 3.2 ffw_ik_solver_teleop — outputs</h3>
+<table>
+<tr><th style="width:32%">Topic</th><th style="width:17%">Type</th><th>Consumer</th><th>Meaning</th></tr>
+<tr><td class="k">/ik_solver/achieved_ee_pose_{l,r}</td><td>geometry_msgs/PoseStamped</td><td>joy_hand (re-base, quest-engage age check), gateway_node (Obs EE block)</td><td>Solved EE pose after the controller step. Authoritative “where the arm actually is”.</td></tr>
+<tr><td class="k">/ik_solver/real_ee_error_{l,r}</td><td>std_msgs/Float32</td><td>supervisors / logging</td><td>Magnitude of current real-state→goal error.</td></tr>
+<tr><td class="k">/ik_solver/collision_debug</td><td><i>ffw CollisionDebug</i></td><td>diagnostics</td><td>Per-solve collision geometry debug.</td></tr>
+<tr><td class="k">/teleop/pose_changed</td><td>std_msgs/Empty</td><td>joy_hand</td><td>Fired when a pose load / home-reset homing completes → joy_hand re-bases <code>ee_goal_</code> onto the achieved pose.</td></tr>
+<tr><td class="k">/leader/joint_trajectory_command_broadcaster_{left,right}/joint_trajectory</td><td>trajectory_msgs/JointTrajectory</td><td>hardware controllers</td><td>Arm joint targets from IK.</td></tr>
+<tr><td class="k">/leader/joystick_controller_right/joint_trajectory</td><td>trajectory_msgs/JointTrajectory</td><td>hardware controllers</td><td>Lift trajectory.</td></tr>
+<tr><td class="k">/leader/joystick_controller_left/joint_trajectory</td><td>trajectory_msgs/JointTrajectory</td><td>head hardware + self-feedback sub</td><td>Head trajectory (also the solver’s own feedback topic, §3.1).</td></tr>
+</table>
+
+<h3><span class="tag t-sm">SM</span> 3.3 Mapper (joy_node + joy_hand, per arm) — inputs</h3>
+<table>
+<tr><th style="width:32%">Topic</th><th style="width:16%">Type</th><th>Producer</th><th>Consumed as</th></tr>
+<tr><td class="k">joy <i>(relative)</i> → /{left,right}/joy</td><td>sensor_msgs/Joy</td><td>joy_node in same namespace</td><td>Raw SpaceMouse axes/buttons (deadzone 0.0, autorepeat 100&nbsp;Hz).</td></tr>
+<tr><td class="k">/quest_state</td><td>std_msgs/Float32MultiArray (38)</td><td>quest_to_ros2.py bridge</td><td>Quest telemetry, cached <code>quest_data_</code> with <code>quest_last_msg_time_</code> watchdog (timeout 0.5&nbsp;s). Each arm instance picks its controller block (left idx 0 / right idx 16).</td></tr>
+<tr><td class="k">/teleop_mode</td><td>std_msgs/String</td><td>joy_base</td><td>Mode transitions reset quest SM to SM_CONTROL + disarm; BASE→ARM re-bases <code>ee_goal_</code> ← achieved pose.</td></tr>
+<tr><td class="k">/ik_solver/achieved_ee_pose_{l,r}</td><td>geometry_msgs/PoseStamped</td><td>solver</td><td>Re-base source; quest-engage gating (achieved age ≤ <code>quest_achieved_max_age_s</code> 0.5&nbsp;s).</td></tr>
+<tr><td class="k">/teleop/pose_changed</td><td>std_msgs/Empty</td><td>solver</td><td>Re-base <code>ee_goal_</code> ← achieved pose after pose load / home reset.</td></tr>
+<tr><td class="k">/teleop_resync</td><td>std_msgs/Empty</td><td>joy_base</td><td>Joint-state recovery → re-base after achieved pose is stamped post-resync.</td></tr>
+<tr><td class="k">/ik_solver/ee_lock</td><td>std_msgs/String</td><td>supervisor</td><td>Soft-lock EE orientation capture on lock engage (orientation via extrinsic-XYZ RPY).</td></tr>
+<tr><td class="k">/teleop/limit_profile</td><td>std_msgs/String</td><td>supervisor</td><td><code>set &lt;arm&gt; px_min … yaw_max</code> / <code>clear &lt;arm&gt;</code> — world-frame box, survives resyncs. Clamps <code>ee_target_delta</code> and the internal goals.</td></tr>
+<tr><td class="k">/spacemouse/&lt;arm&gt;/precision_mode</td><td>std_msgs/Bool</td><td>joy_base</td><td>Precision scaling of commanded deltas.</td></tr>
+<tr><td class="k">/control_override <i>(default topic)</i></td><td>std_msgs/Bool</td><td>gateway_node (latch)</td><td>When TRUE: <b>this joy_hand stops publishing /spacemouse/&lt;arm&gt;/ee_target_pose</b> — the quest/ZMQ absolute rail wins in the solver. Release edge (TRUE→FALSE) re-bases.</td></tr>
+</table>
+
+<h3><span class="tag t-sm">SM</span> 3.4 Mapper — outputs</h3>
+<table>
+<tr><th style="width:34%">Topic</th><th style="width:16%">Type</th><th>Consumer</th><th>Meaning / contract</th></tr>
+<tr><td class="k">/spacemouse/&lt;arm&gt;/ee_target_pose</td><td>geometry_msgs/PoseStamped</td><td>solver</td><td>Incremental goal rail (SM path). Suppressed entirely while <code>/control_override</code> is TRUE.</td></tr>
+<tr><td class="k">/spacemouse/&lt;arm&gt;/ee_target_delta</td><td>geometry_msgs/TwistStamped</td><td>gateway_node (Priv EEDelta), supervisors / demo loggers</td><td>Per-tick commanded delta <b>after</b> lock/limit-profile clamps: <code>linear&nbsp;= dx,dy,dz (m)</code>, <code>angular&nbsp;= drx,dry,drz (rad, extrinsic-XYZ)</code>. Explicit form of what the solver recovers by differencing — this topic is the authoritative “deltas out”.</td></tr>
+<tr><td class="k">/quest/&lt;arm&gt;/ee_target_pose</td><td>geometry_msgs/PoseStamped</td><td>solver (absolute rail)</td><td>Absolute map-frame goal computed from the quest controller pose while the quest state machine is active (APPROACH/TRACK).</td></tr>
+<tr><td class="k">/quest/&lt;arm&gt;/trigger</td><td>std_msgs/Float32</td><td>solver (TRACK-only gripper)</td><td>Live trigger analog, one value per quest tick. CTRL/APPROACH ignore it so the 4-way engage hold never slams the gripper.</td></tr>
+<tr><td class="k">/quest/&lt;arm&gt;/state</td><td>std_msgs/String</td><td>solver</td><td>One message per state change (SM_CONTROL / QUEST_APPROACH / QUEST_TRACK) so the solver picks the per-state leash.</td></tr>
+<tr><td class="k">/quest/&lt;arm&gt;/active</td><td>std_msgs/Bool</td><td>supervisors</td><td>Quest engaged flag for this arm.</td></tr>
+<tr><td class="k">/ffw_control/notification</td><td>std_msgs/String</td><td>HIL operator UI</td><td>Left mapper only (<code>quest_publish_notifications</code> false on right) — engage/disengage notifications.</td></tr>
+</table>
+<p class="note">Quest state machine (hosted in joy_hand): 4-way engage = both trigger analogs (offset 6) <b>and</b> both grip/thumb analogs (offset 7) ≥ 0.5 held ≥ <code>quest_hold_engage_s</code> (2.0&nbsp;s) → QUEST_APPROACH (slow, <code>quest_w_slow</code> 0.15, converge within <code>quest_approach_pos_m</code> 0.05&nbsp;m / <code>quest_approach_ang_rad</code> 0.10&nbsp;rad) → QUEST_TRACK; release below <code>quest_release_min</code> 0.1 (with hysteresis 0.05) → SM_CONTROL. Velocity shaping: <code>quest_xy_scale</code> 3.0, <code>quest_pos_scale</code> 1.0, <code>quest_lead_t</code> 0.25&nbsp;s, <code>quest_vel_alpha</code> 0.2.</p>
+
+<h3><span class="tag t-base">BASE</span> 3.5 joy_base — I/O</h3>
+<table>
+<tr><th style="width:24%">Direction</th><th style="width:36%">Topic</th><th style="width:14%">Type</th><th>Notes</th></tr>
+<tr><td>IN</td><td class="k">base_joy_topic (/right/joy) · aux_joy_topic (/left/joy)</td><td>sensor_msgs/Joy</td><td>Right SpaceMouse drives base; left is auxiliary (elevation etc.).</td></tr>
+<tr><td>IN</td><td class="k">/joint_states</td><td>sensor_msgs/JointState</td><td>QoS depth 20; joint-state failsafe gate inert in sim (<code>joint_state_ready_ = !hardware_mode_</code>).</td></tr>
+<tr><td>IN</td><td class="k">/logitech/base_active</td><td>std_msgs/Bool</td><td>Logitech active flag — base control source arbitration.</td></tr>
+<tr><td>OUT</td><td class="k">/cmd_vel</td><td>geometry_msgs/Twist</td><td>Base velocity commands.</td></tr>
+<tr><td>OUT</td><td class="k">head_topic (/leader/joystick_controller_left/joint_trajectory)</td><td>trajectory_msgs/JointTrajectory</td><td>Head pan/tilt (head_step 0.03125).</td></tr>
+<tr><td>OUT</td><td class="k">/teleop_mode</td><td>std_msgs/String</td><td>ARM/BASE mode; current_mode_ starts “ARM”.</td></tr>
+<tr><td>OUT</td><td class="k">/teleop_resync</td><td>std_msgs/Empty</td><td>On joint-state recovery (consumed by mapper + solver).</td></tr>
+<tr><td>OUT</td><td class="k">/spacemouse/right/precision_mode · /spacemouse/left/precision_mode</td><td>std_msgs/Bool</td><td>Per-arm precision toggle consumed by each joy_hand.</td></tr>
+</table>
+
+<h3><span class="tag t-base">LOG</span> 3.6 logitech_base_teleop.py (optional) — I/O</h3>
+<table>
+<tr><th style="width:24%">Direction</th><th style="width:38%">Topic</th><th style="width:14%">Type</th><th>Notes</th></tr>
+<tr><td>IN</td><td class="k">/joy_logitech</td><td>sensor_msgs/Joy</td><td><code>joy_node_logitech</code> remaps <code>/joy</code> → <code>/joy_logitech</code>, autorepeat 100&nbsp;Hz.</td></tr>
+<tr><td>OUT</td><td class="k">cmd_vel_topic (/cmd_vel)</td><td>geometry_msgs/Twist</td><td>Base control override (max_linear_vel 0.6).</td></tr>
+<tr><td>OUT</td><td class="k">/logitech/base_active</td><td>std_msgs/Bool</td><td>Signal to joy_base.</td></tr>
+<tr><td>OUT</td><td class="k">head JointTrajectory · elevation_joy_topic (/left/joy)</td><td>JointTrajectory / Joy</td><td>Head + re-publishes elevation axis onto the left mapper’s joy topic.</td></tr>
+<tr><td>IN/OUT</td><td class="k">mode_topic (/teleop_mode)</td><td>std_msgs/String</td><td>Shares the mode channel with joy_base.</td></tr>
+</table>
+
+<h3><span class="tag t-quest">Q</span> 3.7 quest_to_ros2.py bridge — I/O</h3>
+<table>
+<tr><th style="width:26%">Direction / endpoint</th><th style="width:30%">Format</th><th>Consumer</th><th>Notes</th></tr>
+<tr><td>IN — Meta Quest app</td><td>Raw UDP ASCII CSV, <code>0.0.0.0:9500</code> default (TCP <code>localhost:8500</code> fallback)</td><td>—</td><td>One frame per line, CSV fields (§5.3). Pure telemetry.</td></tr>
+<tr><td>OUT</td><td class="k">/left_controller_pose · /right_controller_pose · /head_pose</td><td>diagnostics / TUI</td><td>Frame <code>map</code>. Unity→ROS remap: pos <code>(pz, −px, py)</code>, quat <code>(qz, −qx, qy, −qw)</code>.</td></tr>
+<tr><td>OUT</td><td class="k">/quest_state</td><td>joy_hand (both arms)</td><td>Float32MultiArray, 38 floats, layout §5.2. Published every tick (launch routes HUD to log, not console).</td></tr>
+</table>
+
+<h3><span class="tag t-zmq">ZMQ</span> 3.8 gateway_node — I/O</h3>
+<table>
+<tr><th style="width:26%">Direction</th><th style="width:36%">Topic / socket</th><th>Type</th><th>Notes</th></tr>
+<tr><td>ROS IN</td><td class="k">/ik_solver/achieved_ee_pose_{r,l}</td><td>geometry_msgs/PoseStamped</td><td>Source of Obs EE block (right = index 0, left = index 1).</td></tr>
+<tr><td>ROS IN</td><td class="k">/spacemouse/{0,1}/ee_target_delta</td><td>geometry_msgs/TwistStamped</td><td>Per-arm commanded deltas → Priv EEDelta, fresh-windowed (§6.7).</td></tr>
+<tr><td>ROS IN</td><td class="k">/joint_states</td><td>sensor_msgs/JointState</td><td>Relayed + reordered into JOINT_STATE_NAMES order (§5.1).</td></tr>
+<tr><td>ROS IN</td><td class="k">/head_camera_tf</td><td><i>tf message</i></td><td>Head-cam → control-frame transform for the Priv HeadCamTf block.</td></tr>
+<tr><td>ZMQ IN</td><td>SUB <code>tcp://*:6002</code> (single socket, <code>SUBSCRIBE b""</code>, no CONFLATE)</td><td>ControlCmd / OverrideCmd</td><td>Dispatch by header <code>msg_type</code>; stale-guarded by freshness (§6.6).</td></tr>
+<tr><td>ZMQ OUT</td><td>PUB <code>tcp://*:6001</code> (Obs)</td><td>proto.Obs</td><td>Every tick, once both achieved poses + first joint_state are present and finite (§6.8).</td></tr>
+<tr><td>ZMQ OUT</td><td>PUB <code>tcp://*:6003</code> (Priv)</td><td>proto.Priv</td><td>Fixed cadence once cam_tf known; EEDelta zero-filled per stale arm.</td></tr>
+<tr><td>ROS OUT</td><td class="k">/quest/right/ee_target_pose · /quest/left/ee_target_pose</td><td>geometry_msgs/PoseStamped</td><td>ControlCmd forward: frame <code>map</code>, header stamped now, quat via <code>rpy_to_quat</code>. Skipped when a byte-identical frame was already forwarded (<code>_last_pub_data</code>).</td></tr>
+<tr><td>ROS OUT</td><td class="k">/quest/right/trigger · /quest/left/trigger</td><td>std_msgs/Float32</td><td>Gripper = <code>clamp01(gripper[i])</code> on the same trigger channel the quest drives. TRACK-only like the physical trigger.</td></tr>
+<tr><td>ROS OUT</td><td class="k">/control_override</td><td>std_msgs/Bool</td><td>Latched from OverrideCmd (≥ 0.5 = ON); mirrored each tick while fresh, self-releases on timeout (§6.6).</td></tr>
+</table>
+
+<h2>4 · Producer → consumer matrix (who talks to whom)</h2>
+<table>
+<tr><th style="width:19%">Producer</th><th style="width:19%">Consumer</th><th style="width:24%">Channel / topic</th><th style="width:12%">Type</th><th style="width:10%">Cadence</th><th>Carries</th></tr>
+<tr><td>joy_node L / R</td><td>joy_hand L / R</td><td class="k">/{left,right}/joy</td><td>Joy</td><td>100 Hz</td><td>Raw SpaceMouse axes + buttons (device deadzone 0.0).</td></tr>
+<tr><td>joy_node R (base)</td><td>joy_base</td><td class="k">/right/joy</td><td>Joy</td><td>100 Hz</td><td>Base drive axes, mode toggle.</td></tr>
+<tr><td>joy_node L (aux)</td><td>joy_base · logitech elevation</td><td class="k">/left/joy</td><td>Joy</td><td>100 Hz</td><td>Aux axis (elevation).</td></tr>
+<tr><td>joy_hand (SM path)</td><td>solver</td><td class="k">/spacemouse/&lt;arm&gt;/ee_target_pose</td><td>PoseStamped</td><td>mapper rate 100 Hz</td><td><b>Delta</b> goal (accum/rebase on solver side). Stopped under control_override.</td></tr>
+<tr><td>joy_hand</td><td>gateway · supervisors</td><td class="k">/spacemouse/&lt;arm&gt;/ee_target_delta</td><td>TwistStamped</td><td>mapper rate</td><td>Post-clamp commanded delta → EEDelta on the ZMQ Priv rail.</td></tr>
+<tr><td>joy_hand (quest path)</td><td>solver</td><td class="k">/quest/&lt;arm&gt;/ee_target_pose</td><td>PoseStamped</td><td>quest state-machine rate</td><td><b>Absolute</b> map-frame goal.</td></tr>
+<tr><td>joy_hand</td><td>solver</td><td class="k">/quest/&lt;arm&gt;/state</td><td>String</td><td>on change</td><td>QuestState → per-state leash.</td></tr>
+<tr><td>joy_hand</td><td>solver</td><td class="k">/quest/&lt;arm&gt;/trigger</td><td>Float32</td><td>each quest tick</td><td>Gripper (TRACK only).</td></tr>
+<tr><td>joy_hand (L)</td><td>operator UI</td><td class="k">/ffw_control/notification</td><td>String</td><td>events</td><td>Engage/disengage notices.</td></tr>
+<tr><td>joy_base</td><td>joy_hand L/R, solver, logitech</td><td class="k">/teleop_mode · /teleop_resync</td><td>String / Empty</td><td>events</td><td>ARM↔BASE mode; joint-state recovery.</td></tr>
+<tr><td>joy_base</td><td>base hardware / Gazebo</td><td class="k">/cmd_vel</td><td>Twist</td><td>100 Hz</td><td>Base velocities.</td></tr>
+<tr><td>joy_base</td><td>head controller (+ solver feedback)</td><td class="k">/leader/joystick_controller_left/joint_trajectory</td><td>JointTrajectory</td><td>on change</td><td>Head pan/tilt steps.</td></tr>
+<tr><td>joy_base</td><td>joy_hand L/R</td><td class="k">/spacemouse/{left,right}/precision_mode</td><td>Bool</td><td>events</td><td>Per-arm precision toggle.</td></tr>
+<tr><td>logitech node</td><td>joy_base</td><td class="k">/logitech/base_active</td><td>Bool</td><td>on change</td><td>Base control-source arbitration.</td></tr>
+<tr><td>quest bridge</td><td>joy_hand L/R</td><td class="k">/quest_state</td><td>Float32MultiArray (38)</td><td>~100 Hz</td><td>Both controllers + head telemetry (§5.2).</td></tr>
+<tr><td>solver</td><td>joy_hand L/R</td><td class="k">/ik_solver/achieved_ee_pose_{l,r}</td><td>PoseStamped</td><td>100 Hz</td><td>Re-base source; quest-engage age gate.</td></tr>
+<tr><td>solver</td><td>joy_hand L/R</td><td class="k">/teleop/pose_changed</td><td>Empty</td><td>events</td><td>Re-base after pose load / home reset.</td></tr>
+<tr><td>solver</td><td>supervisor</td><td class="k">/ik_solver/real_ee_error_{l,r} · collision_debug</td><td>Float32 / debug</td><td>100 Hz</td><td>Tracking error; collision diagnostics.</td></tr>
+<tr><td>solver</td><td>arm/lift/head controllers</td><td class="k">/leader/joint_trajectory_command_broadcaster_{left,right}/… <br>· joystick_controller_{right,left}/joint_trajectory</td><td>JointTrajectory</td><td>100 Hz</td><td>IK joint targets (arms), lift, head.</td></tr>
+<tr><td>robot / Gazebo</td><td>solver · joy_base · gateway</td><td class="k">/joint_states</td><td>JointState</td><td>≥95 Hz hw gate</td><td>Current joint state (failsafe + IK start + Obs joint block).</td></tr>
+<tr><td>cam tf bridge</td><td>gateway</td><td class="k">/head_camera_tf</td><td>tf</td><td>resolved once</td><td>HeadCamTf for Priv.</td></tr>
+<tr><td>gateway</td><td>external controller</td><td>ZMQ PUB 6001 · 6003</td><td>Obs / Priv</td><td>100 Hz</td><td>EE poses+grippers+joints; tf + EEDelta.</td></tr>
+<tr><td>external controller</td><td>gateway</td><td>ZMQ SUB 6002</td><td>ControlCmd / OverrideCmd</td><td>client-rate</td><td>Absolute goals + grippers; override latch.</td></tr>
+<tr><td>gateway</td><td>solver</td><td class="k">/quest/&lt;arm&gt;/ee_target_pose + /quest/&lt;arm&gt;/trigger</td><td>PoseStamped / Float32</td><td>while cmd fresh</td><td>ZMQ ControlCmd injected onto the absolute rail.</td></tr>
+<tr><td>gateway</td><td>joy_hand L/R (+ solver context)</td><td class="k">/control_override</td><td>Bool</td><td>while latch fresh</td><td>Override gate: SM delta rail silenced, quest rail wins.</td></tr>
+</table>
+
+<h2>5 · Wire contracts</h2>
+
+<h3>5.1 ZMQ framed structs — <code>ffw_zmqinterface/protocol.py</code></h3>
+<p>One ZMQ message = one framed struct: fixed <b>12-byte header</b> + payload. ZMQ preserves message boundaries so no further framing is needed.</p>
+<pre>Header (every message):
+  [0:4]   type      int32  little-endian   -- MSG_* dispatch id
+  [4:12]  timestamp float64 epoch seconds   -- sender clock; makes re-assertions unique for byte-dedup
+
+RPY convention:  extrinsic XYZ  →  R = Rx(roll)·Ry(pitch)·Rz(yaw)   (matches joy_hand rpy_to_matrix)</pre>
+<table>
+<tr><th>MSG</th><th>id</th><th>Port</th><th>dir</th><th>Frame bytes</th><th>Payload layout</th></tr>
+<tr><td class="k">MSG_OBS</td><td>1</td><td>6001 (PUB)</td><td>robot → ctrl</td><td>724 B</td><td>89 doubles: EE block [0:14] = ee0(6) grip0 ee1(6) grip1 — ee0 = <b>right</b>, ee1 = <b>left</b>, grip = 0.0 open…1.0 close; joint block [14:89] = 25× pos, vel, effort in JOINT_STATE_NAMES order.</td></tr>
+<tr><td class="k">MSG_CONTROL_CMD</td><td>2</td><td>6002 (SUB)</td><td>ctrl → robot</td><td>124 B</td><td>14 doubles: ee0(6) grip0 ee1(6) grip1 — absolute EE goals + grippers (same 14-layout as Obs EE block).</td></tr>
+<tr><td class="k">MSG_PRIV</td><td>3</td><td>6003 (PUB)</td><td>robot → ctrl</td><td>236 B</td><td>28 doubles: HeadCamTf [0:16] row-major 4×4 (R 3×3 + translation col 3 + last row 0 0 0 1); EEDelta [16:28] = d0(6), d1(6) — per-tick map-frame commanded deltas (m / rad), all-zeros = no command.</td></tr>
+<tr><td class="k">MSG_OVERRIDE</td><td>4</td><td>6002 (SUB)</td><td>ctrl → robot</td><td>20 B</td><td>1 double: 0.0 OFF / 1.0 ON (≥ 0.5 = ON). Latched, self-releasing.</td></tr>
+</table>
+<table>
+<tr><th colspan="3">JOINT_STATE_NAMES (fixed relay order, 25 joints; gripper indices bold)</th></tr>
+<tr><td class="k">idx&nbsp;0–7</td><td class="k">arm_r_joint1…7 · <b>gripper_r_joint1 (7)</b></td><td>right arm + gripper</td></tr>
+<tr><td class="k">idx&nbsp;8–15</td><td class="k">arm_l_joint1…7 · <b>gripper_l_joint1 (15)</b></td><td>left arm + gripper</td></tr>
+<tr><td class="k">idx&nbsp;16–24</td><td class="k">lift_joint · head_joint1 · head_joint2 · left_wheel_steer · right_wheel_steer · rear_wheel_steer · left_wheel_drive · right_wheel_drive · rear_wheel_drive</td><td>lift, head, base wheels</td></tr>
+</table>
+<p class="note">Gateway reorders incoming <code>/joint_states</code> into this order (0.0-fill any missing joint), so the layout is stable regardless of broadcaster order. <code>effort</code> is measured Dynamixel current (A); wheel drives go through virtual_dxl and may read low-fidelity. Baseline <code>robot_node.py</code> mirrors the same ports: Obs PUB 6001 (no CONFLATE), ControlCmd SUB 6002 with <code>CONFLATE=1</code> (only newest control target matters).</p>
+
+<h3>5.2 /quest_state — 38-float layout</h3>
+<p><code>quest_to_ros2.py</code> publishes <code>Float32MultiArray</code>; blocks at <b>LEFT_POSE_BEGIN 0</b>, <b>RIGHT_POSE_BEGIN 16</b>, <b>HEAD_POSE_BEGIN 32</b>. joy_hand selects its arm’s controller by offset (left 0, right 16, <code>QUEST_RIGHT_OFFSET</code>).</p>
+<table>
+<tr><th>block offset</th><th>local idx</th><th>meaning</th></tr>
+<tr><td rowspan="10">each controller block (16 wide)</td><td>0–5</td><td>pose: x, y, z, roll, pitch, yaw (map frame)</td></tr>
+<tr><td>6</td><td>trigger analog (0…1) — engage + gripper source</td></tr>
+<tr><td>7</td><td>grip / thumb analog (0…1) — 4-way engage co-requisite</td></tr>
+<tr><td>8</td><td>thumbstick_x</td></tr>
+<tr><td>9</td><td>thumbstick_y</td></tr>
+<tr><td>10</td><td>trigger_btn</td></tr>
+<tr><td>11</td><td>grip_btn</td></tr>
+<tr><td>12</td><td>a_x</td></tr>
+<tr><td>13</td><td>b_y</td></tr>
+<tr><td>14–15</td><td>thumbstick_btn · menu_btn</td></tr>
+<tr><td>head block (32)</td><td>0–5</td><td>head pose x,y,z,roll,pitch,yaw; remaining floats unused</td></tr>
+</table>
+
+<h3>5.3 Quest UDP line-frames on :9500</h3>
+<p>Plain ASCII CSV, one frame per line. Head frame has 7 fields; each controller frame 13 fields:</p>
+<pre>Head pose:       px, py, pz, qx, qy, qz, qw
+&lt;Left|Right&gt; controller: px, py, pz, qx, qy, qz, qw, trigger, grip, stick_x, stick_y, buttons, touches
+Unity → ROS remap: position (pz, −px, py), quaternion (qz, −qx, qy, −qw)</pre>
+
+<h2>6 · Gating &amp; control semantics (the rules that make the data matter)</h2>
+
+<h3>6.1 Delta-vs-absolute goal duality</h3>
+<p><code>/spacemouse/&lt;arm&gt;/ee_target_pose</code> is <b>incremental</b> — the solver accumulates/re-bases by differencing consecutive goals, so a dropped goal only loses a step, never the reference. <code>/quest/&lt;arm&gt;/ee_target_pose</code> (whether from joy_hand or the gateway’s ControlCmd forward) is an <b>absolute</b> map-frame pose that replaces the internal goal directly. The mapper’s <code>/spacemouse/&lt;arm&gt;/ee_target_delta</code> publishes explicitly — after lock/limit-profile clamps — the same quantity the solver recovers internally, and it is that clamped delta that rides the ZMQ Priv rail as EEDelta. <b>Whichever topic delivered the last goal decides the leash.</b></p>
+<p class="warn"><b>Invariant (accum/leash):</b> <code>clip_target</code> must never re-base <code>accum_*</code> — that invariant is what makes the limit-profile box enforce correctly. Re-bases happen only at the events in §6.3.</p>
+
+<h3>6.2 control_override gate</h3>
+<p>When <code>/control_override</code> is TRUE, joy_hand <b>stops publishing</b> <code>/spacemouse/&lt;arm&gt;/ee_target_pose</code> entirely — the solver then sees only the absolute rail (<code>/quest/&lt;arm&gt;/ee_target_pose</code>), i.e. ZMQ/gateway or the physical quest. The override Bool is owned by the gateway: ZMQ clients send <code>MSG_OVERRIDE</code> instead of touching the topic directly.</p>
+
+<h3>6.3 Re-base events (ee_goal_ ← achieved pose)</h3>
+<ul>
+<li>BASE → ARM switch (<code>/teleop_mode</code>)</li>
+<li><code>/control_override</code> release edge (TRUE → FALSE)</li>
+<li><code>/teleop/pose_changed</code> — pose load / home reset completed by the solver</li>
+<li><code>/teleop_resync</code> — joint-state recovery (waits for an achieved pose stamped after the resync)</li>
+<li>Quest engage — but only if achieved pose age ≤ <code>quest_achieved_max_age_s</code> = 0.5 s</li>
+</ul>
+
+<h3>6.4 Solver leash constants (verified)</h3>
+<table>
+<tr><th>constant</th><th>value</th><th>meaning</th></tr>
+<tr><td class="k">kSpaceMouseMaxDist</td><td>0.01 m (1 cm)</td><td>max goal-step distance per tick on the SM delta rail</td></tr>
+<tr><td class="k">kQuestApproachMaxDist</td><td>0.015 m (1.5 cm)</td><td>per-tick leash while quest state = APPROACH</td></tr>
+<tr><td class="k">kQuestMaxDist</td><td>0.06 m (6 cm)</td><td>per-tick leash while quest state = TRACK <b>(authoritative — not 3 cm)</b></td></tr>
+<tr><td class="k">kGoalMaxAngle</td><td>0.1 rad (≈ 5.7°)</td><td>per-tick goal rotation bound (all rails)</td></tr>
+<tr><td class="k">kMapperRebaseDist / kMapperRebaseAng</td><td>0.03 m / 0.1 rad</td><td>joy_hand’s own re-base trigger when the goal runs away from achieved</td></tr>
+<tr><td class="k">kGripperLMin / kGripperLMax</td><td>0.0 / 1.2</td><td>left gripper physical range (rad) — model bg2</td></tr>
+<tr><td class="k">kGripperRMin / kGripperRMax</td><td>0.175 / 1.2</td><td>right gripper physical range (rad)</td></tr>
+</table>
+
+<h3>6.5 Gripper mapping (§11) — TRACK-gated</h3>
+<p>Read under <code>pose_mutex_</code>, applied only while the quest is in <b>TRACK</b> (in APPROACH the 4-way engage hold keeps trigger ≥ 0.5, so it is deliberately ignored; non-TRACK uses SpaceMouse button increments from <code>/{left,right}/joy</code>):</p>
+<pre>gripper_l_pos_ = clamp01(trigger_l)              * kGripperLMax          # 0.0 … 1.2
+gripper_r_pos_ = kGripperRMin + clamp01(trigger_r) * (kGripperRMax − kGripperRMin)  # 0.175 … 1.2</pre>
+<p>The gateway speaks the same normalized 0…1 trigger language (<code>clamp01</code>) and reports achieved openings back normalized against <code>_GRIP_OPEN</code> {0: 0.175, 1: 0.0} / <code>_GRIP_CLOSED</code> {0: 1.2, 1: 1.2} per arm index (0 = right, 1 = left).</p>
+
+<h3>6.6 Gateway freshness gates &amp; latches</h3>
+<table>
+<tr><th style="width:22%">gate</th><th style="width:22%">window</th><th>behaviour</th></tr>
+<tr><td class="k">ControlCmd forward</td><td><code>cmd_timeout</code> 0.5 s</td><td>Newest <code>_cmd</code> forwarded to <code>/quest/&lt;arm&gt;/ee_target_pose</code> + <code>trigger</code> only while <code>now − cmd_recv_ts &lt; 0.5 s</code>; non-finite payload dropped; byte-identical re-forward suppressed via <code>_last_pub_data</code> (header ts keeps re-assertions unique).</td></tr>
+<tr><td class="k">EEDelta freshness</td><td><code>_DELTA_FRESH_S</code> 0.25 s</td><td>Per-arm: a delta is relayed only if a new <code>ee_target_delta</code> arrived within 0.25 s of the last relay; otherwise that arm is zero-filled on the wire (all-zeros = “no command”). Frame still sent → fixed cadence once cam_tf is known.</td></tr>
+<tr><td class="k">Override latch</td><td><code>override_timeout</code> 2.0 s</td><td>Mirror latched Bool each tick while fresh; when the OverrideCmd stream goes silent publish one final <code>False</code> and reset the latch — no stale True can resurrect.</td></tr>
+</table>
+
+<h3>6.7 Quest timeout &amp; watchdog (joy_hand)</h3>
+<p><code>quest_timeout_s</code> 0.5 s on <code>/quest_state</code> arrival (<code>quest_last_msg_time_</code>); a stale stream drops the quest back to SM_CONTROL. Engage hold: trigger (offset 6) and grip/thumb (offset 7) ≥ <code>quest_thumb/trigger_engage_min</code> (0.5) held ≥ 2.0 s; release <code>&lt;</code> 0.1 with 0.05 hysteresis.</p>
+
+<h3>6.8 Obs / Priv emission rules</h3>
+<p><b>Obs (6001):</b> sent <b>only</b> when both achieved EE poses <b>and</b> the first <code>/joint_states</code> are present and all values finite — a zero-filled joint block would be worse than silence. Once resolved, one complete self-contained Obs per tick (joint block repeats newest <code>/joint_states</code> between broadcasts). <b>Priv (6003):</b> fixed cadence once cam_tf is known; EEDelta zero-filled per stale arm (§6.6). Both PUB rails have <b>no CONFLATE</b> — every tick is a complete observation for sync-and-concat consumers.</p>
+
+<h2>7 · Rates &amp; timing summary</h2>
+<table>
+<tr><th>element</th><th>rate</th><th>notes</th></tr>
+<tr><td>solver main loop</td><td>100 Hz</td><td>IK solve + controller step + publish</td></tr>
+<tr><td>joy_node autorepeat / mapper</td><td>100 Hz / 100 Hz</td><td><code>autorepeat_rate</code> 100.0, <code>publish_rate_hz</code> 100.0</td></tr>
+<tr><td>joy_base / gateway</td><td>100 Hz</td><td>gateway hz 100.0</td></tr>
+<tr><td>quest bridge HUD</td><td>~100 Hz</td><td>routed to launch log (not console)</td></tr>
+<tr><td>hardware sync gate</td><td>≥ 95 Hz /joint_states for 1 s</td><td>waits up to 30 s; base-joy failsafe → full Shutdown in hardware_mode</td></tr>
+</table>
+
+<h2>8 · Source map (where every claim lives)</h2>
+<ul>
+<li><code>ffw_collision_checker/src/ffw_ik_solver_teleop.cpp</code> — solver subs/pubs (pose, quest, joy, joints, locks, obstacle, head-feedback), leash constants, §11 gripper, pose_changed publisher.</li>
+<li><code>ffw_spacemouse/src/joy_hand.cpp</code> — mapper topic construction, delta/absolute duality comments, quest SM + per-state leash, control_override gate, re-base events.</li>
+<li><code>ffw_spacemouse/src/joy_base.cpp</code> — base/mode I/O, failsafe, precision Bools.</li>
+<li><code>ffw_spacemouse/launch/spacemouse_unified_teleop.launch.py</code> · <code>spacemouse_mapper.launch.py</code> · <code>logitech_teleop.launch.py</code> — wiring, device detection, quest/gateway/logitech inclusion.</li>
+<li><code>ffw_spacemouse/scripts/quest_to_ros2.py</code> · <code>logitech_base_teleop.py</code> — bridge + logitech node.</li>
+<li><code>ffw_zmqinterface/ffw_zmqinterface/protocol.py</code> — wire structs, RPY, JOINT_STATE_NAMES.</li>
+<li><code>ffw_zmqinterface/ffw_zmqinterface/gateway_node.py</code> — socket wiring, dispatch, forward/latch/tick rules, freshness windows.</li>
+<li><code>ffw_zmqinterface/ffw_zmqinterface/robot_node.py</code> — baseline peer contract (CONFLATE asymmetry).</li>
+</ul>
+
+</body>
+</html>
