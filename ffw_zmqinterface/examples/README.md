@@ -1,29 +1,45 @@
-# Examples — driving the arm over the ZMQ gateway
+# Examples — live-robot scripts over the ZMQ gateway
 
-These are **live-robot demos**: they command the real robot through the framed
-ZMQ link (`tcp://127.0.0.1:6002`, port 6001/6002 from `ffw_zmqinterface/README.md`).
-They are hybrid ROS + ZMQ — the goal goes out over ZMQ, while monitoring and
-the `/control_override` gate use ROS topics.
+> **Deprecated:** `release_cube.py` and `rectangle_sweep.py` were live-robot
+> scripts that gated on the v1 `/control_override` `std_msgs/Bool` latch. That
+> latch is gone (v2 `OverrideCmd` is the 25-qpos joint-space command rail — no
+> 0/1 bit, gateway publishes no Bool, `joy_hand`'s force-TRACK coupling
+> retired). They are kept frozen under **`examples/deprecated/`** as a
+> historical record of the EE-space `ControlCmd` patterns they showed (hold
+> both arms + open one gripper; per-corner leash walk with dedup-safe
+> re-assertion). **Do not run them on a live link**, and do not re-add
+> `/control_override` to bring them back — re-derive the authority gate from
+> the joint rail (§2.6 of `ffw_zmqinterface/README.md`).
 
-> **Run only with the stack up on `ROS_DOMAIN_ID=30` and the gateway reachable
-> on `127.0.0.1:6002`, with nobody's hands near the arm / off the SpaceMouse.**
-> `/control_override` is engaged for the whole run and released at the end.
+Active:
+  `override_round_trip_check.py` -- live-link round-trip check for the v2
+  joint-space OverrideCmd rail. SUBs Obs (6001), PUBs the observed 25 joint
+  positions back out as an OverrideCmd on 6002, and per received Obs diffs the
+  25 sent floats against the 25 in the Obs joint block (index N == Obs joint N
+  == dataset q-column N), printing max |diff| + last diff per joint. Pure ZMQ
+  client -- no rclpy. Run from the package root:
 
-## `rectangle_sweep.py` — "move the arm in a square"
+      python3 examples/override_round_trip_check.py                # local gateway
+      python3 examples/override_round_trip_check.py --host 192.168.0.249
+      python3 examples/override_round_trip_check.py --margin 0.01 --seconds 3
 
-Right-EE rectangle sweep in the map frame: x 0.45..0.60, y 0..-0.30, 10 loops.
-z/roll/pitch/yaw are held at the start pose; the left arm is locked at its start
-pose. Every `ControlCmd` carries a fresh header timestamp so each re-assertion
-passes the gateway dedup and the solver's leash walks the arm to the current
-corner; once within `CORNER_TOL`, it advances.
+  Server-side corroboration: the gateway sees BOTH the Obs it publishes
+  (6001) and the OverrideCmd it receives back (6002), so its override_check
+  loop check (on by default) diffs every received OverrideCmd against the
+  joint block of the last Obs it sent out, WARNs past `-p override_margin`,
+  and prints a per-joint table + PASS/FAIL verdict at shutdown -- the
+  authoritative answer to the same question this script asks from the client.
+  Run the gateway with `-p override_check:=true` and read its [override-loop]
+  logs alongside this script's table.
 
-Requirements: `pyzmq`, `rclpy`, `geometry_msgs`, `std_msgs`, the running stack.
-
-```
-ROS_DOMAIN_ID=30 python3 examples/rectangle_sweep.py
-```
-
-Prints one line per corner (`reached in …` / `MISS …`), writes the achieved
-path to `/tmp/rectangle_path.csv`, and exits `PASS`/`FAIL` based on whether
-every corner was reached. Tune the geometry with the `X_MIN/X_MAX/Y_MIN/Y_MAX`,
-`LOOPS`, `CORNER_TOL`, `CORNER_TIMEOUT` constants at the top of the file.
+  Note: the rail's robot-side consumer has landed (ffw_ik_solver_teleop:
+  goal_source=ee|rail + apply_rail_sync() on /qpos_rail) and the gateway now
+  relays OverrideCmd to /qpos_rail (dropping the 6 wheel-drive/steer names its
+  MuJoCo model doesn't recognize). While goal_source stays "ee" (the launch
+  default) the relay is inert -- the solver ignores /qpos_rail in EE mode --
+  so this script still only validates transport + 25-for-25 ordering (Obs
+  should match the sent floats when the robot holds), not robot-side tracking.
+  Only flip goal_source to "rail" with hands clear of the robot and a small,
+  deliberate joint delta -- that mode drives the physical arms from whatever
+  the rail says. Keep hands off the SpaceMouse while it runs. The gateway (Obs
+  on 6001) is already up whenever `spacemouse_unified_teleop` is running.

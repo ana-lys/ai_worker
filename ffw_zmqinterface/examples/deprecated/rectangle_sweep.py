@@ -1,7 +1,24 @@
+# =============================================================================
+# DEPRECATED (v2) -- the /control_override Bool latch is gone.
+#
+# v1: a client pulsed std_msgs/Bool on /control_override to force joy_hand
+# into TRACK so the solver's gripper/goal feed from the gateway was obeyed.
+# v2: that latch no longer exists. OverrideCmd is now the 25-qpos joint-space
+# command rail (ffw_zmqinterface/README.md section 2.6) -- no 0/1 engage bit,
+# and the gateway does not republish any Bool. joy_hand's force-TRACK coupling
+# to /control_override is retired with it.
+#
+# This script sent EE-space ControlCmd over ZMQ and used the Bool only as an
+# authority gate, so it can no longer work against the current stack. It is
+# kept frozen in examples/deprecated/ as a historical record of the EE-space
+# pattern. Do NOT run it on a live link, and do NOT re-add /control_override
+# to bring it back -- re-derive the authority gate from the joint rail.
+# =============================================================================
 """Right-EE rectangle sweep: x 0.45..0.60, y 0..-0.30, 10 loops.
 
 Live robot command via the framed ZMQ gateway (the same path a controller uses).
-Assumes the stack is up on ROS_DOMAIN_ID=30 with the gateway on 127.0.0.1:6002.
+Assumes the stack is up on ROS_DOMAIN_ID=30 with the gateway reachable on the
+GW_HOST destination below (default 192.168.0.249:6002).
 
 Rectangle corners (map frame, right arm, clockwise):
     A = (0.45, -0.03)
@@ -50,7 +67,8 @@ CORNER_TOL = 0.015      # m; both x and y must be within this of the corner
 CORNER_TIMEOUT = 10.0   # s per corner before logging a miss and moving on
 SETTLE_S = 0.5
 SEND_HZ = 25.0
-GW_ENDPOINT = "tcp://127.0.0.1:6002"
+GW_HOST = "192.168.0.249"  # gateway host (set to 127.0.0.1 for a local stack)
+GW_ENDPOINT = f"tcp://{GW_HOST}:6002"
 OVERRIDE_TOPIC = "/control_override"
 
 achieved = {"r": None, "l": None}

@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='ana-lys',
     maintainer_email='shatapdude@gmail.com',
-    description='Robot-side ZMQ HIL link: RobotState/EEState (PUB) out, ControlCmd (SUB) in; gateway bridges to the spacemouse teleop stack.',
+    description='Robot-side ZMQ HIL link: leRobot-style split -- Obs (PUB :6001) and Priv (PUB :6003) out, ControlCmd/Override (SUB :6002) in; gateway bridges to the spacemouse teleop stack.',
     license='Apache 2.0',
     tests_require=['pytest'],
     entry_points={
