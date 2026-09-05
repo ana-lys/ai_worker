@@ -38,6 +38,7 @@
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/float32.hpp"
+#include "ffw_spacemouse_msgs/msg/left_control_override.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "ffw_collision_checker/srv/toggle_joint_group.hpp"
 #include "ffw_collision_checker/srv/save_load_pose.hpp"
@@ -196,20 +197,44 @@ public:
     int id_l = mj_name2id(m_, mjOBJ_SITE, "left_gripper_site");
     int id_r = mj_name2id(m_, mjOBJ_SITE, "right_gripper_site");
     if (id_l >= 0 && id_r >= 0) {
-      char text_l[256];
-      char text_r[256];
+      char text_l[512];
+      char text_r[512];
+      char real_str_l[32];
+      char real_str_r[32];
       Eigen::Vector3d rpy_l = extract_rpy(pose_l_.linear());
       Eigen::Vector3d rpy_r = extract_rpy(pose_r_.linear());
       const mjtNum *pl = d->site_xpos + 3 * id_l;
       const mjtNum *pr = d->site_xpos + 3 * id_r;
+      // Clipped-target vs achieved (m, L1): the IK leash's tracking residual —
+      // how far the clamped command is from where IK actually settled.
+      double clip_ach_l = (pose_l_.translation() -
+                           Eigen::Map<const Eigen::Vector3d>(pl)).cwiseAbs().sum();
+      double clip_ach_r = (pose_r_.translation() -
+                           Eigen::Map<const Eigen::Vector3d>(pr)).cwiseAbs().sum();
+      // Real-robot EE vs IK-achieved (m, L1); "--" until /joint_states flows
+      // (sim-only mode never fills it).
+      if (real_valid_l_) {
+        snprintf(real_str_l, sizeof(real_str_l), "%7.3f", real_err_l_);
+      } else {
+        snprintf(real_str_l, sizeof(real_str_l), "   --   ");
+      }
+      if (real_valid_r_) {
+        snprintf(real_str_r, sizeof(real_str_r), "%7.3f", real_err_r_);
+      } else {
+        snprintf(real_str_r, sizeof(real_str_r), "   --   ");
+      }
       snprintf(text_l, sizeof(text_l),
                "LEFT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  "
-               "%7.3f\nPitch: %7.3f\nYaw:   %7.3f",
-               pl[0], pl[1], pl[2], rpy_l[0], rpy_l[1], rpy_l[2]);
+               "%7.3f\nPitch: %7.3f\nYaw:   %7.3f\n"
+               "Clip-Ach L1: %7.3f\nReal-Ach L1: %s",
+               pl[0], pl[1], pl[2], rpy_l[0], rpy_l[1], rpy_l[2],
+               clip_ach_l, real_str_l);
       snprintf(text_r, sizeof(text_r),
                "RIGHT EE XYZ:\nX: %7.3f\nY: %7.3f\nZ: %7.3f\nRoll:  "
-               "%7.3f\nPitch: %7.3f\nYaw:   %7.3f",
-               pr[0], pr[1], pr[2], rpy_r[0], rpy_r[1], rpy_r[2]);
+               "%7.3f\nPitch: %7.3f\nYaw:   %7.3f\n"
+               "Clip-Ach L1: %7.3f\nReal-Ach L1: %s",
+               pr[0], pr[1], pr[2], rpy_r[0], rpy_r[1], rpy_r[2],
+               clip_ach_r, real_str_r);
       mjr_overlay(mjFONT_BIG, mjGRID_TOPLEFT, vp_full, text_l, nullptr, &con_);
       mjr_overlay(mjFONT_BIG, mjGRID_TOPRIGHT, vp_full, text_r, nullptr, &con_);
     }
@@ -283,6 +308,13 @@ public:
     }
   }
 
+  void setRealEEError(double err_l, double err_r, bool valid_l, bool valid_r) {
+    real_err_l_ = err_l;
+    real_err_r_ = err_r;
+    real_valid_l_ = valid_l;
+    real_valid_r_ = valid_r;
+  }
+
   bool enabled() const { return enabled_; }
 
   static Eigen::Vector3d extract_rpy(const Eigen::Matrix3d &R) {
@@ -310,6 +342,10 @@ private:
   mjtNum sphere_r_ = 0.045;
   float rgba_[4] = {1.f, 0.65f, 0.f, 0.85f};
   std::vector<ffw_ik::ContactInfo> active_collisions_;
+  double real_err_l_ = std::numeric_limits<double>::quiet_NaN();
+  double real_err_r_ = std::numeric_limits<double>::quiet_NaN();
+  bool real_valid_l_ = false;
+  bool real_valid_r_ = false;
 };
 
 struct PoseState {
@@ -370,6 +406,12 @@ public:
         "/quest/right/trigger", 10,
         std::bind(&TeleopNode::quest_trigger_cb_r, this, _1));
 
+    // Left Meta Quest controller override (quest_to_ros2.py): thumbstick Y
+    // drives the right gripper's open/close velocity (update_grippers).
+    left_ctrl_sub_ = this->create_subscription<ffw_spacemouse_msgs::msg::LeftControlOverride>(
+        "/quest/left/control_override", 10,
+        std::bind(&TeleopNode::left_ctrl_cb, this, _1));
+
     joy_sub_l_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/left/joy", 10, std::bind(&TeleopNode::joy_callback_l, this, _1));
 
@@ -394,11 +436,17 @@ public:
     robot_model_ = this->get_parameter("robot_model").as_string();
 
     // Qpos-rail mode: "ee" (default) keeps spacemouse/quest control; "rail"
-    // hands the tick to /qpos_rail. Launch-time default here; runtime flip via
-    // either `ros2 param set` (below) or /teleop_goal_source (near real_joint_sub_).
+    // hands the tick to /qpos_rail with the collision correction on;
+    // "rail_free" hands it the tick with the correction skipped entirely
+    // (external controller trusted to already be safe). Launch-time default
+    // here; runtime flip via either `ros2 param set` (below) or
+    // /teleop_goal_source (near real_joint_sub_).
     this->declare_parameter<std::string>("goal_source", "ee");
-    if (this->get_parameter("goal_source").as_string() == "rail") {
-      goal_source_ = GoalSource::RAIL;
+    {
+      GoalSource gs;
+      if (parse_goal_source(this->get_parameter("goal_source").as_string(), gs)) {
+        goal_source_ = gs;
+      }
     }
 
     left_arm_enabled_ = true;
@@ -430,15 +478,13 @@ public:
               RCLCPP_INFO(this->get_logger(), "collision_debug set to %s", collision_debug_ ? "true" : "false");
             } else if (param.get_name() == "goal_source") {
               const std::string v = param.as_string();
-              if (v == "rail") {
-                goal_source_ = GoalSource::RAIL;
-              } else if (v == "ee") {
-                goal_source_ = GoalSource::EE;
-              } else {
+              GoalSource gs;
+              if (!parse_goal_source(v, gs)) {
                 result.successful = false;
-                result.reason = "goal_source must be 'ee' or 'rail'";
+                result.reason = "goal_source must be 'ee', 'rail', or 'rail_free'";
                 continue;
               }
+              goal_source_ = gs;
               RCLCPP_INFO(this->get_logger(), "goal_source set to %s", v.c_str());
             }
           }
@@ -455,6 +501,13 @@ public:
         "/ik_solver/achieved_ee_pose_l", 10);
     achieved_pose_pub_r_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         "/ik_solver/achieved_ee_pose_r", 10);
+    // Real-robot EE vs IK-achieved EE error (m), per arm. NaN until the first
+    // /joint_states; in sim-only mode (hardware_mode:=false) no publisher ever
+    // exists so it stays NaN forever.
+    real_ee_error_pub_l_ = this->create_publisher<std_msgs::msg::Float32>(
+        "/ik_solver/real_ee_error_l", 10);
+    real_ee_error_pub_r_ = this->create_publisher<std_msgs::msg::Float32>(
+        "/ik_solver/real_ee_error_r", 10);
 
     // If hardware_mode=false, base teleop is disabled, so there's no mode
     // switch. Default to ARM.
@@ -619,6 +672,9 @@ public:
           std::lock_guard<std::mutex> lock(pose_mutex_);
           latest_real_joints_ = *msg;
           joint_msg_count_++;
+          // Never-reset gate: until the first /joint_states arrives, the
+          // real-EE FK metric is not meaningful (stays NaN / "--").
+          joint_state_seen_ = true;
         });
 
     // Qpos rail: external controller streams a desired joint-state every
@@ -645,15 +701,14 @@ public:
     goal_source_sub_ = this->create_subscription<std_msgs::msg::String>(
         "/teleop_goal_source", 10,
         [this](const std_msgs::msg::String::SharedPtr msg) {
-          if (msg->data == "rail") {
-            goal_source_ = GoalSource::RAIL;
-            RCLCPP_INFO(this->get_logger(), "goal_source (topic) set to rail");
-          } else if (msg->data == "ee") {
-            goal_source_ = GoalSource::EE;
-            RCLCPP_INFO(this->get_logger(), "goal_source (topic) set to ee");
+          GoalSource gs;
+          if (parse_goal_source(msg->data, gs)) {
+            goal_source_ = gs;
+            RCLCPP_INFO(this->get_logger(), "goal_source (topic) set to %s", msg->data.c_str());
           } else {
             RCLCPP_WARN(this->get_logger(),
-                        "/teleop_goal_source: ignoring unknown value '%s' (want 'ee' or 'rail')",
+                        "/teleop_goal_source: ignoring unknown value '%s' "
+                        "(want 'ee', 'rail', or 'rail_free')",
                         msg->data.c_str());
           }
         });
@@ -1121,69 +1176,126 @@ public:
         v = std::clamp(v, static_cast<double>(m->jnt_range[jid * 2]),
                        static_cast<double>(m->jnt_range[jid * 2 + 1]));
       }
+      // Per-tick authority cap: a rotational joint may move at most
+      // kRailMaxJointDeltaRad (~5 deg) from wherever it was when rail mode
+      // was last engaged (on_rail_engage's snapshot) -- a bad/compromised
+      // OverrideCmd stream can walk the arm no farther than that per
+      // engagement without a fresh re-engage. Linear joints (lift_joint) have
+      // no "degrees" equivalent, so only jnt_range above bounds them.
+      if (m->jnt_type[jid] == mjJNT_HINGE &&
+          qadr < static_cast<int>(rail_start_qpos_.size())) {
+        double start = rail_start_qpos_[qadr];
+        v = std::clamp(v, start - kRailMaxJointDeltaRad,
+                       start + kRailMaxJointDeltaRad);
+      }
       q_cmd[qadr] = v;
     }
 
-    // Snapshot the last known-good state — the rollback / interpolation
-    // fallback baseline below.
-    std::vector<mjtNum> prev_qpos(m->nq);
-    mju_copy(prev_qpos.data(), d->qpos, m->nq);
+    // Grippers: gripper_r_joint1 has a MuJoCo joint in this model (so the
+    // loop above already writes its d->qpos) but that qpos is NOT what
+    // drives the real actuator -- publish_arm_trajectory reads
+    // gripper_l_pos_/gripper_r_pos_ instead (see update_grippers), same as
+    // apply_hardware_sync's real-robot path. gripper_l_joint1 has no MuJoCo
+    // joint at all, so without this it is silently dropped entirely. Map
+    // both here, clamped to the same real-hardware bounds update_grippers
+    // uses, so a rail command actually reaches the gripper.
+    {
+      std::lock_guard<std::mutex> lock(pose_mutex_);
+      auto gl = rail_vals.find("gripper_l_joint1");
+      if (gl != rail_vals.end()) {
+        gripper_l_pos_ = std::clamp(gl->second, kGripperLMin, kGripperLMax);
+      }
+      auto gr = rail_vals.find("gripper_r_joint1");
+      if (gr != rail_vals.end()) {
+        gripper_r_pos_ = std::clamp(gr->second, kGripperRMin, kGripperRMax);
+      }
+    }
 
     // The snap.
     mju_copy(d->qpos, q_cmd.data(), m->nq);
     mj_forward(m, d);
 
-    // Critical check over ALL contacts (not just top-k) — a 6th-closest
-    // violator must not be invisible.
-    ffw_ik::ContactResult all;
-    solver.computeContacts(d, std::max(1, d->ncon), all);
-    double min_dist = all.closest.empty() ? 0.30 : all.closest.front().dist;
+    // rail_free: the external controller is trusted to already be
+    // collision-safe (e.g. a trained/validated policy) -- q_cmd is already
+    // joint-range + kRailMaxJointDeltaRad clamped above, so skip the
+    // contact query and clearToMargin correction entirely and land exactly
+    // where commanded. rail (solve) mode keeps the correction below.
+    if (!rail_free_mode()) {
+      // Snapshot the last known-good state — the rollback / interpolation
+      // fallback baseline below.
+      std::vector<mjtNum> prev_qpos(m->nq);
+      mju_copy(prev_qpos.data(), d->qpos, m->nq);
+      // The pre-correction target is what we just snapped to above; re-snap
+      // is a no-op here but keeps prev_qpos meaningful if a future edit
+      // reorders this block.
+      mju_copy(d->qpos, q_cmd.data(), m->nq);
+      mj_forward(m, d);
 
-    if (all.closest.empty() || min_dist >= col.collision_margin) {
-      // Safe as commanded — keep it verbatim, skip correction.
-    } else {
-      ffw_ik::SolverConfig clear_cfg = cfg;
-      clear_cfg.nullspace_weight = 0.0;
-      clear_cfg.inertia_weight = 0.0;
-      clear_cfg.step_size = std::min(cfg.step_size, 0.05);  // land close to the boundary
+      // Critical check over ALL contacts (not just top-k) — a 6th-closest
+      // violator must not be invisible.
+      ffw_ik::ContactResult all;
+      solver.computeContacts(d, std::max(1, d->ncon), all);
+      double min_dist = all.closest.empty() ? 0.30 : all.closest.front().dist;
 
-      double final_min = 0.0;
-      bool cleared = solver.clearToMargin(d, clear_cfg, col, 50, &final_min);
+      // col.collision_margin (0.155) is d_safe for solveStep's smooth
+      // gradient cost -- it exists because the model's geoms declare a
+      // global 0.30 detection margin (ffw_sg2_smtm.xml) so contacts appear
+      // well before real touching, giving the optimizer room to shape a
+      // gradient. It is not a real safety boundary. Gating the rail's
+      // accept/reject on that same value rejects (and clearToMargin pushes
+      // away from) any commanded pose that is legitimately close to
+      // something but not actually touching it, so a rail stream could
+      // never settle at its true final pose. The rail instead only corrects
+      // on genuine geometric overlap (min_dist below ~0), same
+      // mj_forward/computeContacts kinematic distance, just a real contact
+      // threshold instead of the soft-cost one. kRailContactTol is a small
+      // negative pad against numerical jitter exactly at the surface.
+      if (all.closest.empty() || min_dist >= kRailContactTol) {
+        // Safe as commanded — keep it verbatim, skip correction.
+      } else {
+        ffw_ik::SolverConfig clear_cfg = cfg;
+        clear_cfg.nullspace_weight = 0.0;
+        clear_cfg.inertia_weight = 0.0;
+        clear_cfg.step_size = std::min(cfg.step_size, 0.05);  // land close to the boundary
 
-      if (!cleared) {
-        // Interpolation fallback: walk from the (partially) corrected pose
-        // back toward the last known-safe pose at decreasing fractions
-        // (90%, 80%, ... 0%), taking the first (highest) fraction that
-        // clears. Each candidate is one cheap mj_forward + contact check, no
-        // QP. Always terminates at a provably safe pose (frac=0 ==
-        // prev_qpos is always tested), instead of throwing away whatever
-        // partial progress clearToMargin made.
-        std::vector<mjtNum> corrected(m->nq);
-        mju_copy(corrected.data(), d->qpos, m->nq);
-        bool found_safe = false;
-        for (int step = 9; step >= 0 && !found_safe; --step) {
-          double frac = step / 10.0;
-          for (int i = 0; i < m->nq; ++i)
-            d->qpos[i] = prev_qpos[i] + frac * (corrected[i] - prev_qpos[i]);
-          mj_forward(m, d);
-          ffw_ik::ContactResult probe;
-          solver.computeContacts(d, std::max(1, d->ncon), probe);
-          double probe_dist = probe.closest.empty() ? 0.30 : probe.closest.front().dist;
-          if (probe.closest.empty() || probe_dist >= col.collision_margin) {
-            found_safe = true;
+        double final_min = 0.0;
+        bool cleared = solver.clearToMargin(d, clear_cfg, col, 50, &final_min);
+
+        if (!cleared) {
+          // Interpolation fallback: walk from the (partially) corrected pose
+          // back toward the last known-safe pose at decreasing fractions
+          // (90%, 80%, ... 0%), taking the first (highest) fraction that
+          // clears. Each candidate is one cheap mj_forward + contact check, no
+          // QP. Always terminates at a provably safe pose (frac=0 ==
+          // prev_qpos is always tested), instead of throwing away whatever
+          // partial progress clearToMargin made.
+          std::vector<mjtNum> corrected(m->nq);
+          mju_copy(corrected.data(), d->qpos, m->nq);
+          bool found_safe = false;
+          for (int step = 9; step >= 0 && !found_safe; --step) {
+            double frac = step / 10.0;
+            for (int i = 0; i < m->nq; ++i)
+              d->qpos[i] = prev_qpos[i] + frac * (corrected[i] - prev_qpos[i]);
+            mj_forward(m, d);
+            ffw_ik::ContactResult probe;
+            solver.computeContacts(d, std::max(1, d->ncon), probe);
+            double probe_dist = probe.closest.empty() ? 0.30 : probe.closest.front().dist;
+            if (probe.closest.empty() || probe_dist >= col.collision_margin) {
+              found_safe = true;
+            }
           }
+          if (!found_safe) {
+            // Even prev_qpos (frac=0, already tested above) failed the check —
+            // nothing better is available; hold it anyway, same as any other
+            // rail failure mode.
+            mju_copy(d->qpos, prev_qpos.data(), m->nq);
+            mj_forward(m, d);
+          }
+          RCLCPP_WARN(this->get_logger(),
+                      "/qpos_rail: correction did not fully converge "
+                      "(final_min_dist=%.4f) - interpolated toward last-safe pose",
+                      final_min);
         }
-        if (!found_safe) {
-          // Even prev_qpos (frac=0, already tested above) failed the check —
-          // nothing better is available; hold it anyway, same as any other
-          // rail failure mode.
-          mju_copy(d->qpos, prev_qpos.data(), m->nq);
-          mj_forward(m, d);
-        }
-        RCLCPP_WARN(this->get_logger(),
-                    "/qpos_rail: correction did not fully converge "
-                    "(final_min_dist=%.4f) - interpolated toward last-safe pose",
-                    final_min);
       }
     }
 
@@ -1218,6 +1330,15 @@ public:
       last_mapper_r_rot_ = target_r_.linear();
       last_goal_from_quest_r_ = false;
     }
+
+    // Re-anchor kRailMaxJointDeltaRad to the pose we just landed at, not the
+    // original EE -> rail engagement point: this is a per-tick rate limit
+    // (each OverrideCmd may move a hinge joint at most ~5 deg further), not a
+    // lifetime-of-engagement budget. Anchoring it to on_rail_engage's
+    // snapshot alone would let a multi-step trajectory walk a joint 5 deg
+    // from where rail *started* and then hard-block every further step
+    // forever, however many increments the controller sends.
+    rail_start_qpos_.assign(d->qpos, d->qpos + m->nq);
 
     return true;
   }
@@ -1771,6 +1892,13 @@ private:
     quest_trigger_r_ = msg->data;
   }
 
+  // Left Meta Quest controller override: thumbstick Y -> right gripper
+  // velocity (update_grippers). See ffw_spacemouse_msgs/LeftControlOverride.
+  void left_ctrl_cb(const ffw_spacemouse_msgs::msg::LeftControlOverride::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    left_ctrl_gripper_vel_ = msg->gripper_vel;
+  }
+
   // Quest absolute-goal path: the mapper's interpolated ee_goal_ IS the target,
   // no accum/rebase/delta chain. The goal is leashed against the stored achieved
   // pose (achieved + per-state leash) so a far or unreachable goal still yields a
@@ -2045,6 +2173,11 @@ private:
   double quest_trigger_l_ = 0.0;
   double quest_trigger_r_ = 0.0;
 
+  // Left Meta Quest controller override: thumbstick Y, -1..1 (see
+  // update_grippers / kLeftCtrlGripperGain). Guarded by pose_mutex_.
+  double left_ctrl_gripper_vel_ = 0.0;
+  static constexpr double kLeftCtrlGripperGain = 0.01;  // rad per tick at full deflection
+
   double quest_leash(QuestState st) const {
     return st == QuestState::APPROACH ? kQuestApproachMaxDist : kQuestMaxDist;
   }
@@ -2076,6 +2209,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr quest_state_sub_r_;  // /quest/right/state (§8b)
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr quest_trigger_sub_l_;  // /quest/left/trigger (§11)
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr quest_trigger_sub_r_;  // /quest/right/trigger (§11)
+  rclcpp::Subscription<ffw_spacemouse_msgs::msg::LeftControlOverride>::SharedPtr left_ctrl_sub_;  // /quest/left/control_override
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_l_;
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_r_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
@@ -2107,6 +2241,8 @@ private:
   rclcpp::Publisher<ffw_collision_checker::msg::CollisionDebug>::SharedPtr collision_debug_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_pub_l_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_pub_r_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr real_ee_error_pub_l_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr real_ee_error_pub_r_;
 
   bool hardware_mode_ = true;
   std::string robot_model_ = "bg2";
@@ -2114,6 +2250,9 @@ private:
   std::string current_mode_ = "BASE";
   sensor_msgs::msg::JointState latest_real_joints_;
   int joint_msg_count_ = 0;
+  // Set on the first /joint_states and never reset (joint_msg_count_ IS reset
+  // during the hardware startup wait); gates the real-EE FK metric.
+  bool joint_state_seen_ = false;
 
   std::atomic<bool> home_reset_requested_{false};
   std::atomic<bool> solving_to_home_{false};
@@ -2147,8 +2286,27 @@ private:
   // rail_mutex_ (not pose_mutex_, which is already heavily contended) since
   // it's written on the ROS spin thread and read on the main-loop thread.
   // ----------------------------------------------------------
-  enum class GoalSource { EE, RAIL };
+  // RAIL_SOLVE: current behavior -- snap then run the collision correction
+  // (clearToMargin + interpolation fallback) below.
+  // RAIL_FREE: the external controller is trusted to already be
+  // collision-safe -- snap straight through (still joint-range and
+  // kRailMaxJointDeltaRad clamped), no contact query, no correction.
+  // Both consume the same /qpos_rail topic/message; only apply_rail_sync's
+  // internal behavior differs, and rail_goal_source() treats them the same
+  // everywhere else (does rail own the tick).
+  enum class GoalSource { EE, RAIL_SOLVE, RAIL_FREE };
   std::atomic<GoalSource> goal_source_{GoalSource::EE};
+
+  // "ee" | "rail" (-> RAIL_SOLVE, kept for backward compat) | "rail_free".
+  // Shared by the launch parameter, dynamic param callback, and
+  // /teleop_goal_source topic so the three string values only need to be
+  // spelled out once.
+  static bool parse_goal_source(const std::string &v, GoalSource &out) {
+    if (v == "ee") { out = GoalSource::EE; return true; }
+    if (v == "rail") { out = GoalSource::RAIL_SOLVE; return true; }
+    if (v == "rail_free") { out = GoalSource::RAIL_FREE; return true; }
+    return false;
+  }
 
   std::mutex rail_mutex_;
   sensor_msgs::msg::JointState latest_rail_joints_;
@@ -2156,12 +2314,30 @@ private:
   bool rail_dirty_ = false;  // a fresh message is waiting to be consumed
   rclcpp::Time rail_stamp_;  // receipt time of latest_rail_joints_
   static constexpr double kRailTimeout = 0.5;  // seconds
+  // Per-tick authority cap (apply_rail_sync): a hinge joint may move at most
+  // this far from rail_start_qpos_ (main-loop thread only). Re-anchored to
+  // the just-applied qpos at the end of every successful apply_rail_sync
+  // tick -- a per-step rate limit, not a lifetime-of-engagement budget -- so
+  // a multi-step trajectory can walk a joint arbitrarily far over many
+  // OverrideCmd messages; on_rail_engage seeds it once for the first tick.
+  static constexpr double kRailMaxJointDeltaRad = 5.0 * M_PI / 180.0;  // ~5 deg
+  std::vector<mjtNum> rail_start_qpos_;
+  // Real-contact threshold for apply_rail_sync's correction gate -- NOT
+  // col.collision_margin (that is solveStep's soft d_safe, inflated by the
+  // model's 0.30 geom margin for gradient shaping, not an actual boundary).
+  // Small negative pad against float jitter exactly at the surface.
+  static constexpr double kRailContactTol = -0.002;  // 2 mm
 
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr qpos_rail_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr goal_source_sub_;
 
-  // mode only: which branch owns the tick.
-  bool rail_goal_source() const { return goal_source_.load() == GoalSource::RAIL; }
+  // mode only: which branch owns the tick (either rail submode).
+  bool rail_goal_source() const {
+    GoalSource gs = goal_source_.load();
+    return gs == GoalSource::RAIL_SOLVE || gs == GoalSource::RAIL_FREE;
+  }
+  // apply_rail_sync only: skip the contact query + correction entirely.
+  bool rail_free_mode() const { return goal_source_.load() == GoalSource::RAIL_FREE; }
   // mode AND freshness: gates the mapper-affecting reads / stale-rail hold.
   bool rail_active() {
     if (!rail_goal_source()) return false;
@@ -2191,9 +2367,13 @@ public:
   bool is_rail_mode() const { return rail_goal_source(); }
   // EE -> rail transition: a pending hardware-sync/homing must not fight the
   // rail's snap this tick.
-  void on_rail_engage() {
+  void on_rail_engage(mjModel *m, mjData *d) {
     hardware_sync_requested_ = false;
     stop_solving_to_home();
+    // Anchor for apply_rail_sync's kRailMaxJointDeltaRad cap -- re-anchored
+    // on every fresh EE -> rail engagement, not a fixed global reference, so
+    // a real teleop session can still move the arm across many engagements.
+    rail_start_qpos_.assign(d->qpos, d->qpos + m->nq);
   }
 
   bool is_left_arm_enabled() {
@@ -2239,6 +2419,71 @@ public:
     if (publish_r) publish_one(achieved_pose_pub_r_, achieved_r);
   }
 
+  // Forward-kinematics of the newest /joint_states onto a scratch mjData,
+  // seeded from the live sim qpos so joints not in the message keep their
+  // current values (same assumption as apply_hardware_sync). Runs once per
+  // main-loop tick on the sim thread — never call from a ROS callback. Returns
+  // false until the first /joint_states arrives (valids left false); fills
+  // real_l/real_r only when the corresponding gripper site exists.
+  bool fk_latest_real_ee(mjModel *m, mjData *d_sim, mjData *real_d,
+                         Eigen::Isometry3d &real_l, Eigen::Isometry3d &real_r,
+                         bool &valid_l, bool &valid_r) {
+    valid_l = false;
+    valid_r = false;
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    if (!joint_state_seen_)
+      return false;
+
+    // qpos is the only input mj_forward needs to fill site_xpos/xmat, so
+    // seeding the scratch data from the live sim qpos suffices (mj_copyData is
+    // not required).
+    mju_copy(real_d->qpos, d_sim->qpos, m->nq);
+    for (size_t i = 0; i < latest_real_joints_.name.size(); ++i) {
+      int jnt_id = mj_name2id(m, mjOBJ_JOINT,
+                              latest_real_joints_.name[i].c_str());
+      if (jnt_id >= 0) {
+        real_d->qpos[m->jnt_qposadr[jnt_id]] = latest_real_joints_.position[i];
+      }
+    }
+    mj_forward(m, real_d);
+
+    int left_id = mj_name2id(m, mjOBJ_SITE, "left_gripper_site");
+    int right_id = mj_name2id(m, mjOBJ_SITE, "right_gripper_site");
+    if (left_id >= 0) {
+      real_l.translation() =
+          Eigen::Vector3d::Map(real_d->site_xpos + 3 * left_id);
+      real_l.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              real_d->site_xmat + 9 * left_id)
+              .cast<double>();
+      valid_l = true;
+    }
+    if (right_id >= 0) {
+      real_r.translation() =
+          Eigen::Vector3d::Map(real_d->site_xpos + 3 * right_id);
+      real_r.linear() =
+          Eigen::Map<const Eigen::Matrix<mjtNum, 3, 3, Eigen::RowMajor>>(
+              real_d->site_xmat + 9 * right_id)
+              .cast<double>();
+      valid_r = true;
+    }
+    return true;
+  }
+
+  // Per-arm real-vs-IK EE error (m), published each control tick from the main
+  // thread. NaN until the first /joint_states (sim-only mode stays NaN).
+  void publish_real_ee_error(double err_l, double err_r, bool valid_l,
+                             bool valid_r) {
+    std_msgs::msg::Float32 msg_l;
+    msg_l.data = valid_l ? static_cast<float>(err_l)
+                         : std::numeric_limits<float>::quiet_NaN();
+    real_ee_error_pub_l_->publish(msg_l);
+    std_msgs::msg::Float32 msg_r;
+    msg_r.data = valid_r ? static_cast<float>(err_r)
+                         : std::numeric_limits<float>::quiet_NaN();
+    real_ee_error_pub_r_->publish(msg_r);
+  }
+
   int get_and_reset_joint_msg_count() {
     std::lock_guard<std::mutex> lock(pose_mutex_);
     int count = joint_msg_count_;
@@ -2274,7 +2519,7 @@ public:
       if (quest_state_l_ == QuestState::TRACK) {
         gripper_l_pos_ = std::clamp(quest_trigger_l_, 0.0, 1.0) * kGripperLMax;
       } else {
-        gripper_l_pos_ += get_step(left_btn0_, left_btn0_press_time_); // close
+        gripper_l_pos_ += 2.0 * get_step(left_btn0_, left_btn0_press_time_); // close (2x per user request)
         gripper_l_pos_ -= get_step(left_btn1_, left_btn1_press_time_); // open
         gripper_l_pos_ = std::clamp(gripper_l_pos_, kGripperLMin, kGripperLMax);
       }
@@ -2282,8 +2527,9 @@ public:
         gripper_r_pos_ = kGripperRMin +
             std::clamp(quest_trigger_r_, 0.0, 1.0) * (kGripperRMax - kGripperRMin);
       } else {
-        gripper_r_pos_ += get_step(right_btn0_, right_btn0_press_time_); // close
+        gripper_r_pos_ += 2.0 * get_step(right_btn0_, right_btn0_press_time_); // close (2x per user request)
         gripper_r_pos_ -= get_step(right_btn1_, right_btn1_press_time_); // open
+        gripper_r_pos_ += left_ctrl_gripper_vel_ * kLeftCtrlGripperGain; // left-quest thumbstick override
         gripper_r_pos_ = std::clamp(gripper_r_pos_, kGripperRMin, kGripperRMax);  // XM430 MinPosLimit=130
       }
     }
@@ -2319,6 +2565,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   mjData *d = mj_makeData(m);
+  // Scratch data for per-tick FK of the newest /joint_states (real robot).
+  mjData *real_d = mj_makeData(m);
 
   // Restored original robot alpha (no longer forcing transparency)
   mju_zero(d->qpos, m->nq);
@@ -2459,15 +2707,32 @@ int main(int argc, char **argv) {
   Eigen::Isometry3d prev_target_l = init_l;
   Eigen::Isometry3d prev_target_r = init_r;
   bool prev_rail_gs = node->is_rail_mode();
+  // EE-mode idle sleep (see the solve dispatch below): false once a target is
+  // converged/stalled and nothing new has arrived since -- the gradient step
+  // is skipped entirely rather than re-chasing an already-met goal.
+  bool ee_settled = false;
 
   while (viewer.enabled() && rclcpp::ok()) {
     // Rail mode owns the tick: read once, gate everything below on it.
     bool rail_gs = node->is_rail_mode();
     if (rail_gs != prev_rail_gs) {
       if (rail_gs) {
-        node->on_rail_engage();  // EE -> rail: don't let a pending sync/homing fight the snap
-      } else if (node->is_hardware_mode()) {
-        node->request_hardware_sync();  // rail -> EE: resume synced to the real robot
+        node->on_rail_engage(m, d);  // EE -> rail: don't let a pending sync/homing fight the snap
+      } else {
+        if (node->is_hardware_mode()) {
+          node->request_hardware_sync();  // rail -> EE: resume synced to the real robot
+        }
+        // The arm just settled wherever the rail left it; the mapper
+        // (joy_hand) knows nothing about that move. Same notification a pose
+        // load / home reset already sends it (see the homing block below):
+        // re-base ee_goal_ onto the achieved pose, or the next mapper delta /
+        // quest goal picks up from the stale pre-rail pose and lurches back
+        // toward it -- this is what pulled the arm after the last rail test.
+        // This is a resync, not a command: it must not itself wake the
+        // solve -- target_l_/r_ already equal the achieved pose (FK-adopt),
+        // so there is nothing to chase. Only a genuinely new EE move (caught
+        // by target_moved below) sets ee_settled = false.
+        node->publish_pose_changed();
       }
       prev_rail_gs = rail_gs;
     }
@@ -2514,6 +2779,21 @@ int main(int argc, char **argv) {
         !current_target_r.isApprox(prev_target_r, 1e-6)) {
       err_hist.clear();
     }
+    // Coarser than the isApprox check above (which also fires on float noise,
+    // fine for an err_hist reset): waking the idle-sleep gate below needs an
+    // actually-new goal -- >1mm / >~0.3deg -- not sensor jitter re-asserting
+    // an unchanged target.
+    auto target_moved = [](const Eigen::Isometry3d &a, const Eigen::Isometry3d &b) {
+      constexpr double kPosEps = 1e-3;  // 1 mm
+      constexpr double kRotEps = 5e-3;  // ~0.29 deg
+      if ((a.translation() - b.translation()).norm() > kPosEps) return true;
+      Eigen::AngleAxisd aa(a.rotation() * b.rotation().transpose());
+      return std::abs(aa.angle()) > kRotEps;
+    };
+    if (target_moved(current_target_l, prev_target_l) ||
+        target_moved(current_target_r, prev_target_r)) {
+      ee_settled = false;
+    }
     prev_target_l = current_target_l;
     prev_target_r = current_target_r;
 
@@ -2526,8 +2806,20 @@ int main(int argc, char **argv) {
 
     ffw_ik::StepResult res;
     if (!rail_gs) {
-      res = solver.solveStep(d, current_target_l, current_target_r, active_cfg,
-                             col_cfg, err_hist, dist_hist);
+      // Idle sleep: once the target is converged/stalled and nothing new has
+      // arrived (target_moved above), skip the gradient step entirely and
+      // hold the current qpos -- mirrors apply_rail_sync's own rail_dirty_
+      // hold-on-stale-tick. A real EE command re-arms this; OverrideCmd
+      // already drives its own cadence through the rail branch below.
+      if (!ee_settled || node->is_solving_to_home()) {
+        res = solver.solveStep(d, current_target_l, current_target_r, active_cfg,
+                               col_cfg, err_hist, dist_hist);
+        ee_settled = res.converged || res.early_converged || res.stalled;
+      } else {
+        solver.computeContacts(d, active_cfg.topk_contacts, res.contacts);
+        res.min_dist = res.contacts.closest.empty() ? 0.30 : res.contacts.closest.front().dist;
+        res.converged = true;
+      }
     } else {
       // Rail mode owns the tick: apply_rail_sync's correction (function B,
       // exits on its own critical check) *is* this tick's solve — never
@@ -2612,7 +2904,11 @@ int main(int argc, char **argv) {
       // Reduced verbosity
     }
 
-    node->update_grippers(m, d);
+    // Rail owns the gripper too while it's driving (apply_rail_sync maps
+    // gripper_l/r_joint1 straight into gripper_l_pos_/gripper_r_pos_ above);
+    // without this gate, a quest in TRACK state would overwrite that on the
+    // very next line every tick, fighting the rail's gripper command.
+    if (!rail_gs) node->update_grippers(m, d);
 
     // A homing trigger or a real /joint_states snapshot must not fight the
     // rail; a request made during rail mode stays pending and is processed
@@ -2713,6 +3009,26 @@ int main(int argc, char **argv) {
     // the setpoint can lag the site after clipping/IK).
     node->publish_achieved_poses(achieved_l, achieved_r,
                                  left_id >= 0, right_id >= 0);
+    // Real-robot EE vs IK-achieved EE (m, L1), per arm: FK the newest
+    // /joint_states on the scratch real_d (never the live sim data), then
+    // measure against the achieved site. NaN / "--" until the first
+    // /joint_states arrives.
+    Eigen::Isometry3d real_l = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d real_r = Eigen::Isometry3d::Identity();
+    bool valid_real_l = false, valid_real_r = false;
+    bool real_seen = node->fk_latest_real_ee(m, d, real_d, real_l, real_r,
+                                             valid_real_l, valid_real_r);
+    double real_err_l = (real_seen && valid_real_l)
+        ? (real_l.translation() - achieved_l.translation()).cwiseAbs().sum()
+        : std::numeric_limits<double>::quiet_NaN();
+    double real_err_r = (real_seen && valid_real_r)
+        ? (real_r.translation() - achieved_r.translation()).cwiseAbs().sum()
+        : std::numeric_limits<double>::quiet_NaN();
+    viewer.setRealEEError(real_err_l, real_err_r, real_seen && valid_real_l,
+                          real_seen && valid_real_r);
+    node->publish_real_ee_error(real_err_l, real_err_r,
+                                real_seen && valid_real_l,
+                                real_seen && valid_real_r);
     node->clip_target(achieved_l, achieved_r);
 
     // Update target variables so the viewer spheres reflect the clipped target
@@ -2736,6 +3052,7 @@ int main(int argc, char **argv) {
   ros_thread.join();
 
   mj_deleteData(d);
+  mj_deleteData(real_d);
   mj_deleteModel(m);
   return 0;
 }

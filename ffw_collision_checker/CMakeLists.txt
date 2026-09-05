@@ -85,6 +85,7 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(ffw_spacemouse_msgs REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(PkgConfig REQUIRED)
@@ -193,6 +194,7 @@ ament_target_dependencies(ffw_ik_solver_teleop
     std_msgs
     std_srvs
     ament_index_cpp
+    ffw_spacemouse_msgs
 )
 target_link_libraries(ffw_ik_solver_teleop
     ffw_ik_solver_lib

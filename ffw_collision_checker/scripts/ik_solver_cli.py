@@ -8,7 +8,8 @@ Features:
   - Toggle EE yaw/roll/pitch soft locks (submenu, lock both / unlock both)
   - Toggle joint groups (left_arm / right_arm / lift)
   - Save/load poses to file
-  - Save/load limit profiles to file, clear live profile
+  - Create/save/load/clear limit profiles (record a manual box to file;
+    Load applies it; nothing auto-restores on a fresh start)
   - Reset to home
   - Show arm group enable/disable status
   - Show kinematic tree
@@ -47,6 +48,9 @@ POSES_FILE = "/home/lys/robotis_ws/src/ai_worker/ffw_collision_checker/config/po
 # Limit-profile save/load file (CLI-side only; lines are the exact
 # `/teleop/limit_profile` `set <arm> ...` messages, so load publishes verbatim).
 LIMIT_PROFILE_FILE = "/home/lys/robotis_ws/src/ai_worker/ffw_collision_checker/config/limit_profiles.txt"
+
+# Preset skip magnitudes offered wherever a skip is a dropdown: (meters, degrees).
+SKIP_DELTA_OPTIONS = [(0.01, 1.5), (0.02, 3.0), (0.05, 5.0), (0.10, 10.0)]
 
 
 # ── Terminal helpers ──────────────────────────────────────────────────
@@ -623,13 +627,6 @@ class IKSolverCLI(Node):
             hi += 2.0 * math.pi
         return min(lo, hi), max(lo, hi)
 
-    def _ask_yes_no(self, prompt):
-        try:
-            ans = input(prompt + " (y/n) > ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            return False
-        return ans in ('y', 'yes')
-
     def _axis_value(self, axis, pos, rpy):
         """Current value of an axis: 'x'/'y'/'z' from pos, rpy axes by name."""
         if axis == 'x':
@@ -643,15 +640,26 @@ class IKSolverCLI(Node):
     def _skip_lock_value(self, axis, arm, is_angular):
         """Live skip decision for one axis. Shows the axis value updating in
         place (same \r overwrite trick as capture) while the operator moves the
-        arm; 'y' locks in the value read at that moment as the skip center.
-        Returns (True, center) to skip, (False, None) to register, or
-        (None, None) to cancel."""
+        arm; 1-4 picks a skip magnitude and locks in the value read at that
+        moment as the skip center. Returns (True, center, delta) to skip
+        ('delta' already in the right unit — radians if angular, meters
+        otherwise), (False, None, None) to register, or (None, None, None) to
+        cancel."""
+        keys = [b'1', b'2', b'3', b'4']
+        if is_angular:
+            menu = "  ".join(f"{k.decode()}:±{deg:g}°"
+                              for k, (_, deg) in zip(keys, SKIP_DELTA_OPTIONS))
+        else:
+            menu = "  ".join(f"{k.decode()}:±{m * 100:g}cm"
+                              for k, (m, _) in zip(keys, SKIP_DELTA_OPTIONS))
+        prompt_suffix = f"{menu}  n:manual > "
+
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         center = None
         try:
             tty.setraw(fd)  # no echo / no line-buffering while displaying
-            sys.stdout.write(f"\n    {axis.upper()} — y=skip±5 / n=register > ")
+            sys.stdout.write(f"\n    {axis.upper()} — {prompt_suffix}")
             sys.stdout.flush()
             while True:
                 rclpy.spin_once(self, timeout_sec=0.02)
@@ -661,46 +669,47 @@ class IKSolverCLI(Node):
                     rpy = self._quat_to_rpy(pose.pose.orientation)
                     center = self._axis_value(axis, (p.x, p.y, p.z), rpy)
                     if is_angular:
-                        line = (f"\r\033[2K    {axis.upper()}: "
-                                f"{math.degrees(center):8.2f}° — "
-                                f"y=skip±5 / n=register > ")
+                        value_str = f"{math.degrees(center):8.2f}°"
                     else:
-                        line = (f"\r\033[2K    {axis.upper()}: "
-                                f"{center * 100:8.2f} cm — "
-                                f"y=skip±5 / n=register > ")
-                    sys.stdout.write(line)
+                        value_str = f"{center * 100:8.2f} cm"
+                    sys.stdout.write(f"\r\033[2K    {axis.upper()}: "
+                                      f"{value_str} — {prompt_suffix}")
                     sys.stdout.flush()
                 r, _, _ = select.select([sys.stdin], [], [], 0.05)
                 if r:
                     ch = os.read(fd, 1)
-                    if ch in (b'y', b'Y'):
-                        break  # lock in the value just shown
+                    if ch in keys:
+                        m, deg = SKIP_DELTA_OPTIONS[keys.index(ch)]
+                        delta = math.radians(deg) if is_angular else m
+                        break  # lock in the value just shown, at this delta
                     if ch in (b'n', b'N', b'\r', b'\n'):
-                        return False, None  # go to register
+                        return False, None, None  # go to register
                     if ch == b'\x03':  # Ctrl-C → cancel
-                        return None, None
+                        return None, None, None
         except (KeyboardInterrupt, EOFError):
-            return None, None
+            return None, None, None
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
             sys.stdout.write("\r\033[2K")  # clear the live line
             sys.stdout.flush()
         if center is None:
             print("    (no achieved pose received — aborting this axis)")
-            return None, None
-        return True, center
+            return None, None, None
+        return True, center, delta
 
-    def _axis_bounds(self, axis, delta, is_angular):
+    def _axis_bounds(self, axis, is_angular):
         """Ask skip/register for one axis and return (lo, hi). Skip shows the
-        live value updating in place and locks in whatever it reads when 'y' is
-        pressed (center ± delta); register captures two physical poses."""
-        skip, center = self._skip_lock_value(axis, self._profile_arm, is_angular)
+        live value updating in place and locks in whatever it reads when a
+        magnitude key is pressed (center ± chosen delta); register captures
+        two physical poses."""
+        skip, center, delta = self._skip_lock_value(
+            axis, self._profile_arm, is_angular)
         if skip is None:
             return None  # cancelled
         if skip:
             if is_angular:
                 return self._centered_bounds(center, delta)
-            return center - 0.05, center + 0.05
+            return center - delta, center + delta
 
         print(f"    Register {axis}: move the arm to 2 poses (Enter after each).")
         p1 = self._capture_pose(self._profile_arm, axis, "first")
@@ -721,23 +730,26 @@ class IKSolverCLI(Node):
         else:
             lo, hi = min(v1, v2), max(v1, v2)
 
-        unit = 'deg' if is_angular else 'cm'
         if abs(hi - lo) < 1e-6:
             # Both registered poses agree on this axis: a zero-width box would
-            # silently freeze it. Widen to the registered value ± skip delta.
+            # silently freeze it. Widen to the registered value ± the default
+            # skip magnitude (the ±5cm/±5° preset).
+            widen_m, widen_deg = SKIP_DELTA_OPTIONS[2]
+            unit = 'deg' if is_angular else 'cm'
             print(f"    (registered poses agree on {axis}; widening to "
-                  f"±5 {unit})")
+                  f"±{widen_deg if is_angular else widen_m * 100:g} {unit})")
             if is_angular:
-                return self._centered_bounds(v1, delta)
-            return v1 - 0.05, v1 + 0.05
+                return self._centered_bounds(v1, math.radians(widen_deg))
+            return v1 - widen_m, v1 + widen_m
         return lo, hi
 
     # ── Limit-profile actions ──────────────────────────────────────
 
     def action_create_limit_profile(self):
         """Interactive per-arm position+orientation box, clamped by the mapper
-        onto the absolute world-frame goal. Per-arm skip → ±5cm/±10° around
-        current; unskipped arms cycle yaw→roll→pitch→z→y→x, skip or register."""
+        onto the absolute world-frame goal. Per-arm skip → pick a preset
+        ±cm/±deg box around current (dropdown) or go manual; unskipped arms
+        cycle yaw→roll→pitch→z→y→x, each axis skip (dropdown) or register."""
         clear_screen()
         print("=== Create Manual Limit Profile ===\n")
         print("The mapper clamps the EE goal inside these bounds (world frame "
@@ -755,23 +767,30 @@ class IKSolverCLI(Node):
                   f"rpy=({math.degrees(rpy[0]):.1f}, {math.degrees(rpy[1]):.1f}, "
                   f"{math.degrees(rpy[2]):.1f}) deg")
 
-            if self._ask_yes_no(f"Skip entire {arm_name} arm? "
-                                f"(±5 cm / ±10° around current)"):
+            skip_options = [f"Skip ±{m * 100:g} cm / ±{deg:g}°"
+                            for m, deg in SKIP_DELTA_OPTIONS] + ["Manually (per-axis)"]
+            title = (f"Skip entire {arm_name} arm?\n"
+                     f"pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) m  "
+                     f"rpy=({math.degrees(rpy[0]):.1f}, {math.degrees(rpy[1]):.1f}, "
+                     f"{math.degrees(rpy[2]):.1f}) deg")
+            choice = select_menu(skip_options, title)
+            if choice is not None and choice < len(SKIP_DELTA_OPTIONS):
+                pos_delta, deg = SKIP_DELTA_OPTIONS[choice]
+                rot_delta = math.radians(deg)
                 profile[arm] = {
-                    'x': (pos[0] - 0.05, pos[0] + 0.05),
-                    'y': (pos[1] - 0.05, pos[1] + 0.05),
-                    'z': (pos[2] - 0.05, pos[2] + 0.05),
-                    'roll': self._centered_bounds(rpy[0], math.radians(10)),
-                    'pitch': (rpy[1] - math.radians(10), rpy[1] + math.radians(10)),
-                    'yaw': self._centered_bounds(rpy[2], math.radians(10)),
+                    'x': (pos[0] - pos_delta, pos[0] + pos_delta),
+                    'y': (pos[1] - pos_delta, pos[1] + pos_delta),
+                    'z': (pos[2] - pos_delta, pos[2] + pos_delta),
+                    'roll': self._centered_bounds(rpy[0], rot_delta),
+                    'pitch': (rpy[1] - rot_delta, rpy[1] + rot_delta),
+                    'yaw': self._centered_bounds(rpy[2], rot_delta),
                 }
                 continue
 
             arm_profile = {}
             for axis in ('yaw', 'roll', 'pitch', 'z', 'y', 'x'):
                 is_angular = axis in ('yaw', 'roll', 'pitch')
-                delta = math.radians(5) if is_angular else 0.05
-                bounds = self._axis_bounds(axis, delta, is_angular)
+                bounds = self._axis_bounds(axis, is_angular)
                 if bounds is None:
                     print(f"    {axis}: aborted — arm profile dropped.")
                     arm_profile = None
@@ -784,28 +803,82 @@ class IKSolverCLI(Node):
             print("\nNo profiles created.")
             return
 
-        self._current_profile = profile
-        self._publish_limit_profile(profile)
+        # Create records the wizard box to file under a name; it is NOT applied
+        # yet — Load re-publishes the stored lines verbatim to clamp.
+        name = self._ask_profile_name()
+        if name is None:
+            press_enter()
+            return
+        lines = [f"[{name}]"] + self._profile_set_lines(profile)
+        self._upsert_section(name, lines)
 
-        # Summary table in the mapper's units (deg/cm), flagging any axis whose
-        # current pose sits outside the box.
-        print("\n=== Limit Profile Set ===")
+        clear_screen()
+        print(f"=== Limit Profile Created: '{name}' ===")
         self._print_profile_summary(profile)
-        print("\n(Clamping is applied in the mapper; drive past a bound to "
-              "verify.)")
+        print(f"\nSaved to {os.path.basename(LIMIT_PROFILE_FILE)}.")
+        print("Not applied yet — select 'Load limit profile' and pick "
+              f"'{name}' to clamp the mapper with this box.")
         press_enter()
+
+    @staticmethod
+    def _profile_set_lines(profile):
+        """Render a {arm: {axis: (lo, hi)}} profile as the file's exact
+        `set <arm> <12 bounds>` lines (mapper parser order px py pz
+        roll pitch yaw) — shared by publish and file save."""
+        order = ('x', 'y', 'z', 'roll', 'pitch', 'yaw')
+        return ['set {} {}'.format(
+            arm, ' '.join(f'{v:.6f}' for v in
+                          [x for axis in order for x in bounds[axis]]))
+            for arm, bounds in profile.items()]
 
     def _publish_limit_profile(self, profile):
         """Publish a {arm: {axis: (lo, hi)}} profile as `set <arm> ...` messages
         on /teleop/limit_profile. Axis order matches the mapper's parser:
         px py pz roll pitch yaw."""
-        order = ('x', 'y', 'z', 'roll', 'pitch', 'yaw')
-        for arm, bounds in profile.items():
-            flat = [v for axis in order for v in bounds[axis]]
+        for line in self._profile_set_lines(profile):
             msg = String()
-            msg.data = 'set {} {}'.format(arm, ' '.join(f'{v:.6f}' for v in flat))
+            msg.data = line
             self.limit_profile_pub.publish(msg)
             self._spin_drain(1)
+
+    @staticmethod
+    def _file_header():
+        """Leading comment/blank lines of LIMIT_PROFILE_FILE (before the first
+        [section]). Kept intact across every rewrite of the file."""
+        if not os.path.exists(LIMIT_PROFILE_FILE):
+            return ''
+        header = []
+        with open(LIMIT_PROFILE_FILE, 'r') as f:
+            for line in f:
+                stripped = line.rstrip('\n')
+                if stripped.startswith('#') or stripped.strip() == '':
+                    header.append(stripped)
+                else:
+                    break
+        return '\n'.join(header)
+
+    @staticmethod
+    def _rewrite_profiles(profiles):
+        """Write {name: [section lines]} back to LIMIT_PROFILE_FILE, keeping
+        the file's leading comment header. Dict order = file order."""
+        header = IKSolverCLI._file_header()
+        body = []
+        for n, section_lines in profiles.items():
+            body.append(f"[{n}]")
+            body.extend(section_lines)
+        text = '\n'.join(body)
+        if header:
+            text = header + '\n\n' + text
+        with open(LIMIT_PROFILE_FILE, 'w') as f:
+            f.write(text + '\n')
+
+    @staticmethod
+    def _upsert_section(name, lines):
+        """Insert or replace the `[name]` section in LIMIT_PROFILE_FILE,
+        preserving every other named section and the file header."""
+        profiles = IKSolverCLI._read_limit_profiles()
+        profiles[name] = lines
+        IKSolverCLI._rewrite_profiles(profiles)
 
     def _print_profile_summary(self, profile):
         """Per-arm bound table in the mapper's units (deg/cm), flagging any axis
@@ -877,6 +950,22 @@ class IKSolverCLI(Node):
                             for i, axis in enumerate(order)}
         return profile
 
+    def _ask_profile_name(self):
+        """Prompt for a profile-section name. Returns the name, or None if
+        the user cancels (empty name, '[' or ']' in it, or Ctrl-C)."""
+        try:
+            name = input("Enter profile name: ").strip()
+            if not name:
+                print("Cancelled: Name cannot be empty.")
+                return None
+            if name.startswith('[') or ']' in name:
+                print("Cancelled: name cannot contain '[' or ']'.")
+                return None
+            return name
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancelled.")
+            return None
+
     def action_save_limit_profile(self):
         """Snapshot the current live limit profile to file under a name."""
         clear_screen()
@@ -885,38 +974,15 @@ class IKSolverCLI(Node):
             print("\nNo limit profile is active. Create or load one first.")
             press_enter()
             return
-        try:
-            name = input("Enter profile name: ").strip()
-            if not name:
-                print("Cancelled: Name cannot be empty.")
-                press_enter()
-                return
-            if name.startswith('[') or ']' in name:
-                print("Cancelled: name cannot contain '[' or ']'.")
-                press_enter()
-                return
-        except (KeyboardInterrupt, EOFError):
-            print("\nCancelled.")
+        name = self._ask_profile_name()
+        if name is None:
             press_enter()
             return
 
-        lines = [f"[{name}]"]
-        order = ('x', 'y', 'z', 'roll', 'pitch', 'yaw')
-        for arm, bounds in self._current_profile.items():
-            flat = [v for axis in order for v in bounds[axis]]
-            lines.append('set {} {}'.format(arm, ' '.join(f'{v:.6f}' for v in flat)))
+        lines = [f"[{name}]"] + self._profile_set_lines(self._current_profile)
 
-        # Replace any existing section with the same name.
-        existing = self._read_limit_profiles()
-        sections = {n: l for n, l in existing.items() if n != name}
-        out_lines = []
-        for n, section_lines in sections.items():
-            out_lines.append(f"[{n}]")
-            out_lines.extend(section_lines)
-        out_lines.extend(lines)
-
-        with open(LIMIT_PROFILE_FILE, 'w') as f:
-            f.write('\n'.join(out_lines) + '\n')
+        # Insert/replace the section (an existing name is updated in place).
+        self._upsert_section(name, lines)
         print(f"\nSaved profile '{name}' to {LIMIT_PROFILE_FILE}")
         press_enter()
 
@@ -947,6 +1013,8 @@ class IKSolverCLI(Node):
         clear_screen()
         print(f"=== Limit Profile Loaded: '{name}' ===")
         self._print_profile_summary(profile)
+        print("Clamping is now live in the mapper — drive past a bound to "
+              "verify.")
         press_enter()
 
     def action_save_pose(self, to_file):

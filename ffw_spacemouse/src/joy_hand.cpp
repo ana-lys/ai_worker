@@ -13,11 +13,13 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/float32.hpp"
+#include "ffw_spacemouse_msgs/msg/left_control_override.hpp"
 
 using std::placeholders::_1;
 
@@ -31,6 +33,9 @@ public:
     this->declare_parameter("publish_rate_hz", 100.0);
     this->declare_parameter("trans_sensitivity", 1.5);
     this->declare_parameter("rot_sensitivity", 1.0);
+    // Left-quest-trigger precision override (right arm only): continuous
+    // scale from 1.0 (trigger released) down to this floor (trigger fully held).
+    this->declare_parameter("quest_precision_min_scale", 0.2);
 
     // Axes mapping for SpaceMouse
     this->declare_parameter("reference_frame", "global"); // "global" or "local"
@@ -135,6 +140,15 @@ public:
     std::string quest_topic_name = "/quest/" + target_arm_ + "/ee_target_pose";
     quest_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(quest_topic_name, 10);
 
+    // Delta stream (deltas out): what the human commanded on the /spacemouse
+    // delta path this tick, map frame, AFTER the lock/limit-profile clamps.
+    // linear = dx,dy,dz (m); angular = drx,dry,drz (rad, extrinsic-XYZ RPY).
+    // The solver recovers the same quantity by differencing consecutive
+    // /spacemouse/<arm>/ee_target_pose goals; this publishes it explicitly
+    // for supervisors / demo loggers (relayed to the ZMQ side as EEDelta).
+    std::string delta_topic_name = "/spacemouse/" + target_arm_ + "/ee_target_delta";
+    delta_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(delta_topic_name, 10);
+
     joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
       "joy", 10, std::bind(&JoyHand::joy_callback, this, _1));
 
@@ -167,6 +181,20 @@ public:
           precision_mode_ = msg->data;
       });
 
+    // Left Meta Quest controller override (quest_to_ros2.py): the left
+    // trigger continuously scales this (right-arm) SpaceMouse's sensitivity.
+    // Only the right-arm instance reacts — left_ctrl_trigger_ stays 0.0
+    // (no-op scale of 1.0) for the left-arm instance, same no-mutex pattern
+    // as precision_mode_ (single executor thread).
+    if (target_arm_ == "right") {
+      left_ctrl_sub_ = this->create_subscription<ffw_spacemouse_msgs::msg::LeftControlOverride>(
+        "/quest/left/control_override", 10,
+        [this](const ffw_spacemouse_msgs::msg::LeftControlOverride::SharedPtr msg) {
+            left_ctrl_trigger_ = msg->trigger;
+            left_ctrl_grip_ = msg->grip;
+        });
+    }
+
     // ── Remote control override (single bool gate, mirrors the Quest engage) ──
     // One bool on /control_override replaces the 2 s trigger gesture: when TRUE,
     // joy_hand stops publishing /spacemouse/<arm>/ee_target_pose entirely, so the
@@ -182,12 +210,22 @@ public:
           // so a plain resume would re-assert the pre-override pose. Adopt the
           // real pose now — same re-base as the ARM switch (§11), so spacemouse
           // deltas continue from where the arm actually is.
-          if (control_override_ && !now && current_mode_ == "ARM" &&
-              achieved_pose_valid_) {
-            ee_goal_ = achieved_pose_map_;
-            RCLCPP_INFO(this->get_logger(),
-              "Rebased ee_goal_ to achieved pose on override release (%s)",
-              target_arm_.c_str());
+          if (control_override_ && !now) {
+            if (current_mode_ == "ARM" && achieved_pose_valid_) {
+              ee_goal_ = achieved_pose_map_;
+              RCLCPP_INFO(this->get_logger(),
+                "Rebased ee_goal_ to achieved pose on override release (%s)",
+                target_arm_.c_str());
+            }
+            // The override branch below forces the solver into TRACK every tick
+            // so the gateway's gripper trigger is obeyed. Restore the real quest
+            // state on release — enter_quest_state only publishes on transitions,
+            // so this needs an explicit publish or the solver stays in TRACK.
+            if (quest_state_pub_) {
+              std_msgs::msg::String state_msg;
+              state_msg.data = quest_state_name();
+              quest_state_pub_->publish(state_msg);
+            }
           }
           control_override_ = now;
       });
@@ -878,13 +916,33 @@ private:
   }
 
   // Every path back to SM_CONTROL does exactly this (§4 "Abort"): stop
-  // listening to the quest, freeze ee_goal_ where it is, disarm the count.
+  // listening to the quest, re-base ee_goal_ onto the achieved pose, disarm
+  // the count.
+  //
+  // Re-base (not just freeze) is required because step_quest_interpolation's
+  // velocity feedforward (§6 TEST 3) intentionally runs ee_goal_ AHEAD of the
+  // hand/arm by v*T_lead while engaged, so "where it is" at abort time can sit
+  // measurably past where the arm actually is — worse the faster the operator
+  // was moving. The mapper's delta topic goes silent for the whole quest
+  // session (joy_hand publishes on the absolute quest_pose_pub_ topic instead),
+  // so its baseline (last_mapper_*) is still parked at the pre-engagement pose.
+  // The first post-abort SpaceMouse tick then hands the solver a goal far from
+  // that baseline; the solver's own re-base guard (kMapperRebaseDist) adopts it
+  // directly on the assumption "the arm is already there" (true for every other
+  // re-base site — ARM switch, override release, quest engage — because they
+  // all anchor on achieved_pose_map_ explicitly). Skipping this re-base breaks
+  // that assumption and the solver adopts the lead-ahead goal as-is: a real
+  // jump toward it, walked back over the next few ticks, before SpaceMouse
+  // control feels normal again.
   void abort_to_control(const char *reason) {
     enter_quest_state(QuestState::SM_CONTROL);
     engage_armed_ = false;
     hold_started_ = false;
+    if (achieved_pose_valid_) {
+      ee_goal_ = achieved_pose_map_;
+    }
     RCLCPP_INFO(this->get_logger(),
-      "Quest override off (%s) — goal frozen, count disarmed (%s)",
+      "Quest override off (%s) — goal rebased to achieved, count disarmed (%s)",
       reason, target_arm_.c_str());
   }
 
@@ -958,8 +1016,24 @@ private:
     // suppress the SpaceMouse velocity stream at the source so the solver keeps
     // last_goal_from_quest_=true and nothing re-asserts the mapper hold pose.
     if (control_override_) {
+      // The quest state machine below is frozen while the override holds (we
+      // return early every tick), so nothing publishes /quest/<arm>/state and
+      // the solver sits in CTRL — where update_grippers() drops the gateway's
+      // /quest/<arm>/trigger. Force TRACK here so the gripper command is obeyed,
+      // mirroring the physical quest engage (the pose leash is identical for
+      // CTRL and TRACK, so this changes nothing else).
+      if (quest_state_pub_) {
+        std_msgs::msg::String state_msg;
+        state_msg.data = "TRACK";
+        quest_state_pub_->publish(state_msg);
+      }
       return;   // gateway /quest goals drive; spacemouse + quest-trigger silent
     }
+
+    // Left-quest grip override: runs every tick regardless of which path
+    // below fills ee_goal_ (quest-engaged or SpaceMouse joystick), so holding
+    // the grip re-levels the goal even if nothing else is moving it.
+    apply_left_ctrl_yaw_roll_decay();
 
     // ── Quest override (quest_teleop_plan §4-§7, Task 2) ──
     // Runs every ARM tick, active or not. Its input is /quest_state, not /joy,
@@ -1026,6 +1100,7 @@ private:
     if (precision_mode_) {
       trans_scaled *= 0.1;
     }
+    trans_scaled *= quest_precision_scale();
     double dx = trans_scaled.x();
     double dy = trans_scaled.y();
     double dz = trans_scaled.z();
@@ -1047,6 +1122,7 @@ private:
     if (precision_mode_) {
       rot_scaled *= 0.1;
     }
+    rot_scaled *= quest_precision_scale();
     double drx = rot_scaled.x();
     double dry = rot_scaled.y();
     double drz = rot_scaled.z();
@@ -1123,7 +1199,51 @@ private:
       quest_pose_pub_->publish(msg);
     } else {
       pose_pub_->publish(msg);
+      publish_goal_delta();  // delta stream: one per /spacemouse pose tick
     }
+  }
+
+  void publish_goal_delta()
+  {
+    // Per-tick commanded delta (deltas out): what the operator commanded this
+    // tick, effective in the map frame AFTER the lock/limit-profile clamps --
+    // exactly what the solver recovers by differencing consecutive
+    // /spacemouse/<arm>/ee_target_pose goals. linear = dx,dy,dz (m); angular =
+    // drx,dry,drz (rad, extrinsic-XYZ RPY). The gateway relays it to the ZMQ
+    // side as EEDelta.
+    //
+    // Re-base guard: mirror the solver's mapper re-base thresholds
+    // (kMapperRebaseDist 0.03 m / kMapperRebaseAng 0.1 rad). A jump that size
+    // is a re-base (arm switch, override release, first achieved pose, quest
+    // engage/abort), not a command -- the solver adopts the new pose as a
+    // baseline and never integrates it, so emit an all-zero delta and re-seed.
+    constexpr double kRebaseDist = 0.03;
+    constexpr double kRebaseAng = 0.1;
+    Eigen::Vector3d dp = Eigen::Vector3d::Zero();
+    Eigen::Vector3d rpy = Eigen::Vector3d::Zero();
+    if (delta_seeded_) {
+      dp = ee_goal_.translation() - delta_prev_pose_.translation();
+      Eigen::Matrix3d dR = ee_goal_.linear() * delta_prev_pose_.linear().transpose();
+      if (dp.norm() > kRebaseDist || Eigen::AngleAxisd(dR).angle() > kRebaseAng) {
+        // Re-base: not a command. Zero the delta and re-seed below.
+        dp.setZero();
+      } else {
+        rpy = extract_rpy(dR);
+      }
+    }
+    delta_prev_pose_ = ee_goal_;
+    delta_seeded_ = true;
+
+    geometry_msgs::msg::TwistStamped msg;
+    msg.header.stamp = this->now();
+    msg.header.frame_id = "map";
+    msg.twist.linear.x = dp.x();
+    msg.twist.linear.y = dp.y();
+    msg.twist.linear.z = dp.z();
+    msg.twist.angular.x = rpy.x();
+    msg.twist.angular.y = rpy.y();
+    msg.twist.angular.z = rpy.z();
+    delta_pub_->publish(msg);
   }
 
   // ── Subscriptions & publishers ──────────────────────────────────
@@ -1131,6 +1251,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr precision_sub_;
+  rclcpp::Subscription<ffw_spacemouse_msgs::msg::LeftControlOverride>::SharedPtr left_ctrl_sub_;  // /quest/left/control_override (right-arm instance only)
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr control_override_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ee_lock_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr limit_profile_sub_;
@@ -1140,6 +1261,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr quest_state_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr quest_pose_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr delta_pub_;  // /spacemouse/<arm>/ee_target_delta (deltas out)
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr quest_active_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr quest_notification_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr quest_state_pub_;  // /quest/<arm>/state (§8b)
@@ -1164,8 +1286,39 @@ private:
   Eigen::Isometry3d ee_goal_;
   double command_dt_ {0.01};
 
+  // ── Delta-stream baseline (deltas out) ──────────────────────────
+  // Previous ee_goal_ the per-tick delta is formed against, and whether it is
+  // valid yet. Re-seeded (an all-zero delta is emitted) whenever the pose
+  // stream jumps enough that the solver's mapper re-bases.
+  Eigen::Isometry3d delta_prev_pose_ {Eigen::Isometry3d::Identity()};
+  bool delta_seeded_ {false};
+
   bool precision_mode_ {false};
   bool control_override_ {false};   // remote bool gate: suppresses spacemouse stream
+  double left_ctrl_trigger_ {0.0};  // left-quest trigger, 0..1 (0 = no override)
+  double left_ctrl_grip_ {0.0};     // left-quest grip/side button, 0..1
+
+  // Continuous SpaceMouse sensitivity scale driven by the left-quest trigger:
+  // 1.0 when released down to quest_precision_min_scale when fully held.
+  // No-op (1.0) on the left-arm instance, since left_ctrl_trigger_ is never
+  // written there (left_ctrl_sub_ is only created for target_arm_ == "right").
+  double quest_precision_scale() const {
+    double min_scale = this->get_parameter("quest_precision_min_scale").as_double();
+    return 1.0 - left_ctrl_trigger_ * (1.0 - min_scale);
+  }
+
+  // While the left-quest grip is held, slowly re-level the right SpaceMouse
+  // goal's yaw and roll back to zero (pitch untouched) -- no-op (grip stays
+  // 0.0) on the left-arm instance, same guard as quest_precision_scale().
+  static constexpr double kLeftCtrlYawRollDecay = 0.98;
+  void apply_left_ctrl_yaw_roll_decay() {
+    if (left_ctrl_grip_ <= 0.5) return;
+    Eigen::Vector3d rpy = extract_rpy(ee_goal_.linear());
+    double roll = rpy.x() * kLeftCtrlYawRollDecay;
+    double pitch = rpy.y();
+    double yaw = rpy.z() * kLeftCtrlYawRollDecay;
+    ee_goal_.linear() = rpy_to_matrix(roll, pitch, yaw);
+  }
 
   // ── EE lock state ───────────────────────────────────────────────
   std::mutex ee_lock_mutex_;

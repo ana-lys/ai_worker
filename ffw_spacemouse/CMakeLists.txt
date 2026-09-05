@@ -17,6 +17,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(joy REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(ffw_spacemouse_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # ffw_collision_checker exports ffw_ik_solver_lib with proxsuite/mujoco in its link interface.
@@ -41,7 +42,7 @@ find_package(ffw_collision_checker REQUIRED)
 
 # Build Arm teleop node (maps joystick → EE target pose for IK)
 add_executable(joy_hand src/joy_hand.cpp)
-ament_target_dependencies(joy_hand rclcpp sensor_msgs geometry_msgs trajectory_msgs joy ament_index_cpp ffw_collision_checker)
+ament_target_dependencies(joy_hand rclcpp sensor_msgs geometry_msgs trajectory_msgs joy ament_index_cpp ffw_collision_checker ffw_spacemouse_msgs)
 target_link_libraries(joy_hand Eigen3::Eigen)
 if(TARGET ffw_collision_checker::ffw_ik_solver_lib)
   target_link_libraries(joy_hand ffw_collision_checker::ffw_ik_solver_lib)

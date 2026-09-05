@@ -36,6 +36,7 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float32MultiArray, Header, MultiArrayDimension
+from ffw_spacemouse_msgs.msg import LeftControlOverride
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,15 @@ CONTROLLER_MENU_BTN_OFFSET = 15
 # index N of button_floats() below. Touches are dropped entirely —
 # nothing reads them (quest_teleop_plan §3).
 BUTTON_BITS = ("trigger", "grip", "a_x", "b_y", "thumbstick", "menu")
+
+# Offset (meters) applied to each controller's tracked origin, expressed in
+# the controller's own local frame (ROS convention: X=forward, Y=left,
+# Z=up), before publishing. The raw tracked point sits near the front of
+# the controller (near the fingers/trigger), so using it directly as an EE
+# pose makes rotation pivot there instead of at the wrist. Shifting it along
+# the controller's local +X moves the effective pivot toward the wrist.
+# Flip the sign if it shifts the wrong way for your grip.
+CONTROLLER_EE_OFFSET_LOCAL = (0.1, 0.0, 0.0)
 
 
 def button_floats(buttons: int) -> list[float]:
@@ -305,6 +315,11 @@ class QuestControllerPoseNode(Node):
         self._pub_head = self.create_publisher(PoseStamped, "head_pose", 10)
         self._pub_state = self.create_publisher(
             Float32MultiArray, "quest_state", 10)
+        # Combined left-controller override: right SpaceMouse precision +
+        # right gripper velocity + a record-button event, all decoded from
+        # the left controller alone (see LeftControlOverride.msg).
+        self._pub_left_ctrl = self.create_publisher(
+            LeftControlOverride, "/quest/left/control_override", 10)
 
         # Last-known state per source, kept in step with the PoseStamped topics.
         # Each pose is the torso-relative (pos, quat) value just published;
@@ -360,6 +375,19 @@ class QuestControllerPoseNode(Node):
         msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = rpos
         msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w = rquat
         return msg
+
+    def _publish_left_control_override(self, stick_y, trigger, grip, buttons):
+        """Decode left thumbstick Y / trigger / grip / A-B buttons into the
+        combined override for the right SpaceMouse + gripper + ZMQ record event.
+        """
+        a_x = (buttons >> BUTTON_BITS.index("a_x")) & 1
+        b_y = (buttons >> BUTTON_BITS.index("b_y")) & 1
+        msg = LeftControlOverride()
+        msg.gripper_vel = float(stick_y)
+        msg.trigger = float(trigger)
+        msg.grip = float(grip)
+        msg.record = (1 if a_x else 0) | (2 if b_y else 0)
+        self._pub_left_ctrl.publish(msg)
 
     def _publish_quest_state(self):
         """Assemble the /quest_state float array from last-known state and publish.
@@ -516,6 +544,12 @@ class QuestControllerPoseNode(Node):
             trigger, grip, stick_x, stick_y, buttons, touches = state
         rx, ry, rz = unity_to_ros_pos(px, py, pz)
         rqx, rqy, rqz, rqw = unity_to_ros_quat(qx, qy, qz, qw)
+
+        # Shift the tracked point forward along the controller's own local
+        # axis (see CONTROLLER_EE_OFFSET_LOCAL) before it becomes an EE pose.
+        ox, oy, oz = rotate_vector((rqx, rqy, rqz, rqw), CONTROLLER_EE_OFFSET_LOCAL)
+        rx, ry, rz = rx + ox, ry + oy, rz + oz
+
         msg = self.make_torso_pose_stamped(
             stamp, (rx, ry, rz), (rqx, rqy, rqz, rqw))
 
@@ -532,6 +566,7 @@ class QuestControllerPoseNode(Node):
             self._state["left"] = {"pose": (torso_pos, torso_quat),
                                    "analog": analog}
             self._pub_left.publish(msg)
+            self._publish_left_control_override(stick_y, trigger, grip, buttons)
             self.get_logger().debug(
                 f"L → ({px:.3f}, {py:.3f}, {pz:.3f})  "
                 f"({qx:.3f}, {qy:.3f}, {qz:.3f}, {qw:.3f})",

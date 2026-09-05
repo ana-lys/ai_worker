@@ -309,6 +309,29 @@ def launch_setup(context):
         )
     )
 
+    # ZMQ HIL gateway (external controller <-> robot link). Binds the two
+    # observation rails: Obs (EE poses + grippers + relayed /joint_states)
+    # on 6001 and Priv (head-camera tf + per-tick commanded EEDelta) on 6003,
+    # the control SUB on 6002, and Record (left A/X + B/Y button event) on
+    # 6004 -- forwards ControlCmd goals to /quest/<arm>/ee_target_pose +
+    # /quest/<arm>/trigger (same channels the spacemouse quest path uses).
+    # priv_port/record_port aren't overridden here, so they use protocol
+    # defaults (6003/6004), matching the standalone
+    # `ros2 run ffw_zmqinterface gateway_node` invocation.
+    nodes.append(
+        Node(
+            package='ffw_zmqinterface',
+            executable='gateway_node',
+            name='zmq_spacemouse_gateway',
+            output='screen',
+            parameters=[{
+                'state_port': 6001,
+                'control_port': 6002,
+                'hz': 100.0,
+            }]
+        )
+    )
+
     # Logitech Joystick (optional — base control override). Only launched when
     # a real Logitech was detected (or an explicit device id was given), so it
     # never opens a SpaceMouse by mistake.
@@ -389,8 +412,8 @@ def generate_launch_description():
             'logitech_device_id', default_value='-1',
             description='SDL device index for Logitech (auto-detect if -1).'),
         DeclareLaunchArgument(
-            'use_quest', default_value='false',
-            description='Enable Quest controller ARM override (runs quest_to_ros2.py bridge + forwards quest params to joy_hand).'),
+            'use_quest', default_value='true',
+            description='Enable Quest controller ARM override (runs quest_to_ros2.py bridge + forwards quest params to joy_hand). Defaults on so the unified launch is the one entry point -- pass use_quest:=false to fall back to spacemouse-only.'),
         DeclareLaunchArgument(
             'quest_device', default_value='9500',
             description='Port the Quest stream arrives on (passed to quest_to_ros2.py --port).'),
