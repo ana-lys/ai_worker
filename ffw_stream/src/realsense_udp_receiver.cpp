@@ -25,6 +25,7 @@ public:
     this->declare_parameter<bool>("headless", false);
     this->declare_parameter<bool>("enable_d405s", true);
     this->declare_parameter<bool>("dual_rgb_no_depth", false);
+    this->declare_parameter<bool>("disable_left_d405", false);
     this->declare_parameter<int>("depthai_video_port", 9100);
     this->declare_parameter<int>("oakd_720p_video_port", 9110);
     this->declare_parameter<std::string>("rgb_source", "oakd_lite");
@@ -35,6 +36,7 @@ public:
     num_cameras_ = this->get_parameter("num_cameras").as_int();
     bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
     dual_rgb_no_depth_ = this->get_parameter("dual_rgb_no_depth").as_bool();
+    disable_left_d405_ = this->get_parameter("disable_left_d405").as_bool();
     int depthai_video_port = this->get_parameter("depthai_video_port").as_int();
     int oakd_720p_video_port = this->get_parameter("oakd_720p_video_port").as_int();
     rgb_source_ = this->get_parameter("rgb_source").as_string();
@@ -48,6 +50,10 @@ public:
       if (!dual_rgb_no_depth_) pub_depth_.resize(num_cameras_);
 
       for (int i = 0; i < num_cameras_; ++i) {
+        if (disable_left_d405_ && i == 0) {
+          // Left D405 disabled at the sender: don't open its ports at all.
+          continue;
+        }
         std::string ns = "camera_" + std::to_string(i);
 
         pub_ir_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/infra1/image_rect_raw", 10);
@@ -63,6 +69,9 @@ public:
       }
       if (dual_rgb_no_depth_) {
         RCLCPP_INFO(this->get_logger(), "dual_rgb_no_depth: both D405s received as RGB, depth ports not opened");
+      }
+      if (disable_left_d405_) {
+        RCLCPP_INFO(this->get_logger(), "disable_left_d405: Cam0 (left) ports not opened");
       }
     } else {
       RCLCPP_INFO(this->get_logger(), "D405 streams disabled; only RGB/base_port+100 will be received");
@@ -728,6 +737,7 @@ private:
 
   int num_cameras_;
   bool dual_rgb_no_depth_ = false;
+  bool disable_left_d405_ = false;
   std::string rgb_source_;
   std::string oakd_codec_;
   std::string rs_codec_;

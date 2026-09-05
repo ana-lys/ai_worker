@@ -17,7 +17,7 @@
 // Usage:
 //   realsense_udp_streamer <dest_ip> <base_port> [width=480] [height=270]
 //   [fps=30] [max_depth_m=1.0] [--enable-d405s|--disable-d405s]
-//   [--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth]
+//   [--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] [--disable-left-d405]
 //   [--color-exposure <microseconds>]
 //
 // Port mapping (per camera index i, 0-based):
@@ -531,6 +531,7 @@ int main(int argc, char **argv) {
               << " <dest_ip> <base_port> [width=480] [height=270] [fps=30] "
                  "[max_depth_m=1.0] [--enable-d405s|--disable-d405s] "
                  "[--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] "
+                 "[--disable-left-d405] "
                  "[--color-exposure <us>] "
                  "[--color-wb <K>] [--h264|--mjpeg] (default H264)"
               << std::endl;
@@ -541,6 +542,7 @@ int main(int argc, char **argv) {
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
   bool dual_rgb_no_depth = false;  // profile: both D405s stream RGB, depth off
+  bool disable_left_d405 = false;  // skip the left D405 (cam_idx 0) entirely
   bool mjpeg = false;          // default H264 (x264enc zerolatency); --mjpeg → jpegenc intra-only zero-latency
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   int color_wb = -1;           // -1 = leave SDK default white balance
@@ -556,6 +558,8 @@ int main(int argc, char **argv) {
       d435_rgb_enabled = false;
     } else if (arg == "--dual-rgb-no-depth") {
       dual_rgb_no_depth = true;
+    } else if (arg == "--disable-left-d405") {
+      disable_left_d405 = true;
     } else if (arg == "--color-exposure") {
       if (i + 1 < argc) {
         color_exposure_us = std::atoi(argv[++i]);
@@ -635,6 +639,7 @@ int main(int argc, char **argv) {
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
       "  dual_rgb_no_depth=" + std::string(dual_rgb_no_depth ? "on" : "off") +
+      "  disable_left_d405=" + std::string(disable_left_d405 ? "on" : "off") +
       "  color_exposure_us=" + std::to_string(color_exposure_us) +
       "  color_wb=" + std::to_string(color_wb));
 
@@ -649,6 +654,12 @@ int main(int argc, char **argv) {
                              1280, 720, 30, mjpeg, node, cam_info_pub);
       }
     } else if (enable_d405s) {
+      if (disable_left_d405 && cam_idx == 0) {
+        // Left D405: not opened at all -- zero USB/compute cost from it.
+        log("CAM0 (left D405): disabled via --disable-left-d405 -- not opened");
+        cam_idx++;
+        continue;
+      }
       int depth_port = base_port + cam_idx * 2;
       int ir_port = depth_port + 1;
       // Right D405 (cam_idx==1) streams RGB instead of IR at 480×270; in
