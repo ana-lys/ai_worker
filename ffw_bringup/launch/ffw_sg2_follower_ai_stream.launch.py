@@ -323,6 +323,8 @@ def generate_launch_description():
             'color_exposure': color_exposure,
             'color_wb': color_wb,
             'stream_to_server': stream_to_server,
+            # Profile 2: both D405 hand cameras stream RGB, depth off (default for sg2/sg2_smtm).
+            'dual_rgb_no_depth': 'true',
         }.items(),
         condition=IfCondition(launch_cameras)
     )

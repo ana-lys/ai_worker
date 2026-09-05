@@ -14,6 +14,10 @@ def generate_launch_description():
                               description='RealSense D405/D435 codec: h264 (default) or mjpeg (zero-latency)'),
         DeclareLaunchArgument('oakd_720p_video_port', default_value='9110',
                               description='OAK-D 720p stream video port (telemetry = +200)'),
+        DeclareLaunchArgument('dual_rgb_no_depth', default_value='false',
+                              description='Match the sender D405 profile: both hand cameras are RGB, '
+                                          'depth ports not opened. Set true when receiving from a robot '
+                                          'streaming with this profile (default for sg2/sg2_smtm).'),
         # Unified receiver: auto-opens the known ports and displays whatever streams are present.
         Node(
             package='ffw_stream',
@@ -26,6 +30,7 @@ def generate_launch_description():
                 'oakd_codec': LaunchConfiguration('oakd_codec'),
                 'rs_codec': LaunchConfiguration('rs_codec'),
                 'oakd_720p_video_port': LaunchConfiguration('oakd_720p_video_port'),
+                'dual_rgb_no_depth': LaunchConfiguration('dual_rgb_no_depth'),
             }],
             output='screen'
         )

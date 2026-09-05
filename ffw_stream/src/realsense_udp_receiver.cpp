@@ -24,6 +24,7 @@ public:
     this->declare_parameter<int>("num_cameras", 2);
     this->declare_parameter<bool>("headless", false);
     this->declare_parameter<bool>("enable_d405s", true);
+    this->declare_parameter<bool>("dual_rgb_no_depth", false);
     this->declare_parameter<int>("depthai_video_port", 9100);
     this->declare_parameter<int>("oakd_720p_video_port", 9110);
     this->declare_parameter<std::string>("rgb_source", "oakd_lite");
@@ -33,6 +34,7 @@ public:
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
     bool enable_d405s = this->get_parameter("enable_d405s").as_bool();
+    dual_rgb_no_depth_ = this->get_parameter("dual_rgb_no_depth").as_bool();
     int depthai_video_port = this->get_parameter("depthai_video_port").as_int();
     int oakd_720p_video_port = this->get_parameter("oakd_720p_video_port").as_int();
     rgb_source_ = this->get_parameter("rgb_source").as_string();
@@ -42,20 +44,25 @@ public:
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
     if (enable_d405s) {
-      pub_depth_.resize(num_cameras_);
       pub_ir_.resize(num_cameras_);
+      if (!dual_rgb_no_depth_) pub_depth_.resize(num_cameras_);
 
       for (int i = 0; i < num_cameras_; ++i) {
         std::string ns = "camera_" + std::to_string(i);
 
-        pub_depth_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/depth/image_rect_raw", 10);
         pub_ir_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/infra1/image_rect_raw", 10);
 
         int depth_port = base_port + (i * 2);
         int ir_port = depth_port + 1;
 
-        threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "Depth", depth_port, pub_depth_[i]);
+        if (!dual_rgb_no_depth_) {
+          pub_depth_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/depth/image_rect_raw", 10);
+          threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "Depth", depth_port, pub_depth_[i]);
+        }
         threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "IR", ir_port, pub_ir_[i]);
+      }
+      if (dual_rgb_no_depth_) {
+        RCLCPP_INFO(this->get_logger(), "dual_rgb_no_depth: both D405s received as RGB, depth ports not opened");
       }
     } else {
       RCLCPP_INFO(this->get_logger(), "D405 streams disabled; only RGB/base_port+100 will be received");
@@ -106,8 +113,9 @@ public:
 
 private:
   void streamLoop(int cam_index, const std::string& type, int port, rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub) {
-    // Camera 1 (right D405) sends RGB on the "IR" port (base+3) instead of IR
-    bool is_rgb = (cam_index == 1 && type == "IR");
+    // Camera 1 (right D405) sends RGB on the "IR" port (base+3) instead of IR;
+    // in dual_rgb_no_depth mode BOTH D405s send RGB on their "IR" port.
+    bool is_rgb = (type == "IR") && (dual_rgb_no_depth_ || cam_index == 1);
 
     std::string pipeline;
     if (rs_codec_ == "mjpeg") {
@@ -632,8 +640,10 @@ private:
           cv::applyColorMap(depth, depth, custom_lut);
         }
 
-        // Camera 1's "IR" stream is now RGB — skip grayscale processing
-        if (i == 1) {
+        // Camera 1's "IR" stream is RGB (both are, in dual_rgb_no_depth mode) —
+        // skip grayscale processing
+        bool cam_is_rgb = (i == 1 || dual_rgb_no_depth_);
+        if (cam_is_rgb) {
           // Already BGR from streamLoop, display as-is
         } else if (!ir.empty() && ir.channels() == 1) {
           ir.convertTo(ir, -1, 1.5, 30);
@@ -648,7 +658,7 @@ private:
         if (depth.empty()) depth = blank.clone();
         if (ir.empty()) ir = blank.clone();
 
-        std::string second_label = (i == 1) ? "RGB" : "IR";
+        std::string second_label = cam_is_rgb ? "RGB" : "IR";
         cv::putText(depth, "Cam " + std::to_string(i) + " Depth", cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2);
         cv::putText(ir, "Cam " + std::to_string(i) + " " + second_label, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2);
 
@@ -717,6 +727,7 @@ private:
   }
 
   int num_cameras_;
+  bool dual_rgb_no_depth_ = false;
   std::string rgb_source_;
   std::string oakd_codec_;
   std::string rs_codec_;

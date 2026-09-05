@@ -20,6 +20,12 @@ def generate_launch_description():
         default_value='true',
         description='Enable the D405 hand cameras'
     )
+    dual_rgb_no_depth_arg = DeclareLaunchArgument(
+        'dual_rgb_no_depth',
+        default_value='false',
+        description='D405 profile 2: both hand cameras stream RGB (no IR), depth off. '
+                    'Default is profile 1 (left=IR, right=RGB, both=depth).'
+    )
     rgb_source_arg = DeclareLaunchArgument(
         'rgb_source',
         default_value='oakd_lite_720p_hw',
@@ -73,6 +79,7 @@ def generate_launch_description():
         base_port = LaunchConfiguration('base_port').perform(context)
         fps = LaunchConfiguration('fps').perform(context)
         enable_d405s = LaunchConfiguration('enable_d405s').perform(context).lower() == 'true'
+        dual_rgb_no_depth = LaunchConfiguration('dual_rgb_no_depth').perform(context).lower() == 'true'
         rgb_source = LaunchConfiguration('rgb_source').perform(context)
         color_exposure = LaunchConfiguration('color_exposure').perform(context)
         color_wb = LaunchConfiguration('color_wb').perform(context)
@@ -87,6 +94,8 @@ def generate_launch_description():
             d405_flag = '--enable-d405s' if enable_d405s else '--disable-d405s'
             d435_flag = '--d435-rgb' if rgb_source == 'd435' else '--no-d435-rgb'
             cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag]
+            if dual_rgb_no_depth:
+                cmd += ['--dual-rgb-no-depth']
             # H264 is the streamer default again; every non-mjpeg profile passes
             # --h264 explicitly and the all-MJPEG profile opts in with --mjpeg.
             if rgb_source == 'oakd_lite_720p_mjpeg':
@@ -210,6 +219,7 @@ def generate_launch_description():
         base_port_arg,
         fps_arg,
         enable_d405s_arg,
+        dual_rgb_no_depth_arg,
         rgb_source_arg,
         use_h264_arg,
         oakd_video_port_arg,

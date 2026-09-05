@@ -17,11 +17,12 @@
 // Usage:
 //   realsense_udp_streamer <dest_ip> <base_port> [width=480] [height=270]
 //   [fps=30] [max_depth_m=1.0] [--enable-d405s|--disable-d405s]
-//   [--d435-rgb|--no-d435-rgb] [--color-exposure <microseconds>]
+//   [--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth]
+//   [--color-exposure <microseconds>]
 //
 // Port mapping (per camera index i, 0-based):
-//   depth -> base_port + i*2
-//   ir    -> base_port + i*2 + 1
+//   depth -> base_port + i*2   (unused when --dual-rgb-no-depth)
+//   ir    -> base_port + i*2 + 1   (RGB for both D405s under --dual-rgb-no-depth)
 //
 // Build: colcon build --packages-select ffw_stream
 
@@ -279,17 +280,21 @@ void stream_camera(const std::string &serial, int index,
                    const std::string &dest_ip, int depth_port, int ir_port,
                    int width, int height, int fps, float max_depth_m,
                    bool mjpeg = false, bool rgb_mode = false, int color_exposure_us = -1,
-                   int color_wb = -1) {
+                   int color_wb = -1, bool enable_depth = true) {
   std::ostringstream hdr;
-  hdr << "\n=== CAM" << index << " " << serial << " : depth->udp:" << depth_port
-      << "  " << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port
+  hdr << "\n=== CAM" << index << " " << serial << " : "
+      << (enable_depth ? ("depth->udp:" + std::to_string(depth_port) + "  ") : "depth=off  ")
+      << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port
       << "  gst=" << (mjpeg ? "mjpeg" : "h264") << " ===";
   log(hdr.str());
 
-  GstEncoder depth_enc = create_gst_stream(dest_ip, depth_port, width, height, fps, false, mjpeg);
+  GstEncoder depth_enc;
+  if (enable_depth) {
+    depth_enc = create_gst_stream(dest_ip, depth_port, width, height, fps, false, mjpeg);
+  }
   GstEncoder second_enc = create_gst_stream(dest_ip, ir_port, width, height, fps, rgb_mode, mjpeg);
 
-  if (!depth_enc.pipeline || !second_enc.pipeline) {
+  if ((enable_depth && !depth_enc.pipeline) || !second_enc.pipeline) {
     log("CAM" + std::to_string(index) +
         " : failed to create GStreamer pipeline(s)");
     if (depth_enc.pipeline)
@@ -303,7 +308,9 @@ void stream_camera(const std::string &serial, int index,
     rs2::pipeline pipe;
     rs2::config cfg;
     cfg.enable_device(serial);
-    cfg.enable_stream(RS2_STREAM_DEPTH, width, height, RS2_FORMAT_Z16, fps);
+    if (enable_depth) {
+      cfg.enable_stream(RS2_STREAM_DEPTH, width, height, RS2_FORMAT_Z16, fps);
+    }
     if (rgb_mode) {
       cfg.enable_stream(RS2_STREAM_COLOR, width, height, RS2_FORMAT_RGB8, fps);
     } else {
@@ -434,7 +441,7 @@ void stream_camera(const std::string &serial, int index,
       }
 
       rs2::depth_frame depth = frames.get_depth_frame();
-      if (!depth) continue;
+      if (enable_depth && !depth) continue;
 
       rs2::frame second_base;
       if (rgb_mode) {
@@ -454,16 +461,18 @@ void stream_camera(const std::string &serial, int index,
       frames_captured[cam_name]++;
 
       // Depth → 8-bit
-      const uint16_t *draw = reinterpret_cast<const uint16_t *>(depth.get_data());
-      int dstride = depth.get_stride_in_bytes() / 2;
-      for (int y = 0; y < height; ++y) {
-        const uint16_t *row = draw + y * dstride;
-        uint8_t *out_row = depth8.data() + y * width;
-        for (int x = 0; x < width; ++x) {
-          float meters = row[x] * depth_scale;
-          if (meters > max_depth_m) meters = max_depth_m;
-          if (meters < 0.0f) meters = 0.0f;
-          out_row[x] = static_cast<uint8_t>((meters / max_depth_m) * 255.0f + 0.5f);
+      if (enable_depth) {
+        const uint16_t *draw = reinterpret_cast<const uint16_t *>(depth.get_data());
+        int dstride = depth.get_stride_in_bytes() / 2;
+        for (int y = 0; y < height; ++y) {
+          const uint16_t *row = draw + y * dstride;
+          uint8_t *out_row = depth8.data() + y * width;
+          for (int x = 0; x < width; ++x) {
+            float meters = row[x] * depth_scale;
+            if (meters > max_depth_m) meters = max_depth_m;
+            if (meters < 0.0f) meters = 0.0f;
+            out_row[x] = static_cast<uint8_t>((meters / max_depth_m) * 255.0f + 0.5f);
+          }
         }
       }
 
@@ -485,7 +494,7 @@ void stream_camera(const std::string &serial, int index,
       }
 
       // Push frames into GStreamer pipelines
-      if (!gst_encoder_push_frame(depth_enc, depth8.data(), depth8.size())) {
+      if (enable_depth && !gst_encoder_push_frame(depth_enc, depth8.data(), depth8.size())) {
         log(cam_name + " : gst_encoder_push_frame(depth) failed, stopping");
         break;
       }
@@ -512,7 +521,8 @@ int main(int argc, char **argv) {
     std::cerr << "Usage: " << argv[0]
               << " <dest_ip> <base_port> [width=480] [height=270] [fps=30] "
                  "[max_depth_m=1.0] [--enable-d405s|--disable-d405s] "
-                 "[--d435-rgb|--no-d435-rgb] [--color-exposure <us>] "
+                 "[--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] "
+                 "[--color-exposure <us>] "
                  "[--color-wb <K>] [--h264|--mjpeg] (default H264)"
               << std::endl;
     return 1;
@@ -521,6 +531,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> positional_args;
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
+  bool dual_rgb_no_depth = false;  // profile: both D405s stream RGB, depth off
   bool mjpeg = false;          // default H264 (x264enc zerolatency); --mjpeg → jpegenc intra-only zero-latency
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   int color_wb = -1;           // -1 = leave SDK default white balance
@@ -534,6 +545,8 @@ int main(int argc, char **argv) {
       d435_rgb_enabled = true;
     } else if (arg == "--no-d435-rgb") {
       d435_rgb_enabled = false;
+    } else if (arg == "--dual-rgb-no-depth") {
+      dual_rgb_no_depth = true;
     } else if (arg == "--color-exposure") {
       if (i + 1 < argc) {
         color_exposure_us = std::atoi(argv[++i]);
@@ -612,6 +625,7 @@ int main(int argc, char **argv) {
       "  codec=" + std::string(mjpeg ? "mjpeg" : "h264") +
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
+      "  dual_rgb_no_depth=" + std::string(dual_rgb_no_depth ? "on" : "off") +
       "  color_exposure_us=" + std::to_string(color_exposure_us) +
       "  color_wb=" + std::to_string(color_wb));
 
@@ -628,11 +642,14 @@ int main(int argc, char **argv) {
     } else if (enable_d405s) {
       int depth_port = base_port + cam_idx * 2;
       int ir_port = depth_port + 1;
-      // Right D405 (cam_idx==1) streams RGB instead of IR at 480×270
-      bool rgb_mode = (cam_idx == 1);
+      // Right D405 (cam_idx==1) streams RGB instead of IR at 480×270; in
+      // dual_rgb_no_depth profile BOTH D405s stream RGB and depth is off.
+      bool rgb_mode = dual_rgb_no_depth || (cam_idx == 1);
+      bool enable_depth = !dual_rgb_no_depth;
       threads.emplace_back(stream_camera, serials[i], cam_idx,
                            dest_ip, depth_port, ir_port, width, height, fps,
-                           max_depth_m, mjpeg, rgb_mode, color_exposure_us, color_wb);
+                           max_depth_m, mjpeg, rgb_mode, color_exposure_us, color_wb,
+                           enable_depth);
       cam_idx++;
     }
   }
