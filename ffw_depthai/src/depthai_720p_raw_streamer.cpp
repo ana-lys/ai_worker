@@ -295,10 +295,6 @@ int main(int argc, char **argv) {
   int apriltag_pass_count = 0;
   double current_apriltag_fps = 0.0;
   auto last_apriltag_fps_time = std::chrono::steady_clock::now();
-  // Console log stays human-readable (~every 2s) even though detection and
-  // the /oakd/apriltag_telemetry publish both run at the full ~5 Hz rate.
-  constexpr double kConsoleLogPeriodS = 2.0;
-  auto last_console_log_time = std::chrono::steady_clock::now() - std::chrono::seconds(10);
 
   // ── Frame loop ───────────────────────────────────────────────────────────
   int frame_count = 0;
@@ -377,24 +373,16 @@ int main(int argc, char **argv) {
           for (uint32_t row = 0; row < dh; ++row) {
             memcpy(im->buf + row * im->stride, data.data() + row * dw, dw);
           }
+          // No console log here -- /oakd/apriltag_telemetry (published below)
+          // is the only output; the receiver subscribes and draws it on the
+          // dashboard overlay instead of this process spamming stdout.
           zarray_t *detections = apriltag_detector_detect(tag_detector, im);
           int n = zarray_size(detections);
           double margin_sum = 0.0;
-          std::ostringstream ids;
           for (int i = 0; i < n; ++i) {
             apriltag_detection_t *det;
             zarray_get(detections, i, &det);
             margin_sum += det->decision_margin;
-            ids << det->id << "(m=" << std::fixed << std::setprecision(1)
-                << det->decision_margin << ") ";
-          }
-          // Console print throttled separately from detection/publish rate --
-          // /oakd/apriltag_telemetry already carries the full-rate data for
-          // any programmatic consumer, so the human-readable log doesn't need
-          // to fire on every ~200ms pass too.
-          if (n > 0 && std::chrono::duration<double>(detect_now - last_console_log_time).count() >= kConsoleLogPeriodS) {
-            last_console_log_time = detect_now;
-            RCLCPP_INFO(node->get_logger(), "[AprilTag] %d tag(s): %s", n, ids.str().c_str());
           }
           double avg_margin = (n > 0) ? margin_sum / n : 0.0;
           apriltag_detections_destroy(detections);

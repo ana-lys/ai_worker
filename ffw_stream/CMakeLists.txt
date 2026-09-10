@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(realsense2 REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
@@ -47,7 +48,7 @@ target_include_directories(realsense_udp_receiver PUBLIC
   ${OpenCV_INCLUDE_DIRS}
 )
 target_compile_features(realsense_udp_receiver PUBLIC c_std_99 cxx_std_17)
-ament_target_dependencies(realsense_udp_receiver rclcpp sensor_msgs cv_bridge)
+ament_target_dependencies(realsense_udp_receiver rclcpp sensor_msgs std_msgs cv_bridge)
 target_link_libraries(realsense_udp_receiver ${OpenCV_LIBS})
 install(TARGETS realsense_udp_receiver
   DESTINATION lib/${PROJECT_NAME})

@@ -1,6 +1,7 @@
 #include <cv_bridge/cv_bridge.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <opencv2/opencv.hpp>
 
@@ -89,6 +90,16 @@ public:
     } else {
       RCLCPP_INFO(this->get_logger(), "Running in HEADLESS mode (No OpenCV Windows)");
     }
+
+    // AprilTag board-pose telemetry (depthai_720p_udp_streamer), drawn on the
+    // dashboard overlay the same way as the UDP-sourced telemetry strings --
+    // just another entry in latest_telemetry_, no separate rendering path.
+    apriltag_telemetry_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/oakd/apriltag_telemetry", 10,
+      [this](const std_msgs::msg::String::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(telemetry_mutex_);
+        latest_telemetry_["AprilTag"] = msg->data;
+      });
 
     int zed_port = base_port + 100;
     threads_.emplace_back(&RealsenseUDPReceiver::zedStreamLoop, this, zed_port);
@@ -753,6 +764,7 @@ private:
   std::mutex telemetry_mutex_;
   std::map<std::string, std::string> latest_telemetry_;
   std::map<std::string, std::string> last_oakd_latency_str_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr apriltag_telemetry_sub_;
 
   std::vector<std::thread> threads_;
   std::thread display_thread_;
