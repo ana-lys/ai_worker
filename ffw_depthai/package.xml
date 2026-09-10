@@ -12,6 +12,8 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>eigen</depend>
   <!-- depthai is managed internally as a submodule and built locally -->
   <depend>nlohmann-json-dev</depend>
   <depend>fmt</depend>

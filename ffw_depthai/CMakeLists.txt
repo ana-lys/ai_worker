@@ -37,6 +37,9 @@ pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0 gstreamer-v
 
 # ---------- AprilTag (board-pose detection tap, depthai_720p_udp_streamer) ----------
 find_package(apriltag REQUIRED)
+find_package(Eigen3 REQUIRED NO_MODULE)
+find_package(geometry_msgs REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core calib3d)
 
 # ── 1080p HW-encode streamer (fallback, unchanged) ─────────────────────────
 add_executable(depthai_udp_streamer src/depthai_node.cpp)
@@ -60,15 +63,18 @@ target_include_directories(depthai_720p_udp_streamer PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     ${GSTREAMER_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
 )
 target_compile_features(depthai_720p_udp_streamer PUBLIC cxx_std_17)
 
-ament_target_dependencies(depthai_720p_udp_streamer rclcpp sensor_msgs std_msgs)
+ament_target_dependencies(depthai_720p_udp_streamer rclcpp sensor_msgs std_msgs geometry_msgs)
 
 target_link_libraries(depthai_720p_udp_streamer
     depthai::core
     ${GSTREAMER_LIBRARIES}
     apriltag::apriltag
+    Eigen3::Eigen
+    ${OpenCV_LIBS}
 )
 
 # ── 720p on-device HW-encode streamer (new) ─────────────────────────────────

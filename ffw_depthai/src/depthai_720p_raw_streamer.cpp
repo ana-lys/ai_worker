@@ -30,6 +30,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <string>
 #include <memory>
 #include <mutex>
@@ -40,6 +42,13 @@
 #include <thread>
 #include <cstdlib>
 #include <algorithm>
+#include <array>
+#include <map>
+#include <vector>
+
+#include <opencv2/core.hpp>
+#include <opencv2/calib3d.hpp>
+#include <Eigen/Geometry>
 
 // apriltag.h / tag25h9.h already self-guard with extern "C" internally.
 #include <apriltag.h>
@@ -65,6 +74,85 @@ void printSystemInformation(const dai::SystemInformation &info, int sock,
      << info.ddrMemoryUsage.total / m << " MiB | "
      << "Temp: " << t.average << "C";
   sendUdpText(sock, addr, ss.str());
+}
+
+// ── AprilTag board layout (25h9, tags 1..32) ────────────────────────────────
+// Calibrated by ~/utilities_ws/src/apriltag_25h9_cpp's bundle_adjustment
+// tooling (config/board_layout_optimized.yaml + config/tags_25h9.yaml) --
+// same physical board this node detects (confirmed: tag IDs match). Board
+// frame origin/orientation = tag 1's pose (tag 1 has identity pose below);
+// every other tag's (x,y,z) + axis-angle rotation (rx,ry,rz) is relative to
+// that. Sizes are each tag's physical edge length in metres.
+struct BoardTag {
+  int id;
+  double size;
+  double x, y, z;
+  double rx, ry, rz;
+};
+
+static const BoardTag kBoardLayout[] = {
+  {1,  0.057,  0.0,                    0.0,                    0.0,
+       0.0,                    0.0,                    0.0},
+  {2,  0.057,  0.18355213452308197,   -0.0005495590273141514,  0.0,
+       0.003392793153333883,  -0.001652768831466606,   0.005596125526348661},
+  {3,  0.057, -0.002604290279393214,   0.18262499145172836,    0.0,
+       0.0022404711209055793, -0.0017038086815047686,  0.01313233381601511},
+  {4,  0.057, -0.1821974196064706,    -0.0016526647265309707,  0.0,
+      -0.0005940458783676034,  0.003384338795834879,   0.0077421718916435315},
+  {5,  0.041,  0.05777201673670586,   -0.19155240115435038,    0.0,
+       0.0024879033811299974, -0.0017303780467724601,  0.020033850859068666},
+  {7,  0.041, -0.0903143682118519,    -0.09851627871582525,    0.0,
+      -0.003121444688450445,   0.002343849457630141,  -0.009063486113326337},
+  {8,  0.041,  0.08846322550535259,   -0.09928499260033768,    0.0,
+      -0.0041147398871153335,  0.0019800553991998655,  0.010351065748505018},
+  {9,  0.041, -0.058080502405420564,  -0.19258298833310175,    0.0,
+      -0.0011850492009372472,  0.0012848023973317715,  0.000540310454424208},
+  {20, 0.015, -0.033553076106144185,  -0.2921062756094909,     0.025,
+      -0.0010910218728025943,  0.0030283245402257302,  0.00023589369988523032},
+  {25, 0.105, -0.17414292814679452,    0.16938160622453025,    0.0,
+      -0.002828623660624173,   0.001109427942824287,   0.01576257580464725},
+  {30, 0.015,  0.04296011055731651,   -0.29273904961469743,    0.025,
+      -0.008045401913811596,   0.01695414816661725,   -0.01750620945015386},
+  {31, 0.015, -0.0852440748546845,    -0.28330018814973335,    0.01,
+      -0.0344126233894834,    -0.015019776036531377,  -0.005325592433057143},
+  {32, 0.015,  0.09416774058800953,   -0.2862785785077211,     0.01,
+      -0.022274917428141635,  -0.013421948142595262,  -0.017686629412183158},
+};
+
+// Standard AprilTag object-frame corner order/winding -- matches
+// apriltag_detection_t::p[0..3] exactly (the same convention
+// apriltag_pose.c's own estimate_tag_pose() uses internally), so pairing
+// kBoardLayout-derived object points with det->p[] pixel points index-for-
+// index is a correct correspondence for solvePnP.
+static std::array<cv::Point3f, 4> tagLocalCorners(double size) {
+  float h = static_cast<float>(size / 2.0);
+  return {cv::Point3f(-h, -h, 0.0f), cv::Point3f(h, -h, 0.0f),
+          cv::Point3f(h, h, 0.0f), cv::Point3f(-h, h, 0.0f)};
+}
+
+// Rotates+translates each tag's local corners into the shared board frame.
+static std::map<int, std::array<cv::Point3f, 4>> buildBoardCorners() {
+  std::map<int, std::array<cv::Point3f, 4>> out;
+  for (const auto &t : kBoardLayout) {
+    Eigen::Vector3d aa(t.rx, t.ry, t.rz);
+    double angle = aa.norm();
+    Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+    if (angle > 1e-12) {
+      R = Eigen::AngleAxisd(angle, aa / angle).toRotationMatrix();
+    }
+    Eigen::Vector3d trans(t.x, t.y, t.z);
+    auto local = tagLocalCorners(t.size);
+    std::array<cv::Point3f, 4> board_pts;
+    for (int k = 0; k < 4; ++k) {
+      Eigen::Vector3d p(local[k].x, local[k].y, local[k].z);
+      Eigen::Vector3d pb = R * p + trans;
+      board_pts[k] = cv::Point3f(static_cast<float>(pb.x()),
+                                 static_cast<float>(pb.y()),
+                                 static_cast<float>(pb.z()));
+    }
+    out[t.id] = board_pts;
+  }
+  return out;
 }
 
 int main(int argc, char **argv) {
@@ -148,6 +236,26 @@ int main(int argc, char **argv) {
   // RELIABLE can't receive from a BEST_EFFORT publisher).
   auto telemetry_pub = node->create_publisher<std_msgs::msg::String>(
       "/oakd/apriltag_telemetry", rclcpp::QoS(1).best_effort());
+
+  // Marker board pose in base_link: T_baselink_board = T_baselink_camera *
+  // T_camera_board. T_camera_board comes from this node's own solvePnP
+  // (below); T_baselink_camera is head_camera_tf_bridge's already-resolved
+  // head_camera_frame -> base_link transform (FK + URDF mount offset), which
+  // this node just subscribes to and caches -- no TF listener needed here.
+  auto board_pose_pub = node->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "/oakd/marker_board_pose", rclcpp::QoS(1).best_effort());
+  geometry_msgs::msg::TransformStamped latest_cam_tf;
+  bool have_cam_tf = false;
+  auto cam_tf_sub = node->create_subscription<geometry_msgs::msg::TransformStamped>(
+      "/head_camera_tf", rclcpp::QoS(1).transient_local().reliable(),
+      [&](const geometry_msgs::msg::TransformStamped::SharedPtr msg) {
+        latest_cam_tf = *msg;
+        have_cam_tf = true;
+      });
+  const std::map<int, std::array<cv::Point3f, 4>> board_corners = buildBoardCorners();
+  cv::Mat pnp_rvec, pnp_tvec;
+  bool pnp_seeded = false;
+  constexpr double kCamTfMaxAgeS = 0.5;  // ignore a stale head_camera_tf
 
   // Build a CameraInfo for the given output size from the factory calibration.
   auto build_camera_info = [&](uint32_t w, uint32_t h) {
@@ -386,14 +494,84 @@ int main(int argc, char **argv) {
           zarray_t *detections = apriltag_detector_detect(tag_detector, im);
           int n = zarray_size(detections);
           double margin_sum = 0.0;
+          // Combined-corners bundle: every detected tag that's also in the
+          // board layout contributes its 4 corners to ONE solvePnP call
+          // below, rather than averaging independent per-tag poses.
+          std::vector<cv::Point3f> obj_pts;
+          std::vector<cv::Point2f> img_pts;
           for (int i = 0; i < n; ++i) {
             apriltag_detection_t *det;
             zarray_get(detections, i, &det);
             margin_sum += det->decision_margin;
+            auto it = board_corners.find(det->id);
+            if (it != board_corners.end()) {
+              for (int k = 0; k < 4; ++k) {
+                obj_pts.push_back(it->second[k]);
+                img_pts.push_back(cv::Point2f(static_cast<float>(det->p[k][0]),
+                                              static_cast<float>(det->p[k][1])));
+              }
+            }
           }
           double avg_margin = (n > 0) ? margin_sum / n : 0.0;
           apriltag_detections_destroy(detections);
           image_u8_destroy(im);
+
+          // Board pose: solve once over every matched tag's corners, seeded
+          // from the previous frame's pose (cheap: consecutive frames barely
+          // move), then compose with the cached head_camera->base_link
+          // transform to publish the board's pose in base_link.
+          if (obj_pts.size() >= 4 && camera_info) {
+            cv::Mat K = (cv::Mat_<double>(3, 3) <<
+              camera_info->k[0], camera_info->k[1], camera_info->k[2],
+              camera_info->k[3], camera_info->k[4], camera_info->k[5],
+              camera_info->k[6], camera_info->k[7], camera_info->k[8]);
+            cv::Mat D(1, static_cast<int>(camera_info->d.size()), CV_64F);
+            for (size_t i = 0; i < camera_info->d.size(); ++i) {
+              D.at<double>(0, static_cast<int>(i)) = camera_info->d[i];
+            }
+            bool pnp_ok = cv::solvePnP(obj_pts, img_pts, K, D, pnp_rvec, pnp_tvec,
+                                       pnp_seeded, cv::SOLVEPNP_ITERATIVE);
+            if (pnp_ok) {
+              pnp_seeded = true;
+              double cam_tf_age = have_cam_tf
+                  ? (node->now() - rclcpp::Time(latest_cam_tf.header.stamp)).seconds()
+                  : 1e9;
+              if (have_cam_tf && cam_tf_age <= kCamTfMaxAgeS) {
+                Eigen::Vector3d rv(pnp_rvec.at<double>(0), pnp_rvec.at<double>(1),
+                                   pnp_rvec.at<double>(2));
+                double ang = rv.norm();
+                Eigen::Matrix3d R_cam_board = Eigen::Matrix3d::Identity();
+                if (ang > 1e-12) {
+                  R_cam_board = Eigen::AngleAxisd(ang, rv / ang).toRotationMatrix();
+                }
+                Eigen::Vector3d t_cam_board(pnp_tvec.at<double>(0), pnp_tvec.at<double>(1),
+                                            pnp_tvec.at<double>(2));
+
+                const auto &ct = latest_cam_tf.transform;
+                Eigen::Quaterniond q_base_cam(ct.rotation.w, ct.rotation.x,
+                                              ct.rotation.y, ct.rotation.z);
+                Eigen::Matrix3d R_base_cam = q_base_cam.toRotationMatrix();
+                Eigen::Vector3d t_base_cam(ct.translation.x, ct.translation.y,
+                                           ct.translation.z);
+
+                Eigen::Matrix3d R_base_board = R_base_cam * R_cam_board;
+                Eigen::Vector3d t_base_board = R_base_cam * t_cam_board + t_base_cam;
+                Eigen::Quaterniond q_base_board(R_base_board);
+
+                geometry_msgs::msg::PoseStamped pose_msg;
+                pose_msg.header.stamp = node->now();
+                pose_msg.header.frame_id = "base_link";
+                pose_msg.pose.position.x = t_base_board.x();
+                pose_msg.pose.position.y = t_base_board.y();
+                pose_msg.pose.position.z = t_base_board.z();
+                pose_msg.pose.orientation.w = q_base_board.w();
+                pose_msg.pose.orientation.x = q_base_board.x();
+                pose_msg.pose.orientation.y = q_base_board.y();
+                pose_msg.pose.orientation.z = q_base_board.z();
+                board_pose_pub->publish(pose_msg);
+              }
+            }
+          }
 
           // Rolling apriltag_fps: passes/second over a 1s window.
           apriltag_pass_count++;
