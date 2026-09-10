@@ -125,25 +125,6 @@ int main(int argc, char **argv) {
                                       dai::ImgResizeMode::CROP,
                                       static_cast<float>(fps));
 
-  // ── AprilTag detection tap ────────────────────────────────────────────
-  // A second, independent output from the SAME Camera node -- fps is
-  // per-output on this SDK (requestOutput's fps arg), so this genuinely
-  // arrives at ~5 Hz from the hardware/ISP rather than us discarding 5/6 of
-  // a 30fps feed in software. GRAY8 direct from the ISP also skips a
-  // CPU-side NV12->gray conversion (apriltag wants 8-bit grayscale anyway).
-  // Fully decoupled from videoOut/videoEnc above: does not touch the
-  // existing H264/MJPEG streaming path at all.
-  //
-  // Slice 1 (this commit): log-only, proves the second-output tap and its
-  // own thread don't affect the streaming loop. AprilTag detection itself
-  // is wired in the next slice.
-  const float k_detect_fps = 5.0f;
-  auto *detectOut = cam->requestOutput({k_out_width, k_out_height},
-                                       dai::ImgFrame::Type::GRAY8,
-                                       dai::ImgResizeMode::CROP,
-                                       k_detect_fps);
-  auto detectQueue = detectOut->createOutputQueue(1, false);
-
   auto videoEnc = pipeline.create<dai::node::VideoEncoder>();
 
   // ── Encoder: MJPEG (intra-only) or H264 Baseline (no B-frames) ───────────
@@ -286,39 +267,6 @@ int main(int argc, char **argv) {
     }
   });
   cal_thread.detach();
-
-  // AprilTag detection thread (slice 1: log-only, see detectQueue above).
-  // Independent of the main streaming loop -- reading detectQueue here
-  // never blocks or is blocked by the videoQueue/GStreamer push loop below.
-  RCLCPP_INFO(node->get_logger(), "[AprilTag] detect thread starting, waiting for first frame...");
-  std::thread detect_thread([&]() {
-    int detect_frame_count = 0;
-    int last_w = 0, last_h = 0;
-    auto last_detect_report = std::chrono::steady_clock::now();
-    while (rclcpp::ok()) {
-      bool timed_out = false;
-      auto frame = detectQueue->get<dai::ImgFrame>(std::chrono::milliseconds(500), timed_out);
-      if (frame && !timed_out) {
-        detect_frame_count++;
-        last_w = frame->getWidth();
-        last_h = frame->getHeight();
-      }
-
-      // Report every ~5s regardless of whether any frame arrived, so a
-      // silent/broken tap is visible (frames=0) instead of producing no
-      // log output at all.
-      auto now = std::chrono::steady_clock::now();
-      double elapsed = std::chrono::duration<double>(now - last_detect_report).count();
-      if (elapsed >= 5.0) {
-        RCLCPP_INFO(node->get_logger(),
-                    "[AprilTag] detect tap: %dx%d frames=%d (%.1f fps)",
-                    last_w, last_h, detect_frame_count, detect_frame_count / elapsed);
-        detect_frame_count = 0;
-        last_detect_report = now;
-      }
-    }
-  });
-  detect_thread.detach();
 
   // ── GStreamer Pipeline ───────────────────────────────────────────────────
   // MJPEG zero-latency sender (codec=mjpeg):
