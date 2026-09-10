@@ -662,9 +662,12 @@ int main(int argc, char **argv) {
       }
       int depth_port = base_port + cam_idx * 2;
       int ir_port = depth_port + 1;
-      // Right D405 (cam_idx==1) streams RGB instead of IR at 480×270; in
-      // dual_rgb_no_depth profile BOTH D405s stream RGB and depth is off.
-      bool rgb_mode = dual_rgb_no_depth || (cam_idx == 1);
+      // Both D405s always stream RGB now (no more left=IR profile) -- at
+      // 15Hz, both-RGB+both-depth fits comfortably under the USB budget the
+      // old 30fps legacy default already used. dual_rgb_no_depth now purely
+      // toggles depth capture/transmission on/off; it no longer changes
+      // which cameras are RGB, since that's unconditional.
+      bool rgb_mode = true;
       bool enable_depth = !dual_rgb_no_depth;
       threads.emplace_back(stream_camera, serials[i], cam_idx,
                            dest_ip, depth_port, ir_port, width, height, fps,

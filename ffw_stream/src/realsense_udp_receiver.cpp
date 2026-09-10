@@ -122,9 +122,10 @@ public:
 
 private:
   void streamLoop(int cam_index, const std::string& type, int port, rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub) {
-    // Camera 1 (right D405) sends RGB on the "IR" port (base+3) instead of IR;
-    // in dual_rgb_no_depth mode BOTH D405s send RGB on their "IR" port.
-    bool is_rgb = (type == "IR") && (dual_rgb_no_depth_ || cam_index == 1);
+    // Both D405s always send RGB on their "IR" port now (no more left=IR
+    // profile) -- dual_rgb_no_depth_ only affects whether depth is opened at
+    // all (see the D405 setup block above), not which cameras are RGB.
+    bool is_rgb = (type == "IR");
 
     std::string pipeline;
     if (rs_codec_ == "mjpeg") {
@@ -649,9 +650,8 @@ private:
           cv::applyColorMap(depth, depth, custom_lut);
         }
 
-        // Camera 1's "IR" stream is RGB (both are, in dual_rgb_no_depth mode) —
-        // skip grayscale processing
-        bool cam_is_rgb = (i == 1 || dual_rgb_no_depth_);
+        // Both D405s are always RGB now — skip grayscale processing.
+        bool cam_is_rgb = true;
         if (cam_is_rgb) {
           // Already BGR from streamLoop, display as-is
         } else if (!ir.empty() && ir.channels() == 1) {

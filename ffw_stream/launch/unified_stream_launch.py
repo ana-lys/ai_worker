@@ -23,8 +23,8 @@ def generate_launch_description():
     dual_rgb_no_depth_arg = DeclareLaunchArgument(
         'dual_rgb_no_depth',
         default_value='false',
-        description='D405 profile 2: both hand cameras stream RGB (no IR), depth off. '
-                    'Default is profile 1 (left=IR, right=RGB, both=depth).'
+        description='Set true to disable depth capture/transmission on both D405s '
+                    '(both cameras are always RGB regardless of this flag).'
     )
     disable_left_d405_arg = DeclareLaunchArgument(
         'disable_left_d405',

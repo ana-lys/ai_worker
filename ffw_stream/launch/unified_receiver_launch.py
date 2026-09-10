@@ -15,14 +15,14 @@ def generate_launch_description():
         DeclareLaunchArgument('oakd_720p_video_port', default_value='9110',
                               description='OAK-D 720p stream video port (telemetry = +200)'),
         DeclareLaunchArgument('dual_rgb_no_depth', default_value='false',
-                              description='Match the sender D405 profile: both hand cameras are RGB, '
-                                          'depth ports not opened. Set true when receiving from a robot '
-                                          'streaming with this profile.'),
-        DeclareLaunchArgument('disable_left_d405', default_value='true',
+                              description='Match the sender D405 profile: depth ports not opened '
+                                          '(both D405s are always RGB regardless of this flag). Set '
+                                          'true when receiving from a sender with depth disabled.'),
+        DeclareLaunchArgument('disable_left_d405', default_value='false',
                               description='Match the sender D405 profile: the left D405 is not opened '
-                                          'at all. Default true -- matches sg2/sg2_smtm, the only sender '
-                                          'profiles this receiver currently talks to. Set false if '
-                                          'receiving from a sender that still has the left D405 enabled.'),
+                                          'at all. Default false -- matches sg2/sg2_smtm, which run both '
+                                          'D405s (RGB+depth, 15Hz). Set true if receiving from a sender '
+                                          'that has the left D405 disabled.'),
         # Unified receiver: auto-opens the known ports and displays whatever streams are present.
         Node(
             package='ffw_stream',

@@ -330,9 +330,9 @@ def generate_launch_description():
             'color_exposure': color_exposure,
             'color_wb': color_wb,
             'stream_to_server': stream_to_server,
-            # Left D405 disabled by default for sg2/sg2_smtm (bandwidth/USB
-            # experiment): right D405 (RGB+depth) and OAK-D head unaffected.
-            'disable_left_d405': 'true',
+            # Both D405s enabled: at 15Hz, both-RGB+both-depth (~19.4 MB/s)
+            # is comfortably under the old 30fps legacy default (~30.5 MB/s).
+            'disable_left_d405': 'false',
         }.items(),
         condition=IfCondition(launch_cameras)
     )
