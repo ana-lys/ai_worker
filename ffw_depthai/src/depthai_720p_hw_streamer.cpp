@@ -290,22 +290,29 @@ int main(int argc, char **argv) {
   // AprilTag detection thread (slice 1: log-only, see detectQueue above).
   // Independent of the main streaming loop -- reading detectQueue here
   // never blocks or is blocked by the videoQueue/GStreamer push loop below.
+  RCLCPP_INFO(node->get_logger(), "[AprilTag] detect thread starting, waiting for first frame...");
   std::thread detect_thread([&]() {
     int detect_frame_count = 0;
+    int last_w = 0, last_h = 0;
     auto last_detect_report = std::chrono::steady_clock::now();
     while (rclcpp::ok()) {
       bool timed_out = false;
       auto frame = detectQueue->get<dai::ImgFrame>(std::chrono::milliseconds(500), timed_out);
-      if (!frame || timed_out) continue;
-      detect_frame_count++;
+      if (frame && !timed_out) {
+        detect_frame_count++;
+        last_w = frame->getWidth();
+        last_h = frame->getHeight();
+      }
 
+      // Report every ~5s regardless of whether any frame arrived, so a
+      // silent/broken tap is visible (frames=0) instead of producing no
+      // log output at all.
       auto now = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(now - last_detect_report).count();
       if (elapsed >= 5.0) {
         RCLCPP_INFO(node->get_logger(),
                     "[AprilTag] detect tap: %dx%d frames=%d (%.1f fps)",
-                    frame->getWidth(), frame->getHeight(), detect_frame_count,
-                    detect_frame_count / elapsed);
+                    last_w, last_h, detect_frame_count, detect_frame_count / elapsed);
         detect_frame_count = 0;
         last_detect_report = now;
       }
