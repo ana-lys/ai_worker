@@ -413,6 +413,7 @@ int main(int argc, char **argv) {
   // Telemetry state shared between the 5s OAK-D fps report below and the
   // per-detection-pass /oakd/apriltag_telemetry publish.
   double current_oakd_fps = 0.0;
+  double last_reproj_px = -1.0;  // board-pose reprojection error, -1 = no pose yet
   int apriltag_pass_count = 0;
   double current_apriltag_fps = 0.0;
   auto last_apriltag_fps_time = std::chrono::steady_clock::now();
@@ -584,6 +585,21 @@ int main(int argc, char **argv) {
                 pnp_tvec = trial_tvec;
                 pnp_seeded = true;
               }
+
+              // Mean reprojection error of the accepted pose over all used
+              // corners -- self-consistency check (how well the solved pose
+              // actually explains where the tags were detected). Low (~1-3px)
+              // = the pose fits the image; high = something is wrong
+              // (bad board layout entry, wrong intrinsics, flipped solution).
+              if (pnp_seeded) {
+                std::vector<cv::Point2f> reproj;
+                cv::projectPoints(obj_pts, pnp_rvec, pnp_tvec, K, D, reproj);
+                double err_sum = 0.0;
+                for (size_t i = 0; i < reproj.size(); ++i) {
+                  err_sum += cv::norm(reproj[i] - img_pts[i]);
+                }
+                last_reproj_px = err_sum / reproj.size();
+              }
             }
             if (pnp_seeded) {
               Eigen::Vector3d rv(pnp_rvec.at<double>(0), pnp_rvec.at<double>(1),
@@ -656,7 +672,8 @@ int main(int argc, char **argv) {
           tel << "oakd_fps=" << std::fixed << std::setprecision(1) << current_oakd_fps
               << " apriltag_fps=" << std::fixed << std::setprecision(1) << current_apriltag_fps
               << " avg_margin=" << std::fixed << std::setprecision(1) << avg_margin
-              << " num_tags=" << n;
+              << " num_tags=" << n
+              << " reproj_px=" << std::fixed << std::setprecision(2) << last_reproj_px;
           telemetry_msg.data = tel.str();
           telemetry_pub->publish(telemetry_msg);
         }
