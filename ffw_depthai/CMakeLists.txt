@@ -98,4 +98,8 @@ install(TARGETS depthai_udp_streamer depthai_720p_udp_streamer depthai_720p_hw_s
     DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY ${DEPTHAI_INSTALL_DIR}/lib/ DESTINATION lib/)
 
+install(PROGRAMS
+    scripts/record_camera_calibration_check.py
+    DESTINATION lib/${PROJECT_NAME})
+
 ament_package()
