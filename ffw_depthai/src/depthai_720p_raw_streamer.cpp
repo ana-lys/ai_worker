@@ -529,10 +529,57 @@ int main(int argc, char **argv) {
             for (size_t i = 0; i < camera_info->d.size(); ++i) {
               D.at<double>(0, static_cast<int>(i)) = camera_info->d[i];
             }
-            bool pnp_ok = cv::solvePnP(obj_pts, img_pts, K, D, pnp_rvec, pnp_tvec,
+            // Solve into TRIAL variables, not pnp_rvec/pnp_tvec directly --
+            // solvePnP writes its result in-place, so seeding straight into
+            // the persisted vars would accept (and re-seed from) a bad
+            // solution before we ever get to check it. This is a real
+            // failure mode for a near-planar board: it has two geometrically
+            // plausible poses that fit the same 2D corners almost equally
+            // well (see apriltag_pose.h's own two-pose estimator), so the
+            // seeded ITERATIVE solve can occasionally flip to the other one
+            // frame-to-frame -- observed on real hardware as the pose
+            // flickering between two stable values with the camera static.
+            cv::Mat trial_rvec = pnp_rvec.clone();
+            cv::Mat trial_tvec = pnp_tvec.clone();
+            bool pnp_ok = cv::solvePnP(obj_pts, img_pts, K, D, trial_rvec, trial_tvec,
                                        pnp_seeded, cv::SOLVEPNP_ITERATIVE);
             if (pnp_ok) {
-              pnp_seeded = true;
+              // Reject-and-hold: if this solve jumped too far from the last
+              // ACCEPTED pose, it's almost certainly a flip/outlier, not real
+              // motion at 5Hz -- discard it and keep the old pnp_rvec/tvec as
+              // next frame's seed, so ITERATIVE gets pulled back toward the
+              // stable solution instead of the flip perpetuating itself.
+              constexpr double kMaxJumpDistM = 0.05;    // 5cm between ~200ms frames
+              constexpr double kMaxJumpAngleRad = 0.26; // ~15 deg
+              bool accept = true;
+              if (pnp_seeded) {
+                Eigen::Vector3d old_t(pnp_tvec.at<double>(0), pnp_tvec.at<double>(1),
+                                      pnp_tvec.at<double>(2));
+                Eigen::Vector3d new_t(trial_tvec.at<double>(0), trial_tvec.at<double>(1),
+                                      trial_tvec.at<double>(2));
+                Eigen::Vector3d old_rv(pnp_rvec.at<double>(0), pnp_rvec.at<double>(1),
+                                       pnp_rvec.at<double>(2));
+                Eigen::Vector3d new_rv(trial_rvec.at<double>(0), trial_rvec.at<double>(1),
+                                       trial_rvec.at<double>(2));
+                double old_ang = old_rv.norm(), new_ang = new_rv.norm();
+                Eigen::Matrix3d R_old = (old_ang > 1e-12)
+                    ? Eigen::AngleAxisd(old_ang, old_rv / old_ang).toRotationMatrix()
+                    : Eigen::Matrix3d::Identity();
+                Eigen::Matrix3d R_new = (new_ang > 1e-12)
+                    ? Eigen::AngleAxisd(new_ang, new_rv / new_ang).toRotationMatrix()
+                    : Eigen::Matrix3d::Identity();
+                double dangle = Eigen::AngleAxisd(R_new * R_old.transpose()).angle();
+                if ((new_t - old_t).norm() > kMaxJumpDistM || std::abs(dangle) > kMaxJumpAngleRad) {
+                  accept = false;
+                }
+              }
+              if (accept) {
+                pnp_rvec = trial_rvec;
+                pnp_tvec = trial_tvec;
+                pnp_seeded = true;
+              }
+            }
+            if (pnp_seeded) {
               double cam_tf_age = have_cam_tf
                   ? (node->now() - rclcpp::Time(latest_cam_tf.header.stamp)).seconds()
                   : 1e9;
