@@ -53,22 +53,6 @@ install(TARGETS realsense_udp_receiver
   DESTINATION lib/${PROJECT_NAME})
 
 # ────────────────────────────────────────────────────────────────
-# OAK-D AprilTag board-pose detector (all platforms)
-# Slice 1: capture-only skeleton (see src/oakd_apriltag_detector.cpp).
-# ────────────────────────────────────────────────────────────────
-add_executable(oakd_apriltag_detector src/oakd_apriltag_detector.cpp)
-target_include_directories(oakd_apriltag_detector PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  ${OpenCV_INCLUDE_DIRS}
-)
-target_compile_features(oakd_apriltag_detector PUBLIC c_std_99 cxx_std_17)
-ament_target_dependencies(oakd_apriltag_detector rclcpp)
-target_link_libraries(oakd_apriltag_detector ${OpenCV_LIBS})
-install(TARGETS oakd_apriltag_detector
-  DESTINATION lib/${PROJECT_NAME})
-
-# ────────────────────────────────────────────────────────────────
 # ZED streamer — aarch64 (Jetson) ONLY
 # Uses shared-library sandwich to bypass libnvargus linker bug
 # ────────────────────────────────────────────────────────────────
