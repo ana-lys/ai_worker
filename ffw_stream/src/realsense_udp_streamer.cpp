@@ -587,7 +587,7 @@ int main(int argc, char **argv) {
 
   int width = 480;
   int height = 270;
-  int fps = 30;
+  int fps = 15;  // revamp: everything 15Hz, no more 30Hz anywhere
   float max_depth_m = 1.0f;
 
   if (positional_args.size() > 2) width = std::atoi(positional_args[2].c_str());
@@ -597,7 +597,7 @@ int main(int argc, char **argv) {
 
   if (width == 0) width = 480;
   if (height == 0) height = 270;
-  if (fps == 0) fps = 30;
+  if (fps == 0) fps = 15;
   if (max_depth_m <= 0) max_depth_m = 1.0f;
 
   std::signal(SIGINT, on_sigint);
