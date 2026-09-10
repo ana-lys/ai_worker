@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
   }
 
   RCLCPP_INFO(node->get_logger(),
-              "USB Speed: %d  |  codec: host-CPU x264enc (veryfast/zerolatency) @ %d kbps | %dx%d@%d",
+              "USB Speed: %d  |  codec: host-CPU x264enc (ultrafast/zerolatency) @ %d kbps | %dx%d@%d",
               static_cast<int>(device->getUsbSpeed()), bitrate_kbps, k_out_width, k_out_height, fps);
 
   dai::Pipeline pipeline(device);
@@ -142,8 +142,12 @@ int main(int argc, char **argv) {
 
   // AprilTag + stream telemetry, single std_msgs/String, published once per
   // detection pass (~5 Hz): "oakd_fps=.. apriltag_fps=.. avg_margin=.. num_tags=.."
+  // Best-effort, depth 1: only the latest value ever matters, so no reason to
+  // pay RELIABLE's ACK/retry latency for a value that's superseded in ~200ms
+  // anyway -- matches the receiver's subscriber QoS below (must agree,
+  // RELIABLE can't receive from a BEST_EFFORT publisher).
   auto telemetry_pub = node->create_publisher<std_msgs::msg::String>(
-      "/oakd/apriltag_telemetry", 10);
+      "/oakd/apriltag_telemetry", rclcpp::QoS(1).best_effort());
 
   // Build a CameraInfo for the given output size from the factory calibration.
   auto build_camera_info = [&](uint32_t w, uint32_t h) {
@@ -243,8 +247,11 @@ int main(int argc, char **argv) {
 
   // ── GStreamer Pipeline (host-CPU x264) ───────────────────────────────────
   //   - videoconvert(NV12->I420) then x264enc, mirroring realsense_udp_streamer
-  //   - veryfast + zerolatency = still no B-frames / no lookahead (low latency),
-  //     but far better compression than ultrafast → the 20 Mbps budget is used
+  //   - ultrafast + zerolatency: lowest-latency x264 preset (matches the D405
+  //     encoder in realsense_udp_streamer.cpp). Was veryfast (better
+  //     compression at the same 20 Mbps budget, at the cost of a bit more
+  //     per-frame encode time) -- switched to prioritize latency; expect
+  //     slightly worse image quality at the same bitrate as the tradeoff.
   //   - config-interval=-1: h264parse resends SPS/PPS before every IDR →
   //     receiver can recover from late join / packet loss within one GOP
   //   - block=false: if the host encoder can't keep up, drop frames not stall
@@ -254,7 +261,7 @@ int main(int argc, char **argv) {
     ",height=" + std::to_string(k_out_height) + ",framerate=" +
     std::to_string(fps) + "/1\" ! "
     "videoconvert ! video/x-raw,format=I420 ! "
-    "x264enc speed-preset=veryfast tune=zerolatency bitrate=" +
+    "x264enc speed-preset=ultrafast tune=zerolatency bitrate=" +
     std::to_string(bitrate_kbps) + " key-int-max=" + std::to_string(fps) + " ! "
     "h264parse config-interval=-1 ! "
     "rtph264pay pt=96 ! "

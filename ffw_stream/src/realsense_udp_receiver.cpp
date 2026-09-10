@@ -95,7 +95,7 @@ public:
     // dashboard overlay the same way as the UDP-sourced telemetry strings --
     // just another entry in latest_telemetry_, no separate rendering path.
     apriltag_telemetry_sub_ = this->create_subscription<std_msgs::msg::String>(
-      "/oakd/apriltag_telemetry", 10,
+      "/oakd/apriltag_telemetry", rclcpp::QoS(1).best_effort(),
       [this](const std_msgs::msg::String::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(telemetry_mutex_);
         latest_telemetry_["AprilTag"] = msg->data;
@@ -151,7 +151,7 @@ private:
     } else {
       pipeline = "udpsrc port=" + std::to_string(port) +
         " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
-        "rtpjitterbuffer latency=10 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
+        "rtpjitterbuffer latency=5 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
     }
 
     std::string feed_name = "Cam" + std::to_string(cam_index) + "_" + type;
@@ -542,12 +542,12 @@ private:
       RCLCPP_INFO(this->get_logger(), "[%s] Using MJPEG receiver pipeline (no jitter buffer)", feed_name.c_str());
     } else {
       // Same low-latency H264 receiver as the fallback OAK-D feed:
-      //   - latency=20 on jitter buffer, decode ASAP
+      //   - latency=10 on jitter buffer, decode ASAP
       //   - queue leaky=downstream: if decode is slow, drop old frames not new ones
       pipeline = "udpsrc port=" + std::to_string(port) +
         " buffer-size=2147483647 "
         "caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
-        "rtpjitterbuffer latency=20 ! rtph264depay ! decodebin ! videoconvert ! "
+        "rtpjitterbuffer latency=10 ! rtph264depay ! decodebin ! videoconvert ! "
         "queue max-size-buffers=1 leaky=downstream ! "
         "appsink drop=true sync=false async=false max-buffers=1";
     }
