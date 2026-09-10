@@ -29,6 +29,7 @@
 #include <chrono>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <string>
 #include <memory>
 #include <mutex>
@@ -109,7 +110,8 @@ int main(int argc, char **argv) {
   cam->initialControl.setChromaDenoise(1);
 
   // RAW NV12 720p — no on-device VideoEncoder. The host encodes it.
-  auto *videoOut = cam->requestOutput({k_out_width, k_out_height}, dai::ImgFrame::Type::NV12);
+  auto *videoOut = cam->requestOutput({k_out_width, k_out_height}, dai::ImgFrame::Type::NV12,
+                                      dai::ImgResizeMode::CROP, static_cast<float>(fps));
 
   // Queue depth = 1, blocking = false → always drop oldest, never accumulate latency
   auto videoQueue = videoOut->createOutputQueue(1, false);
@@ -137,6 +139,11 @@ int main(int argc, char **argv) {
   std::mutex camera_info_mtx;
   auto camera_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
       "/oakd/camera_info", rclcpp::QoS(1).transient_local().reliable());
+
+  // AprilTag + stream telemetry, single std_msgs/String, published once per
+  // detection pass (~5 Hz): "oakd_fps=.. apriltag_fps=.. avg_margin=.. num_tags=.."
+  auto telemetry_pub = node->create_publisher<std_msgs::msg::String>(
+      "/oakd/apriltag_telemetry", 10);
 
   // Build a CameraInfo for the given output size from the factory calibration.
   auto build_camera_info = [&](uint32_t w, uint32_t h) {
@@ -271,20 +278,23 @@ int main(int argc, char **argv) {
 
   // ── AprilTag detector (25h9) ─────────────────────────────────────────────
   // Reuses the SAME raw frame the encoder gets below -- no second Camera
-  // output, no timing mismatch. Rate-limited to ~5 Hz by only running every
-  // Nth frame of whatever fps this loop actually runs at (>= 1 so it never
-  // divides by zero if fps < 5).
+  // output, no timing mismatch. Rate-limited to ~5 Hz via a wall-clock gate
+  // (see kDetectPeriodS below), not a frame-count modulo -- correct
+  // regardless of what the camera actually delivers vs the requested fps.
   apriltag_family_t *tag_family = tag25h9_create();
   apriltag_detector_t *tag_detector = apriltag_detector_create();
   apriltag_detector_add_family(tag_detector, tag_family);
-  // Wall-clock gate, not a frame-counter modulo: correct regardless of what
-  // the camera actually delivers vs the requested fps (a frame-count modulo
-  // silently runs faster than intended -- and floods this log -- if the
-  // camera's real rate doesn't match the fps argument).
   constexpr double kDetectPeriodS = 0.2;  // 5 Hz
   auto last_detect_time = std::chrono::steady_clock::now() - std::chrono::seconds(1);
   RCLCPP_INFO(node->get_logger(), "[AprilTag] 25h9 detector ready, ~%.1f Hz (wall-clock gated)",
               1.0 / kDetectPeriodS);
+
+  // Telemetry state shared between the 5s OAK-D fps report below and the
+  // per-detection-pass /oakd/apriltag_telemetry publish.
+  double current_oakd_fps = 0.0;
+  int apriltag_pass_count = 0;
+  double current_apriltag_fps = 0.0;
+  auto last_apriltag_fps_time = std::chrono::steady_clock::now();
 
   // ── Frame loop ───────────────────────────────────────────────────────────
   int frame_count = 0;
@@ -365,18 +375,39 @@ int main(int argc, char **argv) {
           }
           zarray_t *detections = apriltag_detector_detect(tag_detector, im);
           int n = zarray_size(detections);
+          double margin_sum = 0.0;
           if (n > 0) {
             std::ostringstream ids;
             for (int i = 0; i < n; ++i) {
               apriltag_detection_t *det;
               zarray_get(detections, i, &det);
+              margin_sum += det->decision_margin;
               ids << det->id << "(m=" << std::fixed << std::setprecision(1)
                   << det->decision_margin << ") ";
             }
             RCLCPP_INFO(node->get_logger(), "[AprilTag] %d tag(s): %s", n, ids.str().c_str());
           }
+          double avg_margin = (n > 0) ? margin_sum / n : 0.0;
           apriltag_detections_destroy(detections);
           image_u8_destroy(im);
+
+          // Rolling apriltag_fps: passes/second over a 1s window.
+          apriltag_pass_count++;
+          double fps_elapsed = std::chrono::duration<double>(detect_now - last_apriltag_fps_time).count();
+          if (fps_elapsed >= 1.0) {
+            current_apriltag_fps = apriltag_pass_count / fps_elapsed;
+            apriltag_pass_count = 0;
+            last_apriltag_fps_time = detect_now;
+          }
+
+          std_msgs::msg::String telemetry_msg;
+          std::ostringstream tel;
+          tel << "oakd_fps=" << std::fixed << std::setprecision(1) << current_oakd_fps
+              << " apriltag_fps=" << std::fixed << std::setprecision(1) << current_apriltag_fps
+              << " avg_margin=" << std::fixed << std::setprecision(1) << avg_margin
+              << " num_tags=" << n;
+          telemetry_msg.data = tel.str();
+          telemetry_pub->publish(telemetry_msg);
         }
       }
 
@@ -398,6 +429,7 @@ int main(int argc, char **argv) {
       if (elapsed >= 5.0) {
         int delta = frame_count - last_reported_count;
         double fps_val = delta / elapsed;
+        current_oakd_fps = fps_val;
         std::ostringstream ss;
         ss << "[OAK-720p] FPS: " << std::fixed << std::setprecision(1) << fps_val
            << " | Worst Delay: " << std::fixed << std::setprecision(1) << worst_delay_ms << " ms"

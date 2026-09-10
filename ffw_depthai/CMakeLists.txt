@@ -10,6 +10,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 # DepthAI (your custom install logic)
 set(DEPTHAI_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/depthai_install")
@@ -62,7 +63,7 @@ target_include_directories(depthai_720p_udp_streamer PUBLIC
 )
 target_compile_features(depthai_720p_udp_streamer PUBLIC cxx_std_17)
 
-ament_target_dependencies(depthai_720p_udp_streamer rclcpp sensor_msgs)
+ament_target_dependencies(depthai_720p_udp_streamer rclcpp sensor_msgs std_msgs)
 
 target_link_libraries(depthai_720p_udp_streamer
     depthai::core
