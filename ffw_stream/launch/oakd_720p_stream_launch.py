@@ -17,7 +17,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     dest_ip_arg = DeclareLaunchArgument('dest_ip', default_value='192.168.0.241')
     video_port_arg = DeclareLaunchArgument('video_port', default_value='9110')
-    fps_arg = DeclareLaunchArgument('fps', default_value='30')
+    fps_arg = DeclareLaunchArgument('fps', default_value='15')
     bitrate_arg = DeclareLaunchArgument(
         'bitrate_kbps',
         default_value='20000',

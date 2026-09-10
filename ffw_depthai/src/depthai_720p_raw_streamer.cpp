@@ -277,9 +277,14 @@ int main(int argc, char **argv) {
   apriltag_family_t *tag_family = tag25h9_create();
   apriltag_detector_t *tag_detector = apriltag_detector_create();
   apriltag_detector_add_family(tag_detector, tag_family);
-  const int detect_every_n = std::max(1, fps / 5);
-  RCLCPP_INFO(node->get_logger(), "[AprilTag] 25h9 detector ready, running every %d-th frame (~%.1f Hz of %d)",
-              detect_every_n, static_cast<double>(fps) / detect_every_n, fps);
+  // Wall-clock gate, not a frame-counter modulo: correct regardless of what
+  // the camera actually delivers vs the requested fps (a frame-count modulo
+  // silently runs faster than intended -- and floods this log -- if the
+  // camera's real rate doesn't match the fps argument).
+  constexpr double kDetectPeriodS = 0.2;  // 5 Hz
+  auto last_detect_time = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+  RCLCPP_INFO(node->get_logger(), "[AprilTag] 25h9 detector ready, ~%.1f Hz (wall-clock gated)",
+              1.0 / kDetectPeriodS);
 
   // ── Frame loop ───────────────────────────────────────────────────────────
   int frame_count = 0;
@@ -342,13 +347,15 @@ int main(int argc, char **argv) {
 
       frame_count++;
 
-      // ── AprilTag detection (~5 Hz, see detect_every_n above) ──────────────
+      // ── AprilTag detection (~5 Hz, wall-clock gated -- see above) ──────────
       // NV12's Y-plane (luma) is the first width*height bytes of the buffer
       // and IS an 8-bit grayscale image already -- no colorspace conversion
       // needed. Copied into apriltag's own aligned image_u8_t (required for
       // its internal SIMD code) rather than aliased, since `data` is about to
       // be handed to GStreamer above/below and must not be mutated.
-      if (frame_count % detect_every_n == 0) {
+      auto detect_now = std::chrono::steady_clock::now();
+      if (std::chrono::duration<double>(detect_now - last_detect_time).count() >= kDetectPeriodS) {
+        last_detect_time = detect_now;
         uint32_t dw = videoFrame->getWidth();
         uint32_t dh = videoFrame->getHeight();
         if (data.size() >= static_cast<size_t>(dw) * dh) {

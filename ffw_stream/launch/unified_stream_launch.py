@@ -14,7 +14,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     dest_ip_arg = DeclareLaunchArgument('dest_ip', default_value='192.168.0.241')
     base_port_arg = DeclareLaunchArgument('base_port', default_value='9000')
-    fps_arg = DeclareLaunchArgument('fps', default_value='30')
+    fps_arg = DeclareLaunchArgument('fps', default_value='15')
     enable_d405s_arg = DeclareLaunchArgument(
         'enable_d405s',
         default_value='true',
