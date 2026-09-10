@@ -34,6 +34,9 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
 
+# ---------- AprilTag (board-pose detection tap, depthai_720p_udp_streamer) ----------
+find_package(apriltag REQUIRED)
+
 # ── 1080p HW-encode streamer (fallback, unchanged) ─────────────────────────
 add_executable(depthai_udp_streamer src/depthai_node.cpp)
 target_include_directories(depthai_udp_streamer PUBLIC
@@ -64,6 +67,7 @@ ament_target_dependencies(depthai_720p_udp_streamer rclcpp sensor_msgs)
 target_link_libraries(depthai_720p_udp_streamer
     depthai::core
     ${GSTREAMER_LIBRARIES}
+    apriltag::apriltag
 )
 
 # ── 720p on-device HW-encode streamer (new) ─────────────────────────────────

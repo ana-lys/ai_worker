@@ -22,6 +22,7 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <cstdio>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -37,6 +38,11 @@
 #include <atomic>
 #include <thread>
 #include <cstdlib>
+#include <algorithm>
+
+// apriltag.h / tag25h9.h already self-guard with extern "C" internally.
+#include <apriltag.h>
+#include <tag25h9.h>
 
 void sendUdpText(int sock, const struct sockaddr_in &addr, const std::string &msg) {
   if (sock >= 0) {
@@ -67,7 +73,7 @@ int main(int argc, char **argv) {
   // ── Positional args (fall back to defaults if not supplied) ─────────────
   const std::string dest_ip   = (argc > 1) ? argv[1] : "192.168.0.241";
   const int  video_port       = (argc > 2) ? std::atoi(argv[2]) : 9110;
-  const int  fps              = (argc > 3) ? std::atoi(argv[3]) : 30;
+  const int  fps              = (argc > 3) ? std::atoi(argv[3]) : 15;
   const int  bitrate_kbps     = (argc > 4) ? std::atoi(argv[4]) : 20000;
   const int  telemetry_port   = video_port + 200;
 
@@ -263,6 +269,18 @@ int main(int argc, char **argv) {
   RCLCPP_INFO(node->get_logger(), "Streaming raw 720p -> host x264 over UDP to %s:%d, telemetry -> %s:%d",
               dest_ip.c_str(), video_port, dest_ip.c_str(), telemetry_port);
 
+  // ── AprilTag detector (25h9) ─────────────────────────────────────────────
+  // Reuses the SAME raw frame the encoder gets below -- no second Camera
+  // output, no timing mismatch. Rate-limited to ~5 Hz by only running every
+  // Nth frame of whatever fps this loop actually runs at (>= 1 so it never
+  // divides by zero if fps < 5).
+  apriltag_family_t *tag_family = tag25h9_create();
+  apriltag_detector_t *tag_detector = apriltag_detector_create();
+  apriltag_detector_add_family(tag_detector, tag_family);
+  const int detect_every_n = std::max(1, fps / 5);
+  RCLCPP_INFO(node->get_logger(), "[AprilTag] 25h9 detector ready, running every %d-th frame (~%.1f Hz of %d)",
+              detect_every_n, static_cast<double>(fps) / detect_every_n, fps);
+
   // ── Frame loop ───────────────────────────────────────────────────────────
   int frame_count = 0;
   int last_reported_count = 0;
@@ -324,6 +342,37 @@ int main(int argc, char **argv) {
 
       frame_count++;
 
+      // ── AprilTag detection (~5 Hz, see detect_every_n above) ──────────────
+      // NV12's Y-plane (luma) is the first width*height bytes of the buffer
+      // and IS an 8-bit grayscale image already -- no colorspace conversion
+      // needed. Copied into apriltag's own aligned image_u8_t (required for
+      // its internal SIMD code) rather than aliased, since `data` is about to
+      // be handed to GStreamer above/below and must not be mutated.
+      if (frame_count % detect_every_n == 0) {
+        uint32_t dw = videoFrame->getWidth();
+        uint32_t dh = videoFrame->getHeight();
+        if (data.size() >= static_cast<size_t>(dw) * dh) {
+          image_u8_t *im = image_u8_create(dw, dh);
+          for (uint32_t row = 0; row < dh; ++row) {
+            memcpy(im->buf + row * im->stride, data.data() + row * dw, dw);
+          }
+          zarray_t *detections = apriltag_detector_detect(tag_detector, im);
+          int n = zarray_size(detections);
+          if (n > 0) {
+            std::ostringstream ids;
+            for (int i = 0; i < n; ++i) {
+              apriltag_detection_t *det;
+              zarray_get(detections, i, &det);
+              ids << det->id << "(m=" << std::fixed << std::setprecision(1)
+                  << det->decision_margin << ") ";
+            }
+            RCLCPP_INFO(node->get_logger(), "[AprilTag] %d tag(s): %s", n, ids.str().c_str());
+          }
+          apriltag_detections_destroy(detections);
+          image_u8_destroy(im);
+        }
+      }
+
       // Sample sender host time for latency measurement (steady_clock, ms since boot)
       auto send_now = std::chrono::steady_clock::now();
       double send_host_ms = std::chrono::duration<double, std::milli>(
@@ -367,6 +416,8 @@ int main(int argc, char **argv) {
   gst_element_set_state(gst_pipeline, GST_STATE_NULL);
   gst_object_unref(appsrc);
   gst_object_unref(gst_pipeline);
+  apriltag_detector_destroy(tag_detector);
+  tag25h9_destroy(tag_family);
 
   rclcpp::shutdown();
   return 0;
