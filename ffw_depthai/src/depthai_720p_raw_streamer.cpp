@@ -244,6 +244,12 @@ int main(int argc, char **argv) {
   // this node just subscribes to and caches -- no TF listener needed here.
   auto board_pose_pub = node->create_publisher<geometry_msgs::msg::PoseStamped>(
       "/oakd/marker_board_pose", rclcpp::QoS(1).best_effort());
+  // Raw T_camera_board, pre-composition with /head_camera_tf -- lets this
+  // be compared directly against ~/utilities_ws's apriltag_25h9_cpp
+  // debug_board_node, which publishes the same quantity (camera-frame board
+  // pose) on /camera/pose when fed the same UDP frames.
+  auto board_pose_camera_pub = node->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "/oakd/marker_board_pose_camera_frame", rclcpp::QoS(1).best_effort());
   geometry_msgs::msg::TransformStamped latest_cam_tf;
   bool have_cam_tf = false;
   auto cam_tf_sub = node->create_subscription<geometry_msgs::msg::TransformStamped>(
@@ -580,20 +586,36 @@ int main(int argc, char **argv) {
               }
             }
             if (pnp_seeded) {
+              Eigen::Vector3d rv(pnp_rvec.at<double>(0), pnp_rvec.at<double>(1),
+                                 pnp_rvec.at<double>(2));
+              double ang = rv.norm();
+              Eigen::Matrix3d R_cam_board = Eigen::Matrix3d::Identity();
+              if (ang > 1e-12) {
+                R_cam_board = Eigen::AngleAxisd(ang, rv / ang).toRotationMatrix();
+              }
+              Eigen::Vector3d t_cam_board(pnp_tvec.at<double>(0), pnp_tvec.at<double>(1),
+                                          pnp_tvec.at<double>(2));
+              Eigen::Quaterniond q_cam_board(R_cam_board);
+
+              // Raw camera-frame pose -- published unconditionally (doesn't
+              // need /head_camera_tf at all), for direct comparison against
+              // ~/utilities_ws's debug_board_node /camera/pose output.
+              geometry_msgs::msg::PoseStamped cam_pose_msg;
+              cam_pose_msg.header.stamp = node->now();
+              cam_pose_msg.header.frame_id = "head_camera_frame";
+              cam_pose_msg.pose.position.x = t_cam_board.x();
+              cam_pose_msg.pose.position.y = t_cam_board.y();
+              cam_pose_msg.pose.position.z = t_cam_board.z();
+              cam_pose_msg.pose.orientation.w = q_cam_board.w();
+              cam_pose_msg.pose.orientation.x = q_cam_board.x();
+              cam_pose_msg.pose.orientation.y = q_cam_board.y();
+              cam_pose_msg.pose.orientation.z = q_cam_board.z();
+              board_pose_camera_pub->publish(cam_pose_msg);
+
               double cam_tf_age = have_cam_tf
                   ? (node->now() - rclcpp::Time(latest_cam_tf.header.stamp)).seconds()
                   : 1e9;
               if (have_cam_tf && cam_tf_age <= kCamTfMaxAgeS) {
-                Eigen::Vector3d rv(pnp_rvec.at<double>(0), pnp_rvec.at<double>(1),
-                                   pnp_rvec.at<double>(2));
-                double ang = rv.norm();
-                Eigen::Matrix3d R_cam_board = Eigen::Matrix3d::Identity();
-                if (ang > 1e-12) {
-                  R_cam_board = Eigen::AngleAxisd(ang, rv / ang).toRotationMatrix();
-                }
-                Eigen::Vector3d t_cam_board(pnp_tvec.at<double>(0), pnp_tvec.at<double>(1),
-                                            pnp_tvec.at<double>(2));
-
                 const auto &ct = latest_cam_tf.transform;
                 Eigen::Quaterniond q_base_cam(ct.rotation.w, ct.rotation.x,
                                               ct.rotation.y, ct.rotation.z);
