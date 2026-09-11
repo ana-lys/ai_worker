@@ -2847,22 +2847,25 @@ int main(int argc, char **argv) {
 
     ffw_ik::StepResult res;
     if (!rail_gs) {
-      // Idle sleep: once the target is truly converged and nothing new has
+      // Idle sleep: once the target is converged/stalled and nothing new has
       // arrived (target_moved above), skip the gradient step entirely and
       // hold the current qpos -- mirrors apply_rail_sync's own rail_dirty_
       // hold-on-stale-tick. A real EE command re-arms this; OverrideCmd
       // already drives its own cadence through the rail branch below.
-      // NOTE: a QP "stall" (res.stalled) does NOT count as settled. A stall
-      // can fire with real residual error still outstanding (e.g. butted
-      // against a collision/joint-limit CBF wall, or a temporary plateau);
-      // latching ee_settled on it put the solver to sleep on an unresolved
-      // error until the target moved again, which reads as "the arm just
-      // stopped." Sleeping only on genuine convergence means a stall keeps
-      // retrying every tick instead of silently sitting on a leftover error.
+      // res.stalled DOES count as settled: an earlier attempt to exclude it
+      // (only sleep on res.converged/early_converged) regressed normal
+      // teleop -- the hard tolerance check (solveStep's `error < cfg.tolerance`)
+      // is a tight bound that a damped/regularized gradient step approaches
+      // asymptotically, so ordinary tracking routinely stalls (rate below
+      // ee_improvement_rate) well before crossing it. Without stalled counting
+      // as settled, every release of the input made the arm visibly creep
+      // toward the target for several seconds (chasing the last few mm) before
+      // finally sleeping. res.stalled is exactly the "close enough, no more
+      // useful progress" signal that keeps that tail short, same as before.
       if (!ee_settled || node->is_solving_to_home()) {
         res = solver.solveStep(d, current_target_l, current_target_r, active_cfg,
                                col_cfg, err_hist, dist_hist);
-        ee_settled = res.converged || res.early_converged;
+        ee_settled = res.converged || res.early_converged || res.stalled;
         if (node->ee_sleep_debug() && ee_settled && !ee_settled_before_check) {
           RCLCPP_INFO(node->get_logger(),
             "[EE_SLEEP] sleep: converged=%d early=%d stalled=%d err=%.4f",
