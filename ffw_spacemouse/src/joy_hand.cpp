@@ -510,19 +510,6 @@ private:
     double yaw_min {0}, yaw_max {0};
   };
 
-  // True when all mapped SpaceMouse axes are near neutral — gates the drift
-  // re-base so we never yank the goal out from under an active input (§11).
-  bool spacemouse_idle(const sensor_msgs::msg::Joy &joy) {
-    for (const std::string axis : {"axis_x", "axis_y", "axis_z",
-                                   "axis_roll", "axis_pitch", "axis_yaw"}) {
-      int idx = this->get_parameter(axis).as_int();
-      if (idx >= 0 && idx < static_cast<int>(joy.axes.size()) &&
-          std::abs(joy.axes[idx]) > 0.01)
-        return false;
-    }
-    return true;
-  }
-
   void apply_ee_locks() {
     // Clamp locked roll/yaw/pitch axes within slack of their locked centers
     if (!soft_lock_ee_roll_ && !soft_lock_ee_yaw_ && !soft_lock_ee_pitch_)

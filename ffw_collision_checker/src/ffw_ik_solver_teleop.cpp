@@ -431,6 +431,10 @@ public:
     this->declare_parameter<bool>("collision_debug", true);
     // §10 slow->fast debug: print target_l/achieved/error each 0.2s during quest
     this->declare_parameter<bool>("quest_debug_solver", false);
+    // Idle-sleep debug: log ee_settled wake/sleep transitions and the
+    // raw-vs-leashed target_l_/r_ gap at the moment solveStep resumes, so a
+    // delay-then-jump report can be confirmed against this mechanism.
+    this->declare_parameter<bool>("ee_sleep_debug", false);
 
     this->declare_parameter<std::string>("robot_model", "bg2");
     robot_model_ = this->get_parameter("robot_model").as_string();
@@ -454,6 +458,7 @@ public:
     lift_enabled_ = true;
     collision_debug_ = true;
     quest_debug_solver_ = this->get_parameter("quest_debug_solver").as_bool();
+    ee_sleep_debug_ = this->get_parameter("ee_sleep_debug").as_bool();
 
     parameter_callback_handle_ = this->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> &parameters) {
@@ -2262,6 +2267,7 @@ private:
   bool lift_enabled_ = true;
   bool collision_debug_ = true;
   bool quest_debug_solver_ = false;
+  bool ee_sleep_debug_ = false;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
   std::vector<std::string> frozen_joints_{"head"};
@@ -2349,6 +2355,7 @@ private:
 public:
   bool is_hardware_mode() const { return hardware_mode_; }
   bool quest_debug_solver() const { return quest_debug_solver_; }
+  bool ee_sleep_debug() const { return ee_sleep_debug_; }
   bool is_sync_requested() const { return hardware_sync_requested_; }
   const std::string &get_robot_model() const { return robot_model_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
@@ -2711,6 +2718,12 @@ int main(int argc, char **argv) {
   // converged/stalled and nothing new has arrived since -- the gradient step
   // is skipped entirely rather than re-chasing an already-met goal.
   bool ee_settled = false;
+  // Last tick's achieved EE pose (map frame). clip_target() leashes
+  // target_l_/r_ against THIS -- captured before solveStep runs -- instead of
+  // against this tick's achieved pose after solveStep runs. See the clip call
+  // below for why the ordering matters.
+  Eigen::Isometry3d prev_achieved_l = init_l;
+  Eigen::Isometry3d prev_achieved_r = init_r;
 
   while (viewer.enabled() && rclcpp::ok()) {
     // Rail mode owns the tick: read once, gate everything below on it.
@@ -2771,6 +2784,21 @@ int main(int argc, char **argv) {
     // A real /joint_states-driven head snap must not fight the rail.
     if (!rail_gs) node->apply_continuous_head_sync(m, d);
 
+    // Leash target_l_/r_ against LAST tick's achieved pose BEFORE reading it
+    // for target_moved / solveStep below. This used to run only at the end of
+    // the loop (after solveStep) -- but target_l_/r_ is also written
+    // asynchronously by the ROS spin thread's mapper callbacks
+    // (update_goal_delta_l/r), which restamp it with the raw, un-leashed
+    // mapper goal on every incoming pose, even at rest. With the leash only
+    // applied after the fact, a target_l_/r_ read at the top of the loop
+    // could still be that raw value -- so the very first solveStep() call
+    // after an idle-sleep wake (see ee_settled below) could chase an
+    // un-leashed target directly, producing one oversized step before the
+    // leash caught up again on the next tick (a visible jump after the
+    // "asleep" delay). Clipping here first means current_target_l/r, and
+    // therefore every solveStep() call, always sees an already-bounded goal.
+    node->clip_target(prev_achieved_l, prev_achieved_r);
+
     Eigen::Isometry3d current_target_l, current_target_r;
     node->get_targets(current_target_l, current_target_r);
 
@@ -2790,9 +2818,22 @@ int main(int argc, char **argv) {
       Eigen::AngleAxisd aa(a.rotation() * b.rotation().transpose());
       return std::abs(aa.angle()) > kRotEps;
     };
-    if (target_moved(current_target_l, prev_target_l) ||
-        target_moved(current_target_r, prev_target_r)) {
+    // Snapshot pre-wake state for the ee_sleep_debug log below: was the
+    // solver asleep going into this tick, and did this tick's target
+    // actually cross the wake threshold (vs. is_solving_to_home forcing a
+    // solve regardless)?
+    bool ee_settled_before_check = ee_settled;
+    bool woke_this_tick = target_moved(current_target_l, prev_target_l) ||
+                          target_moved(current_target_r, prev_target_r);
+    if (woke_this_tick) {
       ee_settled = false;
+    }
+    if (node->ee_sleep_debug() && ee_settled_before_check && woke_this_tick) {
+      RCLCPP_INFO(node->get_logger(),
+        "[EE_SLEEP] wake: |dL|=%.4fm |dR|=%.4fm (leashed target crossed the "
+        "1mm/0.29deg wake threshold)",
+        (current_target_l.translation() - prev_target_l.translation()).norm(),
+        (current_target_r.translation() - prev_target_r.translation()).norm());
     }
     prev_target_l = current_target_l;
     prev_target_r = current_target_r;
@@ -2806,15 +2847,27 @@ int main(int argc, char **argv) {
 
     ffw_ik::StepResult res;
     if (!rail_gs) {
-      // Idle sleep: once the target is converged/stalled and nothing new has
+      // Idle sleep: once the target is truly converged and nothing new has
       // arrived (target_moved above), skip the gradient step entirely and
       // hold the current qpos -- mirrors apply_rail_sync's own rail_dirty_
       // hold-on-stale-tick. A real EE command re-arms this; OverrideCmd
       // already drives its own cadence through the rail branch below.
+      // NOTE: a QP "stall" (res.stalled) does NOT count as settled. A stall
+      // can fire with real residual error still outstanding (e.g. butted
+      // against a collision/joint-limit CBF wall, or a temporary plateau);
+      // latching ee_settled on it put the solver to sleep on an unresolved
+      // error until the target moved again, which reads as "the arm just
+      // stopped." Sleeping only on genuine convergence means a stall keeps
+      // retrying every tick instead of silently sitting on a leftover error.
       if (!ee_settled || node->is_solving_to_home()) {
         res = solver.solveStep(d, current_target_l, current_target_r, active_cfg,
                                col_cfg, err_hist, dist_hist);
-        ee_settled = res.converged || res.early_converged || res.stalled;
+        ee_settled = res.converged || res.early_converged;
+        if (node->ee_sleep_debug() && ee_settled && !ee_settled_before_check) {
+          RCLCPP_INFO(node->get_logger(),
+            "[EE_SLEEP] sleep: converged=%d early=%d stalled=%d err=%.4f",
+            res.converged, res.early_converged, res.stalled, res.error);
+        }
       } else {
         solver.computeContacts(d, active_cfg.topk_contacts, res.contacts);
         res.min_dist = res.contacts.closest.empty() ? 0.30 : res.contacts.closest.front().dist;
@@ -3029,10 +3082,13 @@ int main(int argc, char **argv) {
     node->publish_real_ee_error(real_err_l, real_err_r,
                                 real_seen && valid_real_l,
                                 real_seen && valid_real_r);
-    node->clip_target(achieved_l, achieved_r);
 
-    // Update target variables so the viewer spheres reflect the clipped target
-    node->get_targets(current_target_l, current_target_r);
+    // Carry this tick's achieved pose forward: the NEXT iteration's
+    // clip_target() call (top of the loop, before solveStep) leashes against
+    // it. current_target_l/r above already reflects the leash applied at the
+    // top of THIS iteration, so no re-fetch is needed here for the viewer.
+    prev_achieved_l = achieved_l;
+    prev_achieved_r = achieved_r;
 
     viewer.setGoalPose(current_target_l, current_target_r,
                        solver_cfg.track_orientation);
