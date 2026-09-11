@@ -112,8 +112,8 @@
          <origin xyz="0.0238122 -0.00651797 -0.0242094" rpy="0 0 0" />
       </joint>
 
-      <!-- The OAK-D replacing the ZED in the same physical mount bracket:
-           this is the ORIGINAL, uncorrected mount offset (what the
+      <!-- The OAK-D replaces the ZED in the same physical mount bracket.
+           This is the ORIGINAL, uncorrected mount offset (what the
            head_camera_frame static_transform_publisher used before it was
            calibrated). head_camera_frame itself stays a runtime
            static_transform_publisher child of camera_calibration_link (see
