@@ -521,6 +521,7 @@ int main(int argc, char **argv) {
             }
           }
           double avg_margin = (n > 0) ? margin_sum / n : 0.0;
+          size_t used_tags = obj_pts.size() / 4;  // tags actually matched to the board layout
           apriltag_detections_destroy(detections);
           image_u8_destroy(im);
 
@@ -644,7 +645,16 @@ int main(int argc, char **argv) {
                 last_reproj_px = err_sum / reproj.size();
               }
             }
-            if (pnp_seeded) {
+            // Only publish when THIS frame itself has enough matched tags --
+            // a marginal (1-2 tag) detection is exactly the regime where PnP
+            // is prone to the near-planar flip ambiguity, and publishing a
+            // pose derived from (or merely held over from) a weak frame is
+            // worse than publishing nothing. This is independent of
+            // pnp_seeded/the jump gate above, which exist to keep the solver
+            // itself warm across weak frames -- they still run on <3-tag
+            // frames, but the result is simply never published.
+            constexpr size_t kMinTagsToPublish = 3;
+            if (pnp_seeded && used_tags >= kMinTagsToPublish) {
               Eigen::Vector3d rv(pnp_rvec.at<double>(0), pnp_rvec.at<double>(1),
                                  pnp_rvec.at<double>(2));
               double ang = rv.norm();
