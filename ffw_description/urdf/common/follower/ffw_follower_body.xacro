@@ -112,6 +112,22 @@
          <origin xyz="0.0238122 -0.00651797 -0.0242094" rpy="0 0 0" />
       </joint>
 
+      <!-- The OAK-D replacing the ZED in the same physical mount bracket:
+           this is the ORIGINAL, uncorrected mount offset (what the
+           head_camera_frame static_transform_publisher used before it was
+           calibrated). head_camera_frame itself stays a runtime
+           static_transform_publisher child of camera_calibration_link (see
+           ffw_bringup's *_follower_ai_stream launch files) rather than a
+           URDF link, so it is not double parented, but the small measured
+           correction now lives there as an explicit, named offset instead of
+           being folded invisibly into that node's arguments. -->
+      <link name="camera_calibration_link" />
+      <joint name="camera_calibration_joint" type="fixed">
+         <parent link="zedm_left_camera_optical_frame"/>
+         <child link="camera_calibration_link"/>
+         <origin xyz="0.0315 0 0" rpy="0 0 0" />
+      </joint>
+
       <joint name="${prefix}arm_l_joint1" type="revolute">
          <parent link="${prefix}arm_base_link" />
          <child link="${prefix}arm_l_link1" />

@@ -350,19 +350,23 @@ def generate_launch_description():
                                    condition=UnlessCondition(init_position))
 
     # The OAK-D head camera sits at the center of the ZED-M module, i.e. the
-    # midpoint of the left/right optical frames. Both optical x-axes point along
-    # the 63 mm stereo baseline, so that midpoint is the ZED left optical frame
-    # shifted +31.5 mm in x (half the baseline). Keeping it optical-to-optical
-    # means no rotation math.
-    # Identity rotation assumes the OAK-D board's optical axes point the same
-    # way as the ZED's; add --roll/--pitch/--yaw if the board is rotated in the
-    # mount. Detection-frame standoff/approach details go in the grab planner.
+    # midpoint of the left/right optical frames -- that nominal mount offset
+    # (ZED left optical frame shifted +31.5 mm in x, identity rotation) now
+    # lives in the URDF as camera_calibration_link (see
+    # ffw_follower_body.xacro's zedm block). This transform is the small
+    # residual correction on top of that, solved from an AprilTag-board
+    # head-sweep calibration (least-squares over ~140 samples spanning
+    # head_joint1/2, condition number ~10, residual RMS ~0.2cm after
+    # outlier removal) -- re-run
+    # ffw_depthai/scripts/sweep_and_solve_camera_calibration.py to redo it if
+    # the board or camera mount ever changes.
     oakd_cam_static_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        arguments=['--frame-id', 'zedm_left_camera_optical_frame',
+        arguments=['--frame-id', 'camera_calibration_link',
                    '--child-frame-id', 'head_camera_frame',
-                   '--x', '0.0315'],
+                   '--x', '-0.006335', '--y', '-0.007832', '--z', '0.016026',
+                   '--roll', '0.013260', '--pitch', '-0.001668', '--yaw', '0.006747'],
         output='screen',
         condition=IfCondition(launch_cameras),
     )
