@@ -4,10 +4,12 @@ Runs on the machine attached to the robot. Bridges two worlds:
 
   ZMQ side (same HIL link as robot_node, so they are mutually exclusive):
     PUB tcp://*:STATE_PORT   -- Obs (current dual EE poses + grippers + joints)
-    PUB tcp://*:PRIV_PORT    -- Priv (head-cam tf + per-tick spacemouse deltas)
+    PUB tcp://*:PRIV_PORT    -- Priv (head-cam tf + per-tick spacemouse deltas
+                                 + the solver's current goal_source mode)
     PUB tcp://*:RECORD_PORT  -- Record (left A/X + B/Y button event, on change)
     SUB tcp://*:CONTROL_PORT -- ControlCmd (EE command) + OverrideCmd
-                                 (joint-space command) from the controller
+                                 (joint-space command) + SetMode (goal_source
+                                 switch) from the controller
 
   ROS side (spacemouse teleop stack):
     sub /ik_solver/achieved_ee_pose_{r,l}  -- current achieved EE poses (map frame)
@@ -20,6 +22,13 @@ Runs on the machine attached to the robot. Bridges two worlds:
     sub /quest/left/control_override      -- left-controller override (see
                                              ffw_spacemouse_msgs/LeftControlOverride);
                                              only .record is relayed, on RECORD_PORT
+    pub /teleop_goal_source               -- SetMode relay: switches the solver's
+                                             goal_source ("ee"|"rail"|"rail_free")
+    sub /teleop_goal_source_state         -- the solver's ACTUAL current
+                                             goal_source, echoed on every
+                                             transition -> the Priv GoalSourceState
+                                             field (ground truth, not just what
+                                             this gateway last sent)
 
 ee0 <-> right arm, ee1 <-> left arm (see protocol.py).
 
@@ -79,6 +88,22 @@ and forwards every other joint (arms, grippers, head, lift) by name. The old
 /control_override Bool latch and its joy_hand force-TRACK coupling are
 retired.
 
+SetMode (MSG_SET_MODE, protocol.py): switches the solver between EE-space
+teleop and the joint-space rail -- the message that was previously missing
+for a controller to flip goal_source over the link at all (before this, it
+only worked via `ros2 param set` or a manual /teleop_goal_source publish).
+Unlike ControlCmd/OverrideCmd it is NOT a continuous re-asserted stream: it
+is decoded on the ZMQ recv thread and staged in _pending_mode, then _tick
+(the ROS executor thread -- rclpy publishers must be driven from there, not
+an arbitrary thread) publishes it once to /teleop_goal_source and clears the
+stage, so exactly one SetMode frame in produces exactly one publish out. The
+solver's own goal_source_sub_ handles everything else (re-basing/re-sync on
+the transition), unchanged. The reverse direction -- the solver's ACTUAL
+current mode, which can also change via a manual param set -- is subscribed
+on /teleop_goal_source_state and relayed into every Priv frame's mode field,
+so a controller can tell "what did I last ask for" (nothing on the wire; it
+already knows) from "what is actually active right now" (Priv.mode).
+
 Loop integrity: this gateway is the only process that sees BOTH the Obs it
 sends out (the joint block on STATE_PORT) and the OverrideCmd it receives back
 (CONTROL_PORT), so "did what came back match what we sent" is answerable only
@@ -132,6 +157,7 @@ from geometry_msgs.msg import TransformStamped
 from geometry_msgs.msg import TwistStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32
+from std_msgs.msg import String
 from ffw_spacemouse_msgs.msg import LeftControlOverride
 
 import zmq
@@ -167,6 +193,16 @@ _CAM_TF_TOPIC = "/head_camera_tf"
 _JOINT_STATES_TOPIC = "/joint_states"
 # OverrideCmd -> the IK solver's qpos rail (ffw_ik_solver_teleop, mode B).
 _RAIL_TOPIC = "/qpos_rail"
+# SetMode (MSG_SET_MODE) -> this input topic: switches the solver's
+# goal_source (ffw_ik_solver_teleop's goal_source_sub_). String, one of
+# "ee" | "rail" | "rail_free".
+_GOAL_SOURCE_TOPIC = "/teleop_goal_source"
+# The solver's ACTUAL current goal_source, echoed back on every transition
+# (publish_goal_source_state() in ffw_ik_solver_teleop) -- relayed into the
+# Priv GoalSourceState field so a controller can observe ground truth rather
+# than just what this gateway last commanded (another client, or a manual
+# `ros2 param set goal_source`, can also change it).
+_GOAL_SOURCE_STATE_TOPIC = "/teleop_goal_source_state"
 # Left Meta Quest controller override (quest_to_ros2.py): only .record is
 # relayed here, as a Record event on RECORD_PORT (see protocol.py).
 _LEFT_CTRL_TOPIC = "/quest/left/control_override"
@@ -290,6 +326,18 @@ class GatewayNode(Node):
         # this is the last value actually relayed, not a per-tick snapshot.
         self._last_record = 0
 
+        # goal_source mode: _goal_source_mode is the solver's ACTUAL current
+        # mode (GOAL_SOURCE_* int), updated by _on_goal_source_state (ROS
+        # executor thread) and read every _tick for the Priv frame -- ground
+        # truth, not an echo of what this gateway last sent. _pending_mode is
+        # the opposite direction: a SetMode frame decoded on the ZMQ recv
+        # thread stages its desired mode string here; only _tick (executor
+        # thread) actually calls publish(), same "recv thread writes, executor
+        # thread acts" split as _cmd/_override_cmd above -- rclpy publishers
+        # are not meant to be driven from an arbitrary non-executor thread.
+        self._goal_source_mode = proto.GOAL_SOURCE_EE
+        self._pending_mode = None
+
         # ZMQ: Obs out (PUB on STATE), Priv out (PUB on PRIV), control in (SUB
         # on CONTROL). No ZMQ_CONFLATE: each PUB carries one message type per
         # tick at full rate and the tf-batch consumers must be able to drain
@@ -323,6 +371,10 @@ class GatewayNode(Node):
         self.create_subscription(
             LeftControlOverride, _LEFT_CTRL_TOPIC, self._on_left_ctrl, 10
         )
+        self.create_subscription(
+            String, _GOAL_SOURCE_STATE_TOPIC, self._on_goal_source_state, 10
+        )
+        self._goal_source_pub = self.create_publisher(String, _GOAL_SOURCE_TOPIC, 10)
         self._quest_pubs = {
             i: self.create_publisher(PoseStamped, topic, 10)
             for i, topic in _CMD_TOPIC.items()
@@ -340,10 +392,11 @@ class GatewayNode(Node):
         period = 1.0 / hz
         self.create_timer(period, self._tick)
         self.get_logger().info(
-            f"gateway: Obs-> {state_port}, Priv-> {priv_port}, "
+            f"gateway: Obs-> {state_port}, Priv-> {priv_port} (mode<- "
+            f"{_GOAL_SOURCE_STATE_TOPIC}), "
             f"Record-> {record_port} (PUB), "
-            f"ControlCmd/OverrideCmd<- {control_port} (SUB) -> "
-            f"{_RAIL_TOPIC} (rail), {hz:.0f} Hz, "
+            f"ControlCmd/OverrideCmd/SetMode<- {control_port} (SUB) -> "
+            f"{_RAIL_TOPIC} (rail) / {_GOAL_SOURCE_TOPIC} (mode), {hz:.0f} Hz, "
             f"cmd timeout {self._cmd_timeout:.1f} s"
         )
 
@@ -377,6 +430,17 @@ class GatewayNode(Node):
                     self.get_logger().warn("dropped malformed OverrideCmd")
                     continue
                 self._on_override(ovr)
+            elif msg_type == proto.MSG_SET_MODE:
+                try:
+                    cmd, _ts = proto.decode_set_mode(data)
+                    mode_str = proto.goal_source_to_str(cmd.mode)
+                except ValueError as exc:
+                    self.get_logger().warn(f"dropped malformed SetMode: {exc}")
+                    continue
+                # Discrete, edge-triggered like Record -- stage it for _tick
+                # (executor thread) to actually publish; see _pending_mode.
+                with self._lock:
+                    self._pending_mode = mode_str
             else:
                 self.get_logger().warn(f"dropped frame with unknown type {msg_type}")
 
@@ -398,6 +462,20 @@ class GatewayNode(Node):
         with self._lock:
             self._delta[idx] = msg
             self._delta_recv[idx] = time.monotonic()
+
+    def _on_goal_source_state(self, msg):
+        # Ground-truth echo from the solver (see _GOAL_SOURCE_STATE_TOPIC) --
+        # not necessarily the mode this gateway last sent. An unrecognized
+        # string (protocol drift between this gateway and the solver) is
+        # dropped rather than corrupting the Priv frame with a bad int.
+        try:
+            mode = proto.goal_source_from_str(msg.data)
+        except ValueError:
+            self.get_logger().warn(
+                f"{_GOAL_SOURCE_STATE_TOPIC}: unrecognized goal_source '{msg.data}'")
+            return
+        with self._lock:
+            self._goal_source_mode = mode
 
     def _on_left_ctrl(self, msg):
         # Record is a discrete event (unlike Obs/Priv): relay only on change,
@@ -422,7 +500,18 @@ class GatewayNode(Node):
             delta_sent = list(self._delta_sent)
             override_cmd = self._override_cmd
             override_ts = self._override_ts
+            goal_source_mode = self._goal_source_mode
+            pending_mode = self._pending_mode
+            self._pending_mode = None
         now = time.monotonic()
+
+        # SetMode in: a SetMode frame was decoded on the ZMQ recv thread
+        # (_pending_mode staged it); this is the executor thread, so it's
+        # safe to actually call the ROS publisher here. Edge-triggered, like
+        # Record -- publish once per received frame, not every tick.
+        if pending_mode is not None:
+            self._goal_source_pub.publish(String(data=pending_mode))
+            self.get_logger().info(f"SetMode -> {_GOAL_SOURCE_TOPIC} = '{pending_mode}'")
 
         # Obs out: one self-contained observation per tick -- dual EE poses
         # (quat -> rpy on the wire) + grippers + the full joint block in
@@ -469,7 +558,8 @@ class GatewayNode(Node):
                                t.angular.x, t.angular.y, t.angular.z]
             self._priv_pub.send(proto.encode_priv(
                 proto.Priv(matrix=_matrix_from_transform(cam_tf),
-                           delta=(tuple(vals[0]), tuple(vals[1])))))
+                           delta=(tuple(vals[0]), tuple(vals[1])),
+                           mode=goal_source_mode)))
             with self._lock:
                 for i in (0, 1):
                     if delta_recv[i] > delta_sent[i]:

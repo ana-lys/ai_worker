@@ -75,12 +75,13 @@ def test_obs_bad_length_rejected():
 
 
 def test_priv_round_trip():
-    # Identity default matrix, all-zero delta.
+    # Identity default matrix, all-zero delta, GOAL_SOURCE_EE default mode.
     p0 = proto.Priv()
     back, ts = proto.decode_priv(proto.encode_priv(p0, ts=42.0))
     assert back.matrix == pytest.approx(p0._IDENTITY)
     assert back.delta[0] == pytest.approx((0.0,) * 6)
     assert back.delta[1] == pytest.approx((0.0,) * 6)
+    assert back.mode == proto.GOAL_SOURCE_EE
     assert ts == pytest.approx(42.0)
 
     # Translation + 90 deg yaw about Z: R maps +X_cam to +Y_control.
@@ -91,23 +92,25 @@ def test_priv_round_trip():
     p1 = proto.Priv(
         matrix=m,
         delta=((0.01, -0.02, 0.03, 0.1, 0.0, 0.0), (-0.01, 0.0, 0.0, 0.0, -0.2, 0.0)),
+        mode=proto.GOAL_SOURCE_RAIL_FREE,
     )
     back, ts = proto.decode_priv(proto.encode_priv(p1, ts=7.0))
     assert back.matrix == pytest.approx(m)
     assert back.delta[0] == pytest.approx(p1.delta[0])
     assert back.delta[1] == pytest.approx(p1.delta[1])
+    assert back.mode == proto.GOAL_SOURCE_RAIL_FREE
     assert ts == pytest.approx(7.0)
 
 
 def test_priv_wire_size():
-    assert len(proto.encode_priv(proto.Priv(), ts=1.0)) == 236
+    assert len(proto.encode_priv(proto.Priv(), ts=1.0)) == 240
 
 
 def test_priv_bad_length_rejected():
     with pytest.raises(ValueError):
-        proto.decode_priv(b"\x00" * 235)   # 12 + 224 is 236
+        proto.decode_priv(b"\x00" * 239)   # 12 + 228 is 240
     with pytest.raises(ValueError):
-        proto.decode_priv(b"\x00" * 237)
+        proto.decode_priv(b"\x00" * 241)
 
 
 def test_control_round_trip():
@@ -135,12 +138,14 @@ def test_wire_sizes():
     assert proto._HEADER.size == 12                      # int32 type + float64 ts
     assert proto._CTRL_STRUCT.size == 14 * 8             # two 6-DOF poses + 2 grippers
     assert proto._OBS_STRUCT.size == (14 + 3 * proto.N_JOINT_STATE) * 8
-    assert proto._PRIV_STRUCT.size == (16 + 12) * 8
+    assert proto._PRIV_STRUCT.size == (16 + 12) * 8 + 4   # 28 doubles + mode int32
     assert proto._OVERRIDE_STRUCT.size == proto.N_JOINT_STATE * 8  # 25 doubles
+    assert proto._SET_MODE_STRUCT.size == 4               # 1 int32
     assert proto._FRAME_SIZES[proto.MSG_OBS] == 12 + 712  # 724 B
     assert proto._FRAME_SIZES[proto.MSG_CONTROL_CMD] == 12 + 112  # 124 B
-    assert proto._FRAME_SIZES[proto.MSG_PRIV] == 12 + 224  # 236 B
+    assert proto._FRAME_SIZES[proto.MSG_PRIV] == 12 + 228  # 240 B
     assert proto._FRAME_SIZES[proto.MSG_OVERRIDE] == 12 + 200  # 212 B
+    assert proto._FRAME_SIZES[proto.MSG_SET_MODE] == 12 + 4  # 16 B
 
 
 def test_override_round_trip():
@@ -305,8 +310,8 @@ def test_timestamp_makes_frame_unique():
 
 
 def test_type_ids_distinct():
-    assert len({proto.MSG_OBS, proto.MSG_CONTROL_CMD,
-                proto.MSG_PRIV, proto.MSG_OVERRIDE, proto.MSG_RECORD}) == 5
+    assert len({proto.MSG_OBS, proto.MSG_CONTROL_CMD, proto.MSG_PRIV,
+                proto.MSG_OVERRIDE, proto.MSG_RECORD, proto.MSG_SET_MODE}) == 6
     # v2 ids keep the v1 numbers for the surviving rails so a v1 control/
     # override sender still speaks the same wire format.
     assert proto.MSG_CONTROL_CMD == 2
@@ -329,6 +334,50 @@ def test_record_wrong_type_rejected():
         proto.decode_record(proto.encode_obs(obs))
     with pytest.raises(ValueError):
         proto.decode_obs(proto.encode_record(proto.Record(1)))
+
+
+def test_set_mode_round_trip():
+    for mode in (proto.GOAL_SOURCE_EE, proto.GOAL_SOURCE_RAIL,
+                 proto.GOAL_SOURCE_RAIL_FREE):
+        cmd = proto.SetMode(mode)
+        data = proto.encode_set_mode(cmd, ts=42.0)
+        assert len(data) == proto._FRAME_SIZES[proto.MSG_SET_MODE]
+        decoded, ts = proto.decode_set_mode(data)
+        assert decoded.mode == mode
+        assert ts == 42.0
+
+
+def test_set_mode_default_is_ee():
+    decoded, _ = proto.decode_set_mode(proto.encode_set_mode(proto.SetMode()))
+    assert decoded.mode == proto.GOAL_SOURCE_EE
+
+
+def test_set_mode_wrong_type_rejected():
+    obs = proto.Obs()
+    with pytest.raises(ValueError):
+        proto.decode_set_mode(proto.encode_obs(obs))
+    with pytest.raises(ValueError):
+        proto.decode_obs(proto.encode_set_mode(proto.SetMode(proto.GOAL_SOURCE_RAIL)))
+
+
+def test_goal_source_str_round_trip():
+    # Must match ffw_ik_solver_teleop's GoalSource enum / parse_goal_source
+    # 1:1 -- these are the exact three strings the solver accepts on
+    # /teleop_goal_source and publishes on /teleop_goal_source_state.
+    for mode, name in (
+        (proto.GOAL_SOURCE_EE, "ee"),
+        (proto.GOAL_SOURCE_RAIL, "rail"),
+        (proto.GOAL_SOURCE_RAIL_FREE, "rail_free"),
+    ):
+        assert proto.goal_source_to_str(mode) == name
+        assert proto.goal_source_from_str(name) == mode
+
+
+def test_goal_source_str_rejects_unknown():
+    with pytest.raises(ValueError):
+        proto.goal_source_to_str(99)
+    with pytest.raises(ValueError):
+        proto.goal_source_from_str("bogus")
 
 
 def test_rpy_quat_pure_axes():

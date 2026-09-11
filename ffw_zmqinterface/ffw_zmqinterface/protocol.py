@@ -40,6 +40,13 @@ Message roles (leRobot-style separation):
           own dedicated port keeps this one-shot semantic off the
           fixed-cadence Obs/Priv PUBs.
 
+  SetMode (controller -> robot, SUB on tcp://*:CONTROL_PORT = 6002)
+          A discrete mode switch, not a continuous stream (unlike ControlCmd/
+          OverrideCmd, which re-assert every tick): flips the IK solver's
+          goal_source between EE-space teleop and the joint-space rail. Sent
+          once per transition, edge-triggered on receipt -- see
+          gateway_node.py's handling, which mirrors how it relays Record.
+
 Payload layouts:
 
 Obs         (gateway_node -> controller, PUB on tcp://*:STATE_PORT)
@@ -68,7 +75,7 @@ Obs         (gateway_node -> controller, PUB on tcp://*:STATE_PORT)
     virtual_dxl interface whose effort may be 0.0 / low-fidelity.
 
 Priv        (gateway_node -> controller, PUB on tcp://*:PRIV_PORT)
-    layout: 28 doubles = 224 bytes
+    layout: 28 doubles + 1 int32 = 228 bytes
       HeadCamTf block [0:16]  row-major 4x4 homogeneous matrix
         [0:4]   row 0 = [m00 m01 m02 m03]
         [4:8]   row 1 = [m10 m11 m12 m13]
@@ -92,6 +99,17 @@ Priv        (gateway_node -> controller, PUB on tcp://*:PRIV_PORT)
         An arm not spacemouse-driven right now goes silent and is
         zero-filled on the wire; if neither arm is driven the delta block
         is still sent (zeros), so the frame has a fixed cadence.
+      GoalSourceState [28] (int32, appended after the 28 doubles)
+        The IK solver's ACTUAL current goal_source -- see GOAL_SOURCE_* below
+        -- relayed from /teleop_goal_source_state (ffw_ik_solver_teleop
+        publishes it on every transition, however triggered: a SetMode frame
+        from this gateway, `ros2 param set goal_source`, or the launch-time
+        default). This is ground truth, not an echo of the last SetMode this
+        gateway happened to send -- another client, or a manual param set,
+        can also change it. Defaults to GOAL_SOURCE_EE (0) until the first
+        /teleop_goal_source_state message arrives, same as the solver's own
+        launch-time default, so an early frame reads correctly rather than
+        as "unknown."
 
 ControlCmd  (controller -> robot, SUB on tcp://*:CONTROL_PORT)
     layout: 14 doubles = 112 bytes
@@ -115,6 +133,21 @@ OverrideCmd (controller -> robot, SUB on tcp://*:CONTROL_PORT)
     this order (OverrideCmd). Not a latch: there is no 0/1 engage bit; the
     command stream itself is the control signal, and the receiver holds the
     newest frame and treats staleness like ControlCmd.
+
+SetMode     (controller -> robot, SUB on tcp://*:CONTROL_PORT)
+    layout: 1 int32 = 4 bytes
+      [0]  mode  GOAL_SOURCE_EE (0) | GOAL_SOURCE_RAIL (1) |
+                 GOAL_SOURCE_RAIL_FREE (2)
+    Relayed as a std_msgs/String to /teleop_goal_source (the same topic
+    `ros2 param set goal_source` and other publishers use), so the solver's
+    existing re-basing/re-sync logic on any goal_source transition applies
+    unchanged. Not a latch and not re-asserted every tick like ControlCmd/
+    OverrideCmd -- send exactly one frame per desired transition; the
+    gateway relays it once, on receipt (see gateway_node.py). GOAL_SOURCE_RAIL
+    and GOAL_SOURCE_RAIL_FREE both hand the tick to /qpos_rail (OverrideCmd);
+    they differ only in whether the solver's own collision correction runs
+    on top (RAIL) or is skipped, trusting the controller (RAIL_FREE) -- see
+    ffw_ik_solver_teleop's GoalSource enum.
 
 Record      (gateway_node -> controller, PUB on tcp://*:RECORD_PORT)
     layout: 1 int32 = 4 bytes
@@ -143,6 +176,28 @@ MSG_CONTROL_CMD = 2  # controller -> robot: two 6-DOF EE targets
 MSG_PRIV = 3         # gateway_node -> controller: head-cam tf + EEDelta
 MSG_OVERRIDE = 4     # controller -> robot: joint-space command rail (25 qpos)
 MSG_RECORD = 5       # gateway_node -> controller: left A/X + B/Y button event
+MSG_SET_MODE = 6     # controller -> robot: switch goal_source (ee/rail/rail_free)
+
+# --- SetMode / Priv GoalSourceState values --------------------------------
+# Must match ffw_ik_solver_teleop's GoalSource enum 1:1 (see parse_goal_source
+# / goal_source_name in ffw_ik_solver_teleop.cpp). GOAL_SOURCE_RAIL and
+# GOAL_SOURCE_RAIL_FREE both map to the wire string "rail" on the
+# /teleop_goal_source_state echo -- the solver only distinguishes them
+# internally (rail_free_mode()); a client that needs to tell them apart must
+# already know which one it last commanded.
+GOAL_SOURCE_EE = 0
+GOAL_SOURCE_RAIL = 1
+GOAL_SOURCE_RAIL_FREE = 2
+_GOAL_SOURCE_TO_STR = {
+    GOAL_SOURCE_EE: "ee",
+    GOAL_SOURCE_RAIL: "rail",
+    GOAL_SOURCE_RAIL_FREE: "rail_free",
+}
+_STR_TO_GOAL_SOURCE = {
+    "ee": GOAL_SOURCE_EE,
+    "rail": GOAL_SOURCE_RAIL,
+    "rail_free": GOAL_SOURCE_RAIL_FREE,
+}
 
 # --- Wire contract: relayed /joint_states order (Obs joint block) --------
 # Fixed joint order for the relayed /joint_states. The gateway reorders
@@ -180,17 +235,19 @@ _HEADER = struct.Struct("<id")
 # dispatches on the header type id.
 _CTRL_STRUCT = struct.Struct("<14d")                        # 112 bytes
 _OBS_STRUCT = struct.Struct("<" + "d" * (3 * N_JOINT_STATE + 14))  # 712 bytes
-_PRIV_STRUCT = struct.Struct("<" + "d" * (16 + 12))         # 224 bytes
+_PRIV_STRUCT = struct.Struct("<" + "d" * (16 + 12) + "i")   # 228 bytes (28 doubles + mode int32)
 _OVERRIDE_STRUCT = struct.Struct("<" + "d" * N_JOINT_STATE)   # 200 bytes
 _RECORD_STRUCT = struct.Struct("<i")                         # 4 bytes
+_SET_MODE_STRUCT = struct.Struct("<i")                        # 4 bytes
 
 # Expected frame size per type (header + payload), for length validation.
 _FRAME_SIZES = {
     MSG_OBS: _HEADER.size + _OBS_STRUCT.size,              # 724 B
     MSG_CONTROL_CMD: _HEADER.size + _CTRL_STRUCT.size,     # 124 B
-    MSG_PRIV: _HEADER.size + _PRIV_STRUCT.size,            # 236 B
+    MSG_PRIV: _HEADER.size + _PRIV_STRUCT.size,            # 240 B
     MSG_OVERRIDE: _HEADER.size + _OVERRIDE_STRUCT.size,    # 212 B
     MSG_RECORD: _HEADER.size + _RECORD_STRUCT.size,        # 16 B
+    MSG_SET_MODE: _HEADER.size + _SET_MODE_STRUCT.size,    # 16 B
 }
 
 
@@ -241,24 +298,29 @@ class Obs:
 
 
 class Priv:
-    """Privileged context: head-cam tf + per-tick commanded deltas.
+    """Privileged context: head-cam tf + per-tick commanded deltas + mode.
 
     matrix is a 16-tuple, row-major homogeneous matrix (see the module
     docstring); default is the identity. delta = (d0, d1), each a 6-tuple
     (dx, dy, dz, drx, dry, drz) in the map frame; all-zeros means "no
-    command this tick".
+    command this tick". mode is the solver's ACTUAL current goal_source,
+    one of the GOAL_SOURCE_* constants -- ground truth relayed from
+    /teleop_goal_source_state, not an echo of the last SetMode this gateway
+    sent. Defaults to GOAL_SOURCE_EE, matching the solver's own default.
     """
 
-    __slots__ = ("matrix", "delta")
+    __slots__ = ("matrix", "delta", "mode")
 
     _IDENTITY = (1.0, 0.0, 0.0, 0.0,
                  0.0, 1.0, 0.0, 0.0,
                  0.0, 0.0, 1.0, 0.0,
                  0.0, 0.0, 0.0, 1.0)
 
-    def __init__(self, matrix=None, delta=((0.0,) * 6, (0.0,) * 6)):
+    def __init__(self, matrix=None, delta=((0.0,) * 6, (0.0,) * 6),
+                 mode=GOAL_SOURCE_EE):
         self.matrix = tuple(matrix) if matrix is not None else self._IDENTITY
         self.delta = delta
+        self.mode = int(mode)
 
 
 class ControlCmd:
@@ -308,6 +370,19 @@ class Record:
         self.value = int(value)
 
 
+class SetMode:
+    """A discrete goal_source switch request: GOAL_SOURCE_EE/RAIL/RAIL_FREE.
+
+    Not re-asserted every tick like ControlCmd/OverrideCmd -- send exactly
+    one frame per desired transition (see the module docstring).
+    """
+
+    __slots__ = ("mode",)
+
+    def __init__(self, mode=GOAL_SOURCE_EE):
+        self.mode = int(mode)
+
+
 def _ctrl_values(ee, gripper):
     """Flatten ee + gripper into the 14-value wire order (ee0 grip0 ee1 grip1)."""
     return ee[0] + (gripper[0],) + ee[1] + (gripper[1],)
@@ -342,7 +417,8 @@ def decode_obs(data: bytes):
 
 def encode_priv(priv: Priv, ts=None) -> bytes:
     """Encode Priv, auto-stamping the send time if ts is None."""
-    payload = _PRIV_STRUCT.pack(*(priv.matrix + _delta_values(priv.delta)))
+    payload = _PRIV_STRUCT.pack(
+        *(priv.matrix + _delta_values(priv.delta) + (priv.mode,)))
     return _frame(MSG_PRIV, payload, ts)
 
 
@@ -350,7 +426,8 @@ def decode_priv(data: bytes):
     """Decode Priv. Returns (priv, ts) where ts is the sender's."""
     payload, ts = _unframe(data, MSG_PRIV, "Priv")
     vals = _PRIV_STRUCT.unpack(payload)
-    return Priv(matrix=vals[0:16], delta=(vals[16:22], vals[22:28])), ts
+    return Priv(matrix=vals[0:16], delta=(vals[16:22], vals[22:28]),
+                mode=vals[28]), ts
 
 
 def encode_control(cmd: ControlCmd, ts=None) -> bytes:
@@ -393,6 +470,39 @@ def decode_record(data: bytes):
     payload, ts = _unframe(data, MSG_RECORD, "Record")
     (value,) = _RECORD_STRUCT.unpack(payload)
     return Record(value), ts
+
+
+def encode_set_mode(cmd: SetMode, ts=None) -> bytes:
+    """Encode SetMode, auto-stamping the send time if ts is None."""
+    payload = _SET_MODE_STRUCT.pack(cmd.mode)
+    return _frame(MSG_SET_MODE, payload, ts)
+
+
+def decode_set_mode(data: bytes):
+    """Decode SetMode. Returns (cmd, ts) where ts is the sender's."""
+    payload, ts = _unframe(data, MSG_SET_MODE, "SetMode")
+    (mode,) = _SET_MODE_STRUCT.unpack(payload)
+    return SetMode(mode), ts
+
+
+def goal_source_to_str(mode: int) -> str:
+    """GOAL_SOURCE_* int -> the /teleop_goal_source wire string.
+
+    Raises ValueError on an unrecognized code (same fail-fast posture as the
+    other decoders here -- callers should not forward garbage to the robot).
+    """
+    try:
+        return _GOAL_SOURCE_TO_STR[mode]
+    except KeyError:
+        raise ValueError(f"unknown GOAL_SOURCE_* value: {mode}") from None
+
+
+def goal_source_from_str(name: str) -> int:
+    """/teleop_goal_source(_state) wire string -> GOAL_SOURCE_* int."""
+    try:
+        return _STR_TO_GOAL_SOURCE[name]
+    except KeyError:
+        raise ValueError(f"unknown goal_source string: {name!r}") from None
 
 
 def rpy_to_quat(rx, ry, rz):

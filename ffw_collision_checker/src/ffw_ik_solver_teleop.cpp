@@ -490,6 +490,7 @@ public:
                 continue;
               }
               goal_source_ = gs;
+              publish_goal_source_state();
               RCLCPP_INFO(this->get_logger(), "goal_source set to %s", v.c_str());
             }
           }
@@ -498,6 +499,14 @@ public:
 
     collision_debug_pub_ = this->create_publisher<ffw_collision_checker::msg::CollisionDebug>(
         "/ik_solver/collision_debug", 10);
+
+    // Current goal_source echo (see publish_goal_source_state()) -- the ZMQ
+    // gateway relays this into the Priv frame so a controller can observe
+    // which mode (ee/rail/rail_free) is actually active, not just which mode
+    // it last commanded.
+    goal_source_state_pub_ = this->create_publisher<std_msgs::msg::String>(
+        "/teleop_goal_source_state", 10);
+    publish_goal_source_state();  // announce the launch-time default
 
     // Achieved EE pose (MuJoCo site pose) in map frame, per arm — published each
     // control tick so the SpaceMouse mapper can re-base its delta accumulation
@@ -709,6 +718,7 @@ public:
           GoalSource gs;
           if (parse_goal_source(msg->data, gs)) {
             goal_source_ = gs;
+            publish_goal_source_state();
             RCLCPP_INFO(this->get_logger(), "goal_source (topic) set to %s", msg->data.c_str());
           } else {
             RCLCPP_WARN(this->get_logger(),
@@ -2312,6 +2322,33 @@ private:
     if (v == "rail") { out = GoalSource::RAIL_SOLVE; return true; }
     if (v == "rail_free") { out = GoalSource::RAIL_FREE; return true; }
     return false;
+  }
+
+  // Inverse of parse_goal_source: RAIL_SOLVE maps back to "rail" (the two
+  // rail submodes share one wire string; rail_free_mode() distinguishes them
+  // for anyone who needs the finer distinction).
+  static const char *goal_source_name(GoalSource gs) {
+    switch (gs) {
+      case GoalSource::EE: return "ee";
+      case GoalSource::RAIL_SOLVE: return "rail";
+      case GoalSource::RAIL_FREE: return "rail_free";
+    }
+    return "ee";
+  }
+
+  // Echo the ACTUAL current goal_source (not just what was last commanded --
+  // it can also change via `ros2 param set goal_source`) so a listener (the
+  // ZMQ gateway's Priv relay) can observe ground truth rather than mirroring
+  // its own last SetMode send. Same idea as joy_hand.cpp's quest_state_pub_
+  // (publishes /quest/<arm>/state on every transition): publish on every
+  // transition here too, from whichever path caused it (param callback,
+  // topic callback, or the initial value at startup).
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr goal_source_state_pub_;
+  void publish_goal_source_state() {
+    if (!goal_source_state_pub_) return;
+    std_msgs::msg::String msg;
+    msg.data = goal_source_name(goal_source_.load());
+    goal_source_state_pub_->publish(msg);
   }
 
   std::mutex rail_mutex_;
