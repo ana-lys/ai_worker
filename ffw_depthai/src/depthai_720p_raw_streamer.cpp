@@ -551,6 +551,33 @@ int main(int argc, char **argv) {
             cv::Mat trial_tvec = pnp_tvec.clone();
             bool pnp_ok = cv::solvePnP(obj_pts, img_pts, K, D, trial_rvec, trial_tvec,
                                        pnp_seeded, cv::SOLVEPNP_ITERATIVE);
+            // Sanity check independent of the jump gate below: a degenerate/
+            // ill-conditioned correspondence set (e.g. only 3 nearly-colinear
+            // tag corners) can make ITERATIVE diverge to a nonsense pose --
+            // NaN/Inf, or a translation far outside any physically plausible
+            // camera-to-board distance for this setup. The consecutive-reject
+            // force-reseed below exists to unstick the seed after real
+            // motion, but it must never force-accept a diverged solve --
+            // that would lock garbage in as the new seed and every
+            // subsequent frame would diverge further from there. So an
+            // insane trial pose is treated as if PnP had simply failed.
+            constexpr double kMaxPlausibleDistM = 5.0;
+            if (pnp_ok) {
+              bool sane = std::isfinite(trial_tvec.at<double>(0)) &&
+                          std::isfinite(trial_tvec.at<double>(1)) &&
+                          std::isfinite(trial_tvec.at<double>(2)) &&
+                          std::isfinite(trial_rvec.at<double>(0)) &&
+                          std::isfinite(trial_rvec.at<double>(1)) &&
+                          std::isfinite(trial_rvec.at<double>(2));
+              if (sane) {
+                double t_norm = std::sqrt(
+                    trial_tvec.at<double>(0) * trial_tvec.at<double>(0) +
+                    trial_tvec.at<double>(1) * trial_tvec.at<double>(1) +
+                    trial_tvec.at<double>(2) * trial_tvec.at<double>(2));
+                sane = t_norm < kMaxPlausibleDistM;
+              }
+              pnp_ok = sane;
+            }
             if (pnp_ok) {
               // Reject-and-hold: if this solve jumped too far from the last
               // ACCEPTED pose, it's almost certainly a flip/outlier, not real
