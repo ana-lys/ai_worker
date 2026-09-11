@@ -261,6 +261,7 @@ int main(int argc, char **argv) {
   const std::map<int, std::array<cv::Point3f, 4>> board_corners = buildBoardCorners();
   cv::Mat pnp_rvec, pnp_tvec;
   bool pnp_seeded = false;
+  int pnp_consecutive_rejects = 0;
   constexpr double kCamTfMaxAgeS = 0.5;  // ignore a stale head_camera_tf
 
   // Build a CameraInfo for the given output size from the factory calibration.
@@ -558,6 +559,17 @@ int main(int argc, char **argv) {
               // stable solution instead of the flip perpetuating itself.
               constexpr double kMaxJumpDistM = 0.05;    // 5cm between ~200ms frames
               constexpr double kMaxJumpAngleRad = 0.26; // ~15 deg
+              // If genuine motion (camera physically moved, e.g. the head
+              // panning/tilting) keeps exceeding the jump gate for several
+              // consecutive detection passes in a row, the seed is stuck: it
+              // never got a chance to track the real new pose, so every
+              // subsequent solve keeps re-failing the same jump test forever
+              // -- the published pose freezes at whatever it was when the
+              // real motion started. A one-off flip/outlier rejects once and
+              // then agrees with the old seed again next frame; sustained
+              // rejection is the signature of real motion, not noise, so
+              // force-accept and reseed once rejects pile up.
+              constexpr int kMaxConsecutiveRejects = 3;
               bool accept = true;
               if (pnp_seeded) {
                 Eigen::Vector3d old_t(pnp_tvec.at<double>(0), pnp_tvec.at<double>(1),
@@ -578,12 +590,16 @@ int main(int argc, char **argv) {
                 double dangle = Eigen::AngleAxisd(R_new * R_old.transpose()).angle();
                 if ((new_t - old_t).norm() > kMaxJumpDistM || std::abs(dangle) > kMaxJumpAngleRad) {
                   accept = false;
+                  if (++pnp_consecutive_rejects >= kMaxConsecutiveRejects) {
+                    accept = true;  // force reseed -- see comment above
+                  }
                 }
               }
               if (accept) {
                 pnp_rvec = trial_rvec;
                 pnp_tvec = trial_tvec;
                 pnp_seeded = true;
+                pnp_consecutive_rejects = 0;
               }
 
               // Mean reprojection error of the accepted pose over all used
