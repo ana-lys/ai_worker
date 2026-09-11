@@ -34,6 +34,7 @@ Optional params:
 import csv
 import math
 import os
+import sys
 import time
 
 import rclpy
@@ -41,6 +42,9 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from sensor_msgs.msg import JointState
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from camera_calib_lib import CSV_HEADER, build_row  # noqa: E402
 
 
 class CameraCalibrationCheckRecorder(Node):
@@ -106,19 +110,8 @@ class CameraCalibrationCheckRecorder(Node):
             if 'head_joint2' in names:
                 h2 = pos[names.index('head_joint2')]
 
-        ct = self.latest_cam_tf.transform
-        bc = msg.pose
-        bb = self.latest_board_base.pose
-
-        row = [
-            round(now - self.t0, 4), h1, h2,
-            ct.translation.x, ct.translation.y, ct.translation.z,
-            ct.rotation.w, ct.rotation.x, ct.rotation.y, ct.rotation.z,
-            bc.position.x, bc.position.y, bc.position.z,
-            bc.orientation.w, bc.orientation.x, bc.orientation.y, bc.orientation.z,
-            bb.position.x, bb.position.y, bb.position.z,
-            bb.orientation.w, bb.orientation.x, bb.orientation.y, bb.orientation.z,
-        ]
+        row = build_row(now - self.t0, h1, h2,
+                         self.latest_cam_tf, msg, self.latest_board_base)
         self.rows.append(row)
         if len(self.rows) % 25 == 0:
             self.get_logger().info(f'{len(self.rows)} rows recorded...')
@@ -128,14 +121,7 @@ class CameraCalibrationCheckRecorder(Node):
             self.get_logger().warn('No rows recorded -- nothing to write.')
             return
 
-        header = [
-            't', 'head_joint1', 'head_joint2',
-            'cam_x', 'cam_y', 'cam_z', 'cam_qw', 'cam_qx', 'cam_qy', 'cam_qz',
-            'cam2brd_x', 'cam2brd_y', 'cam2brd_z',
-            'cam2brd_qw', 'cam2brd_qx', 'cam2brd_qy', 'cam2brd_qz',
-            'brd_base_x', 'brd_base_y', 'brd_base_z',
-            'brd_base_qw', 'brd_base_qx', 'brd_base_qy', 'brd_base_qz',
-        ]
+        header = CSV_HEADER
         os.makedirs(os.path.dirname(self.output_path) or '.', exist_ok=True)
         with open(self.output_path, 'w', newline='') as f:
             w = csv.writer(f)

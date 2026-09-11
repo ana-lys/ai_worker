@@ -100,6 +100,9 @@ install(DIRECTORY ${DEPTHAI_INSTALL_DIR}/lib/ DESTINATION lib/)
 
 install(PROGRAMS
     scripts/record_camera_calibration_check.py
+    scripts/sweep_and_solve_camera_calibration.py
+    scripts/solve_camera_mount_correction.py
+    scripts/camera_calib_lib.py
     DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
