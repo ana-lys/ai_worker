@@ -2718,10 +2718,9 @@ int main(int argc, char **argv) {
   // converged/stalled and nothing new has arrived since -- the gradient step
   // is skipped entirely rather than re-chasing an already-met goal.
   bool ee_settled = false;
-  // Last tick's achieved EE pose (map frame). clip_target() leashes
-  // target_l_/r_ against THIS -- captured before solveStep runs -- instead of
-  // against this tick's achieved pose after solveStep runs. See the clip call
-  // below for why the ordering matters.
+  // Last tick's achieved EE pose (map frame): what the arm was actually doing
+  // when it last went to sleep. Used only by the idle-sleep wake-guard below
+  // (NOT applied every tick -- see there for why).
   Eigen::Isometry3d prev_achieved_l = init_l;
   Eigen::Isometry3d prev_achieved_r = init_r;
 
@@ -2784,21 +2783,6 @@ int main(int argc, char **argv) {
     // A real /joint_states-driven head snap must not fight the rail.
     if (!rail_gs) node->apply_continuous_head_sync(m, d);
 
-    // Leash target_l_/r_ against LAST tick's achieved pose BEFORE reading it
-    // for target_moved / solveStep below. This used to run only at the end of
-    // the loop (after solveStep) -- but target_l_/r_ is also written
-    // asynchronously by the ROS spin thread's mapper callbacks
-    // (update_goal_delta_l/r), which restamp it with the raw, un-leashed
-    // mapper goal on every incoming pose, even at rest. With the leash only
-    // applied after the fact, a target_l_/r_ read at the top of the loop
-    // could still be that raw value -- so the very first solveStep() call
-    // after an idle-sleep wake (see ee_settled below) could chase an
-    // un-leashed target directly, producing one oversized step before the
-    // leash caught up again on the next tick (a visible jump after the
-    // "asleep" delay). Clipping here first means current_target_l/r, and
-    // therefore every solveStep() call, always sees an already-bounded goal.
-    node->clip_target(prev_achieved_l, prev_achieved_r);
-
     Eigen::Isometry3d current_target_l, current_target_r;
     node->get_targets(current_target_l, current_target_r);
 
@@ -2830,10 +2814,46 @@ int main(int argc, char **argv) {
     }
     if (node->ee_sleep_debug() && ee_settled_before_check && woke_this_tick) {
       RCLCPP_INFO(node->get_logger(),
-        "[EE_SLEEP] wake: |dL|=%.4fm |dR|=%.4fm (leashed target crossed the "
+        "[EE_SLEEP] wake: |dL|=%.4fm |dR|=%.4fm (target crossed the "
         "1mm/0.29deg wake threshold)",
         (current_target_l.translation() - prev_target_l.translation()).norm(),
         (current_target_r.translation() - prev_target_r.translation()).norm());
+    }
+    // Wake-guard: bound ONLY the very first solveStep call after an
+    // idle-sleep gap to the same leash clip_target() applies everywhere else
+    // -- using prev_achieved_l/r (the achieved pose from when we went to
+    // sleep; it hasn't moved since, by definition of "settled"). This is
+    // local to current_target_l/r for this tick only; it does NOT touch
+    // target_l_/r_, so normal per-tick tracking speed is unaffected on every
+    // other tick. Without this, target_l_/r_ can sit at whatever raw,
+    // un-leashed value the mapper's ROS-thread callback last wrote during the
+    // idle gap (clip_target() only re-clamps it at the end of THIS loop, i.e.
+    // one tick too late), so the first resumed solveStep() would chase that
+    // raw target directly -- an oversized step right after the "asleep"
+    // delay. A tighter, always-on leash (clip before every solveStep) was
+    // tried instead and reverted: it capped ordinary tracking speed to the
+    // leash rate on every tick, not just this one, and made all motion
+    // several times slower.
+    if (ee_settled_before_check && woke_this_tick) {
+      auto leash_local = [](Eigen::Isometry3d &target,
+                            const Eigen::Isometry3d &achieved) {
+        constexpr double kMaxDist = 0.01;   // mirrors clip_target's default
+        constexpr double kMaxAngle = 0.1;
+        Eigen::Vector3d err = target.translation() - achieved.translation();
+        if (err.norm() > kMaxDist) {
+          target.translation() =
+              achieved.translation() + err.normalized() * kMaxDist;
+        }
+        Eigen::AngleAxisd err_rot(target.linear() *
+                                  achieved.linear().transpose());
+        if (std::abs(err_rot.angle()) > kMaxAngle) {
+          Eigen::AngleAxisd clamped(kMaxAngle * (err_rot.angle() > 0 ? 1 : -1),
+                                    err_rot.axis());
+          target.linear() = clamped.toRotationMatrix() * achieved.linear();
+        }
+      };
+      leash_local(current_target_l, prev_achieved_l);
+      leash_local(current_target_r, prev_achieved_r);
     }
     prev_target_l = current_target_l;
     prev_target_r = current_target_r;
@@ -3085,11 +3105,13 @@ int main(int argc, char **argv) {
     node->publish_real_ee_error(real_err_l, real_err_r,
                                 real_seen && valid_real_l,
                                 real_seen && valid_real_r);
+    node->clip_target(achieved_l, achieved_r);
 
-    // Carry this tick's achieved pose forward: the NEXT iteration's
-    // clip_target() call (top of the loop, before solveStep) leashes against
-    // it. current_target_l/r above already reflects the leash applied at the
-    // top of THIS iteration, so no re-fetch is needed here for the viewer.
+    // Update target variables so the viewer spheres reflect the clipped target
+    node->get_targets(current_target_l, current_target_r);
+
+    // Carry this tick's achieved pose forward: it's what the wake-guard above
+    // uses next time the solver has to resume from idle-sleep.
     prev_achieved_l = achieved_l;
     prev_achieved_r = achieved_r;
 
