@@ -699,6 +699,12 @@ class IKSolverCLI(Node):
                         line = f"\r\033[2K    {axis.upper()}: {v*100:8.2f} cm"
                     sys.stdout.write(line)
                     sys.stdout.flush()
+                elif self._profile_frame is not None:
+                    sys.stdout.write(
+                        f"\r\033[2K    {axis.upper()}: "
+                        f"\033[31m(tracking lost — no transform into "
+                        f"'{self._profile_frame}')\033[0m")
+                    sys.stdout.flush()
                 r, _, _ = select.select([sys.stdin], [], [], 0.05)
                 if r:
                     ch = os.read(fd, 1)
@@ -812,6 +818,12 @@ class IKSolverCLI(Node):
                         value_str = f"{center * 100:8.2f} cm"
                     sys.stdout.write(f"\r\033[2K    {axis.upper()}: "
                                       f"{value_str} — {prompt_suffix}")
+                    sys.stdout.flush()
+                elif self._profile_frame is not None:
+                    sys.stdout.write(
+                        f"\r\033[2K    {axis.upper()}: "
+                        f"\033[31m(tracking lost — no transform into "
+                        f"'{self._profile_frame}')\033[0m — {prompt_suffix}")
                     sys.stdout.flush()
                 r, _, _ = select.select([sys.stdin], [], [], 0.05)
                 if r:
