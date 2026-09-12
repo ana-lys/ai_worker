@@ -937,6 +937,7 @@ class IKSolverCLI(Node):
 
         if not profile:
             print("\nNo profiles created.")
+            press_enter()
             return
 
         # Create records the wizard box to file under a name; it is NOT applied
@@ -1267,6 +1268,47 @@ class IKSolverCLI(Node):
         print("Global limit profile cleared for both arms — full range restored.\n")
         press_enter()
 
+    # ── Local/Global submenus (one main-menu entry per action, Local vs
+    # Global picked here rather than as 8 separate top-level entries) ──
+
+    @staticmethod
+    def _choose_local_or_global(title):
+        """Small Local/Global submenu. Returns 'local', 'global', or None
+        (cancel)."""
+        idx = select_menu(["Local  (native goal frame)",
+                            "Global (marker-frame box)"], title)
+        if idx is None:
+            return None
+        return 'local' if idx == 0 else 'global'
+
+    def action_save_limit_profile_choose(self):
+        kind = self._choose_local_or_global("Save limit profile — Local or Global?")
+        if kind == 'local':
+            self.action_save_limit_profile()
+        elif kind == 'global':
+            self.action_save_global_limit_profile()
+
+    def action_load_limit_profile_choose(self):
+        kind = self._choose_local_or_global("Load limit profile — Local or Global?")
+        if kind == 'local':
+            self.action_load_limit_profile()
+        elif kind == 'global':
+            self.action_load_global_limit_profile()
+
+    def action_clear_limit_profile_choose(self):
+        kind = self._choose_local_or_global("Clear limit profile — Local or Global?")
+        if kind == 'local':
+            self.action_clear_limit_profile()
+        elif kind == 'global':
+            self.action_clear_global_limit_profile()
+
+    def action_create_limit_profile_choose(self):
+        kind = self._choose_local_or_global("Create limit profile — Local or Global?")
+        if kind == 'local':
+            self.action_create_limit_profile()
+        elif kind == 'global':
+            self.action_create_global_limit_profile()
+
     def action_save_pose(self, to_file):
         """Save pose to memory or file."""
         label = "file" if to_file else "memory"
@@ -1372,14 +1414,10 @@ class IKSolverCLI(Node):
                 "Toggle arm group                    (left_arm / right_arm / lift)",
                 "Save pose to file                   (persistent)",
                 "Load pose from file                 (from poses.txt)",
-                "Save limit profile                  (current live box to file)",
-                "Load limit profile                  (named box from file)",
-                "Clear limit profile                 (both arms, restore range)",
-                "Create limit profile                 (manual, per-arm box)",
-                "Save global limit profile           (current live global box to file)",
-                "Load global limit profile           (named global box from file)",
-                "Clear global limit profile          (both arms, restore range)",
-                "Create global limit profile         (marker-frame box, per-arm)",
+                "Save limit profile                  (current live box to file; local or global)",
+                "Load limit profile                  (named box from file; local or global)",
+                "Clear limit profile                 (both arms, restore range; local or global)",
+                "Create limit profile                 (manual, per-arm box; local or global)",
                 "Reset to home                       (re-enable all, go home)",
                 "Show arm group status               (which groups enabled)",
                 "Show kinematic tree",
@@ -1399,17 +1437,13 @@ class IKSolverCLI(Node):
                 3:  self.action_toggle_group,
                 4:  lambda: self.action_save_pose(to_file=True),
                 5:  lambda: self.action_load_pose(from_file=True),
-                6:  self.action_save_limit_profile,
-                7:  self.action_load_limit_profile,
-                8:  self.action_clear_limit_profile,
-                9:  self.action_create_limit_profile,
-                10: self.action_save_global_limit_profile,
-                11: self.action_load_global_limit_profile,
-                12: self.action_clear_global_limit_profile,
-                13: self.action_create_global_limit_profile,
-                14: self.action_reset_home,
-                15: self.action_show_status,
-                16: self.action_show_tree,
+                6:  self.action_save_limit_profile_choose,
+                7:  self.action_load_limit_profile_choose,
+                8:  self.action_clear_limit_profile_choose,
+                9:  self.action_create_limit_profile_choose,
+                10: self.action_reset_home,
+                11: self.action_show_status,
+                12: self.action_show_tree,
             }
 
             action = action_map.get(idx)

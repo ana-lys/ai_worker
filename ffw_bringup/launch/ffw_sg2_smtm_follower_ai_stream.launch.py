@@ -76,6 +76,13 @@ def generate_launch_description():
             default_value='false',
             description='Whether to launch rf2o laser odometry',
         ),
+        DeclareLaunchArgument(
+            'launch_marker_ekf',
+            default_value='true',
+            description='Whether to launch the AprilTag marker-frame EKF fusion '
+                        '(marker_pose_corrector + robot_localization ekf_node), '
+                        'for the teleop global limit-profile feature',
+        ),
         # --- NEW ARGUMENTS FOR UDP STREAMER ---
         DeclareLaunchArgument('dest_ip', default_value='192.168.0.241',
                               description='Destination IP for UDP Streamer'),
@@ -107,6 +114,7 @@ def generate_launch_description():
     init_position_file = LaunchConfiguration('init_position_file')
     ros2_control_type = LaunchConfiguration('ros2_control_type')
     launch_rf2o = LaunchConfiguration('launch_rf2o')
+    launch_marker_ekf = LaunchConfiguration('launch_marker_ekf')
     dest_ip = LaunchConfiguration('dest_ip')
     base_port = LaunchConfiguration('base_port')
     use_h264 = LaunchConfiguration('use_h264')
@@ -468,6 +476,23 @@ def generate_launch_description():
         actions=[odom_launch_include]
     )
 
+    # Marker-frame EKF (marker_pose_corrector + robot_localization ekf_node):
+    # fuses the ~4-5 Hz AprilTag marker-board detection with continuous
+    # /odom into a smooth marker_frame <-> base_link TF, consumed by the
+    # teleop CLI/mapper's "global limit profile" feature. Independent of the
+    # lidar/map localization stack above -- gated on launch_marker_ekf only.
+    marker_ekf_launch_include = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
+                                                            'launch',
+                                                            'marker_ekf.launch.py'])),
+        condition=IfCondition(launch_marker_ekf)
+    )
+
+    marker_ekf_launch_delayed = TimerAction(
+        period=8.0,
+        actions=[marker_ekf_launch_include]
+    )
+
     return LaunchDescription(
         declared_arguments + [
             control_node,
@@ -489,5 +514,6 @@ def generate_launch_description():
             ffw_laser_filter_node,
             dual_laser_merger_node,
             odom_launch_delayed,
+            marker_ekf_launch_delayed,
         ]
     )
