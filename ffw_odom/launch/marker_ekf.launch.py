@@ -49,8 +49,12 @@ def generate_launch_description():
     )
 
     # robot_localization ekf_node: fuses continuous /odom with the low-rate
-    # marker correction above into a smooth, high-rate marker_frame <->
-    # base_link TF (publish_tf: true in marker_ekf.yaml).
+    # marker correction above into a smooth, high-rate base_link-in-
+    # marker_frame estimate, published as /marker_ekf_odom. publish_tf is
+    # OFF in marker_ekf.yaml -- it would broadcast marker_frame -> base_link
+    # (base_link as the CHILD), competing with base_link's existing real
+    # parent in the odom/map stack and splitting the TF tree. See
+    # marker_frame_tf_broadcaster below instead.
     marker_ekf_config = PathJoinSubstitution([
         FindPackageShare('ffw_odom'),
         'config',
@@ -68,6 +72,18 @@ def generate_launch_description():
         ],
     )
 
+    # Republishes /marker_ekf_odom as TF in the non-conflicting direction:
+    # base_link -> marker_frame (marker_frame as a LEAF off base_link).
+    marker_frame_tf_broadcaster_node = Node(
+        package='ffw_odom',
+        executable='marker_frame_tf_broadcaster',
+        name='marker_frame_tf_broadcaster',
+        output='screen',
+        parameters=[{
+            'input_topic': 'marker_ekf_odom',
+        }]
+    )
+
     return LaunchDescription([
         source_frame_arg,
         child_frame_arg,
@@ -75,4 +91,5 @@ def generate_launch_description():
         input_topic_arg,
         marker_pose_corrector_node,
         marker_ekf_node,
+        marker_frame_tf_broadcaster_node,
     ])

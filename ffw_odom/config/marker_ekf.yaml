@@ -20,7 +20,15 @@ marker_ekf_filter_node:
     base_link_frame: base_link
     world_frame: marker_frame
 
-    publish_tf: true
+    # publish_tf is OFF here: robot_localization always broadcasts
+    # world_frame -> base_link_frame (base_link as the CHILD), but base_link
+    # already has a real parent from the existing odom/map stack -- a second
+    # competing parent splits the TF tree ("two or more unconnected trees",
+    # observed breaking scan_to_map_icp's odom<->base_link lookups).
+    # marker_frame_tf_broadcaster (below) republishes this filter's output
+    # as base_link -> marker_frame instead: a leaf hanging off base_link,
+    # which cannot conflict with anything.
+    publish_tf: false
     publish_acceleration: false
 
     # Swerve wheel odometry (continuous prediction, velocity only)

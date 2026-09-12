@@ -121,7 +121,19 @@ ament_target_dependencies(marker_pose_corrector
   tf2
 )
 
-install(TARGETS rf2o_laser_odometry_node scan_to_map_icp relocalize_test_node scan_projector marker_pose_corrector
+add_executable(marker_frame_tf_broadcaster
+  src/MarkerFrameTfBroadcaster.cpp
+)
+
+ament_target_dependencies(marker_frame_tf_broadcaster
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
+)
+
+install(TARGETS rf2o_laser_odometry_node scan_to_map_icp relocalize_test_node scan_projector marker_pose_corrector marker_frame_tf_broadcaster
   DESTINATION lib/${PROJECT_NAME}
 )
 
