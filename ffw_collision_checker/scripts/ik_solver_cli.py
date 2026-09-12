@@ -595,9 +595,15 @@ class IKSolverCLI(Node):
 
     def _spin_drain(self, n=8):
         """Run rclpy.spin_once n times so queued subscriptions are processed.
-        Called after input()/select_menu() blocks the thread."""
+        Called after input()/select_menu() blocks the thread. Tolerates a
+        transient rcl/executor hiccup in any single spin_once() call rather
+        than letting it kill the whole CLI (KeyboardInterrupt/SystemExit are
+        BaseException, not Exception, so Ctrl-C still propagates)."""
         for _ in range(n):
-            rclpy.spin_once(self, timeout_sec=0.1)
+            try:
+                rclpy.spin_once(self, timeout_sec=0.1)
+            except Exception as e:
+                print(f"\n  (spin error, continuing: {e})")
 
     def _wait_achieved(self, arm, timeout=10.0):
         """Spin until a fresh (≤1 s) achieved pose exists for this arm.
@@ -633,11 +639,21 @@ class IKSolverCLI(Node):
         timeout."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            rclpy.spin_once(self, timeout_sec=0.05)
             try:
+                rclpy.spin_once(self, timeout_sec=0.05)
                 return self.tf_buffer.lookup_transform(
                     target_frame, source_frame, rclpy.time.Time())
             except tf2_ros.TransformException:
+                continue
+            except Exception as e:
+                # Broader than tf2_ros.TransformException on purpose: a
+                # transient rcl/executor hiccup inside spin_once() here
+                # (observed once as "failed to create timer... context is
+                # not valid") must not kill the whole CLI process over one
+                # failed lookup attempt -- treat it the same as a lookup
+                # failure and keep retrying. (KeyboardInterrupt/SystemExit
+                # are BaseException, not Exception, so Ctrl-C still works.)
+                print(f"\n  (transform lookup error, retrying: {e})")
                 continue
         return None
 
@@ -1494,8 +1510,10 @@ def main(args=None):
         cli.run()
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        print(f"\nError: {e}")
+    except Exception:
+        import traceback
+        print("\nError:")
+        traceback.print_exc()
     finally:
         try:
             cli.destroy_node()
