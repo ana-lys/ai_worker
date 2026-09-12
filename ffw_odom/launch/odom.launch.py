@@ -18,9 +18,17 @@ def generate_launch_description():
         default_value='true',
         description='Whether to launch rf2o laser odometry'
     )
-    
+
+    launch_scan_to_map_icp_arg = DeclareLaunchArgument(
+        'launch_scan_to_map_icp',
+        default_value='false',
+        description='Whether to launch the scan-to-map ICP localization corrector '
+                    '(disabled by default -- not currently needed)'
+    )
+
     use_ekf = LaunchConfiguration('use_ekf')
     launch_rf2o = LaunchConfiguration('launch_rf2o')
+    launch_scan_to_map_icp = LaunchConfiguration('launch_scan_to_map_icp')
 
     # rf2o node
     rf2o_node = Node(
@@ -91,12 +99,14 @@ def generate_launch_description():
             'fallback_hysteresis': 3,
             'scan_to_scan_hysteresis': 2,
             'verbose': False
-        }]
+        }],
+        condition=IfCondition(launch_scan_to_map_icp)
     )
 
     return LaunchDescription([
         use_ekf_arg,
         launch_rf2o_arg,
+        launch_scan_to_map_icp_arg,
         rf2o_node,
         ekf_node,
         scan_to_map_icp_node
