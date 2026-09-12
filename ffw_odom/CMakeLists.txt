@@ -111,7 +111,17 @@ ament_target_dependencies(scan_projector
   nav_msgs
 )
 
-install(TARGETS rf2o_laser_odometry_node scan_to_map_icp relocalize_test_node scan_projector
+add_executable(marker_pose_corrector
+  src/MarkerPoseCorrector.cpp
+)
+
+ament_target_dependencies(marker_pose_corrector
+  rclcpp
+  geometry_msgs
+  tf2
+)
+
+install(TARGETS rf2o_laser_odometry_node scan_to_map_icp relocalize_test_node scan_projector marker_pose_corrector
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -36,6 +36,7 @@ import re
 import math
 import time
 import rclpy
+import tf2_ros
 from rclpy.node import Node
 from ffw_collision_checker.srv import SaveLoadPose, ToggleJointGroup
 from std_srvs.srv import Trigger
@@ -49,8 +50,29 @@ POSES_FILE = "/home/lys/robotis_ws/src/ai_worker/ffw_collision_checker/config/po
 # `/teleop/limit_profile` `set <arm> ...` messages, so load publishes verbatim).
 LIMIT_PROFILE_FILE = "/home/lys/robotis_ws/src/ai_worker/ffw_collision_checker/config/limit_profiles.txt"
 
+# Global limit profiles are recorded/clamped in an external TF frame (an
+# AprilTag marker board broadcast by ffw_odom's marker_frame_broadcaster
+# node) instead of the mapper's native goal frame. These two constants MUST
+# stay in sync, by hand, with:
+#   - joy_hand.cpp's "ee_goal_frame" node parameter (default "base_link")
+#   - ffw_odom's marker_frame_broadcaster "child_frame"/"parent_frame" params
+# There is no shared config file; if any of these three drift, TF lookups
+# will fail (fail-open, no crash) rather than clamp against the wrong frame.
+GLOBAL_LIMIT_FRAME = "marker_frame"
+EE_GOAL_FRAME = "base_link"
+
 # Preset skip magnitudes offered wherever a skip is a dropdown: (meters, degrees).
 SKIP_DELTA_OPTIONS = [(0.01, 1.5), (0.02, 3.0), (0.05, 5.0), (0.10, 10.0)]
+
+
+class _QuatView:
+    """Lightweight (x, y, z, w) holder so a plain tuple from hand-rolled
+    quaternion math can be passed to _quat_to_rpy, which expects .x/.y/.z/.w
+    attributes (matching geometry_msgs/Quaternion)."""
+    __slots__ = ('x', 'y', 'z', 'w')
+
+    def __init__(self, x, y, z, w):
+        self.x, self.y, self.z, self.w = x, y, z, w
 
 
 # ── Terminal helpers ──────────────────────────────────────────────────
@@ -196,6 +218,21 @@ class IKSolverCLI(Node):
         # Current limit profile: arm ('l'/'r') -> {axis: (lo, hi)}. Populated by
         # create/load so "save limit profile" can snapshot it; {} = none active.
         self._current_profile = {}
+
+        # Current GLOBAL limit profile (marker-frame box): same shape as
+        # above, kept fully separate from _current_profile so the existing
+        # local limit-profile code paths stay untouched.
+        self._current_global_profile = {}
+
+        # ── TF buffer/listener for global (external-frame) limit profiles ──
+        # spin_thread=True so /tf, /tf_static keep getting processed even
+        # while the CLI is blocked in getch()/input() menu navigation, not
+        # just during the tight capture-loop spin_once() calls.
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True)
+        # Set for the duration of a global-profile wizard call; None = local
+        # (native goal frame) behavior, unchanged from before this feature.
+        self._profile_frame = None
 
         # ── Achieved-pose cache (solver → CLI, world frame "map") ──
         # Latest /ik_solver/achieved_ee_pose_* per arm ('l'/'r'). Populated by
@@ -506,6 +543,49 @@ class IKSolverCLI(Node):
         s = pose.header.stamp
         return s.sec + s.nanosec * 1e-9
 
+    @staticmethod
+    def _quat_mul(q1, q2):
+        """Hamilton product q1 ⊗ q2, each an (x, y, z, w) tuple."""
+        x1, y1, z1, w1 = q1
+        x2, y2, z2, w2 = q2
+        return (
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        )
+
+    @staticmethod
+    def _quat_to_rotmat(q):
+        """3x3 rotation matrix (as 3 row tuples) from an (x, y, z, w) quaternion
+        — hand-rolled to match _quat_to_rpy's own math instead of pulling in a
+        matrix library."""
+        x, y, z, w = q
+        return (
+            (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
+            (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+            (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
+        )
+
+    def _transform_pose(self, transform, pos, quat):
+        """Apply a geometry_msgs/TransformStamped's transform to a (pos, quat)
+        pair (quat as an (x, y, z, w) tuple). NOT using
+        tf2_geometry_msgs.do_transform_pose — hand-rolled to avoid
+        Pose-vs-PoseStamped API differences across ROS2 distros, matching this
+        file's existing hand-rolled quaternion style (_quat_to_rpy)."""
+        tt = transform.transform.translation
+        tq = (transform.transform.rotation.x, transform.transform.rotation.y,
+              transform.transform.rotation.z, transform.transform.rotation.w)
+        R = self._quat_to_rotmat(tq)
+        px, py, pz = pos
+        out_pos = (
+            tt.x + R[0][0] * px + R[0][1] * py + R[0][2] * pz,
+            tt.y + R[1][0] * px + R[1][1] * py + R[1][2] * pz,
+            tt.z + R[2][0] * px + R[2][1] * py + R[2][2] * pz,
+        )
+        out_quat = self._quat_mul(tq, quat)
+        return out_pos, out_quat
+
     def _spin_drain(self, n=8):
         """Run rclpy.spin_once n times so queued subscriptions are processed.
         Called after input()/select_menu() blocks the thread."""
@@ -534,6 +614,37 @@ class IKSolverCLI(Node):
         p = pose.pose.position
         return (p.x, p.y, p.z), self._quat_to_rpy(pose.pose.orientation)
 
+    def _apply_profile_frame(self, pos, quat):
+        """If self._profile_frame is set, transform (pos, quat) (quat as an
+        (x, y, z, w) tuple) into it via a live TF lookup (source
+        EE_GOAL_FRAME), returning (pos, rpy) or None on lookup failure. If
+        unset, returns (pos, rpy) unchanged (rpy computed from quat) —
+        identical to the pre-global-limit behavior."""
+        if self._profile_frame is None:
+            return pos, self._quat_to_rpy(_QuatView(*quat))
+        try:
+            t = self.tf_buffer.lookup_transform(
+                self._profile_frame, EE_GOAL_FRAME,
+                rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=0.05))
+        except tf2_ros.TransformException:
+            return None
+        out_pos, out_quat = self._transform_pose(t, pos, quat)
+        return out_pos, self._quat_to_rpy(_QuatView(*out_quat))
+
+    def _get_pose(self, arm):
+        """(pos, rpy) for `arm`, in self._profile_frame if set, else the
+        native achieved-pose frame (identical behavior to _current). Returns
+        None on no achieved pose OR (if self._profile_frame is set) on TF
+        lookup failure — callers already handle None as "(no achieved pose
+        ...)"; this extends that same code path to a missing transform with
+        no new control-flow shape."""
+        pose = self._achieved.get(arm)
+        if pose is None:
+            return None
+        p = pose.pose.position
+        q = pose.pose.orientation
+        return self._apply_profile_frame((p.x, p.y, p.z), (q.x, q.y, q.z, q.w))
+
     def _capture_pose(self, arm, axis, label):
         """Live-position capture for limit-profile registration.
 
@@ -554,11 +665,10 @@ class IKSolverCLI(Node):
             sys.stdout.flush()
             while True:
                 rclpy.spin_once(self, timeout_sec=0.02)
-                pose = self._achieved.get(arm)
-                if pose is not None:
-                    p = pose.pose.position
-                    rpy = self._quat_to_rpy(pose.pose.orientation)
-                    v = self._axis_value(axis, (p.x, p.y, p.z), rpy)
+                got = self._get_pose(arm)
+                if got is not None:
+                    (p, rpy) = got
+                    v = self._axis_value(axis, p, rpy)
                     if is_angular:
                         line = f"\r\033[2K    {axis.upper()}: {math.degrees(v):8.2f}°"
                     else:
@@ -593,7 +703,12 @@ class IKSolverCLI(Node):
             print(f"  (no achieved pose received for {label} arm — aborting this arm)")
             return None
         p = best.pose.position
-        return (p.x, p.y, p.z), self._quat_to_rpy(best.pose.orientation)
+        q = best.pose.orientation
+        got = self._apply_profile_frame((p.x, p.y, p.z), (q.x, q.y, q.z, q.w))
+        if got is None:
+            print(f"  (no transform available for {label} arm — aborting this arm)")
+            return None
+        return got
 
     @staticmethod
     def _centered_bounds(center, delta):
@@ -663,11 +778,10 @@ class IKSolverCLI(Node):
             sys.stdout.flush()
             while True:
                 rclpy.spin_once(self, timeout_sec=0.02)
-                pose = self._achieved.get(arm)
-                if pose is not None:
-                    p = pose.pose.position
-                    rpy = self._quat_to_rpy(pose.pose.orientation)
-                    center = self._axis_value(axis, (p.x, p.y, p.z), rpy)
+                got = self._get_pose(arm)
+                if got is not None:
+                    (p, rpy) = got
+                    center = self._axis_value(axis, p, rpy)
                     if is_angular:
                         value_str = f"{math.degrees(center):8.2f}°"
                     else:
@@ -745,15 +859,33 @@ class IKSolverCLI(Node):
 
     # ── Limit-profile actions ──────────────────────────────────────
 
-    def action_create_limit_profile(self):
+    def action_create_limit_profile(self, frame=None):
         """Interactive per-arm position+orientation box, clamped by the mapper
         onto the absolute world-frame goal. Per-arm skip → pick a preset
         ±cm/±deg box around current (dropdown) or go manual; unskipped arms
-        cycle yaw→roll→pitch→z→y→x, each axis skip (dropdown) or register."""
+        cycle yaw→roll→pitch→z→y→x, each axis skip (dropdown) or register.
+
+        `frame`: None (default) records the box in the mapper's native goal
+        frame (legacy "local" behavior, unchanged). A frame name (e.g.
+        GLOBAL_LIMIT_FRAME) instead transforms every captured/live pose into
+        that TF frame first — this is the "global limit" wizard, invoked via
+        action_create_global_limit_profile()."""
+        self._profile_frame = frame
+        try:
+            return self._action_create_limit_profile_impl(frame)
+        finally:
+            self._profile_frame = None
+
+    def _action_create_limit_profile_impl(self, frame):
         clear_screen()
-        print("=== Create Manual Limit Profile ===\n")
-        print("The mapper clamps the EE goal inside these bounds (world frame "
-              "\"map\"). Angles are extrinsic XYZ RPY.\n")
+        if frame is None:
+            print("=== Create Manual Limit Profile ===\n")
+            print("The mapper clamps the EE goal inside these bounds (world frame "
+                  "\"map\"). Angles are extrinsic XYZ RPY.\n")
+        else:
+            print("=== Create Manual Global Limit Profile ===\n")
+            print(f"The mapper clamps the EE goal inside these bounds, expressed in "
+                  f"the '{frame}' TF frame. Angles are extrinsic XYZ RPY.\n")
 
         profile = {}   # arm -> {'x':..,'y':..,'z':..,'roll':..,'pitch':..,'yaw':..}
         for arm, arm_name in (('l', 'left'), ('r', 'right')):
@@ -761,7 +893,11 @@ class IKSolverCLI(Node):
             if not self._wait_achieved(arm):
                 print(f"\n{arm_name} arm: no fresh achieved pose — skipped.")
                 continue
-            pos, rpy = self._current(arm)
+            got = self._get_pose(arm)
+            if got is None:
+                print(f"\n{arm_name} arm: no transform into '{frame}' — skipped.")
+                continue
+            pos, rpy = got
             print(f"\n{arm_name.upper()} arm current: "
                   f"pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) m "
                   f"rpy=({math.degrees(rpy[0]):.1f}, {math.degrees(rpy[1]):.1f}, "
@@ -809,16 +945,26 @@ class IKSolverCLI(Node):
         if name is None:
             press_enter()
             return
-        lines = [f"[{name}]"] + self._profile_set_lines(profile)
+        header = [f"[{name}]"] if frame is None else [f"[{name}]", "type global", f"frame {frame}"]
+        lines = header + self._profile_set_lines(profile)
         self._upsert_section(name, lines)
 
         clear_screen()
-        print(f"=== Limit Profile Created: '{name}' ===")
+        kind = "Limit Profile" if frame is None else "Global Limit Profile"
+        print(f"=== {kind} Created: '{name}' ===")
         self._print_profile_summary(profile)
         print(f"\nSaved to {os.path.basename(LIMIT_PROFILE_FILE)}.")
-        print("Not applied yet — select 'Load limit profile' and pick "
+        load_menu = "Load limit profile" if frame is None else "Load global limit profile"
+        print(f"Not applied yet — select '{load_menu}' and pick "
               f"'{name}' to clamp the mapper with this box.")
         press_enter()
+
+    def action_create_global_limit_profile(self):
+        """Same wizard as action_create_limit_profile, but records the box in
+        GLOBAL_LIMIT_FRAME (e.g. an AprilTag marker frame) instead of the
+        mapper's native goal frame. Requires marker_frame_broadcaster running
+        and the marker currently visible."""
+        self.action_create_limit_profile(frame=GLOBAL_LIMIT_FRAME)
 
     @staticmethod
     def _profile_set_lines(profile):
@@ -886,7 +1032,7 @@ class IKSolverCLI(Node):
         for arm, bounds in profile.items():
             arm_name = 'left' if arm == 'l' else 'right'
             print(f"\n{arm_name.upper()} arm:")
-            cur = self._current(arm)
+            cur = self._get_pose(arm)
             for axis, (lo, hi) in bounds.items():
                 is_angular = axis in ('yaw', 'roll', 'pitch')
                 if is_angular:
@@ -928,9 +1074,28 @@ class IKSolverCLI(Node):
                 if line.startswith('[') and line.endswith(']'):
                     current = line[1:-1]
                     profiles.setdefault(current, [])
-                elif current is not None and line.startswith('set '):
+                elif current is not None and (line.startswith('set ')
+                                               or line.startswith('type ')
+                                               or line.startswith('frame ')):
                     profiles[current].append(line)
         return profiles
+
+    @staticmethod
+    def _section_is_global(lines):
+        """True if a section's stored lines declare `type global`."""
+        return any(line.strip() == 'type global' for line in lines)
+
+    def _global_profile_from_lines(self, lines):
+        """Parse a global-profile section's lines into
+        (frame, {arm: {axis:(lo,hi)}}), or (None, {}) if it has no `frame`
+        line. Mirrors _profile_from_lines but also reads the `frame <name>`
+        line; callers should check _section_is_global(lines) first."""
+        frame = None
+        for line in lines:
+            if line.startswith('frame '):
+                frame = line.split(None, 1)[1].strip()
+        bounds = self._profile_from_lines(lines)  # reuses the existing 'set' parser verbatim
+        return frame, bounds
 
     def _profile_from_lines(self, lines):
         """Parse `set <arm> <12 bounds>` lines back into a
@@ -991,12 +1156,15 @@ class IKSolverCLI(Node):
         clear_screen()
         print("=== Load limit profile from file ===")
         profiles = self._read_limit_profiles()
-        if not profiles:
+        # Global (marker-frame) sections have their own "Load global limit
+        # profile" menu item — excluded here so a global box is never
+        # accidentally published as a native-frame "set" (no frame token).
+        names = [n for n, lines in profiles.items() if not self._section_is_global(lines)]
+        if not names:
             print(f"\nNo saved limit profiles found ({LIMIT_PROFILE_FILE} "
                   f"does not exist or is empty).")
             press_enter()
             return
-        names = list(profiles.keys())
         selected = select_menu(names, "Select a limit profile to load")
         if selected is None:
             return
@@ -1015,6 +1183,88 @@ class IKSolverCLI(Node):
         self._print_profile_summary(profile)
         print("Clamping is now live in the mapper — drive past a bound to "
               "verify.")
+        press_enter()
+
+    def _publish_global_limit_profile(self, frame, profile):
+        """Publish a {arm: {axis: (lo, hi)}} profile as `setg <arm> <frame>
+        ...` messages on /teleop/limit_profile. Axis order matches the
+        mapper's parser: px py pz roll pitch yaw."""
+        order = ('x', 'y', 'z', 'roll', 'pitch', 'yaw')
+        for arm, bounds in profile.items():
+            vals = ' '.join(f'{v:.6f}' for axis in order for v in bounds[axis])
+            msg = String()
+            msg.data = f'setg {arm} {frame} {vals}'
+            self.limit_profile_pub.publish(msg)
+            self._spin_drain(1)
+
+    def action_save_global_limit_profile(self):
+        """Snapshot the current live GLOBAL limit profile to file under a name."""
+        clear_screen()
+        print("=== Save current global limit profile to file ===")
+        if not self._current_global_profile:
+            print("\nNo global limit profile is active. Create or load one first.")
+            press_enter()
+            return
+        name = self._ask_profile_name()
+        if name is None:
+            press_enter()
+            return
+
+        frame = self._current_global_profile['frame']
+        bounds = self._current_global_profile['bounds']
+        lines = ([f"[{name}]", "type global", f"frame {frame}"]
+                 + self._profile_set_lines(bounds))
+
+        # Insert/replace the section (an existing name is updated in place).
+        self._upsert_section(name, lines)
+        print(f"\nSaved global profile '{name}' to {LIMIT_PROFILE_FILE}")
+        press_enter()
+
+    def action_load_global_limit_profile(self):
+        """Load a named GLOBAL limit profile from file and publish it."""
+        clear_screen()
+        print("=== Load global limit profile from file ===")
+        profiles = self._read_limit_profiles()
+        names = [n for n, lines in profiles.items() if self._section_is_global(lines)]
+        if not names:
+            print(f"\nNo saved global limit profiles found ({LIMIT_PROFILE_FILE} "
+                  f"has no 'type global' sections).")
+            press_enter()
+            return
+        selected = select_menu(names, "Select a global limit profile to load")
+        if selected is None:
+            return
+        name = names[selected]
+        lines = profiles[name]
+
+        frame, bounds = self._global_profile_from_lines(lines)
+        if frame is None or not bounds:
+            print(f"\nProfile '{name}' has no parseable frame/set lines.")
+            press_enter()
+            return
+        self._current_global_profile = {'frame': frame, 'bounds': bounds}
+        self._publish_global_limit_profile(frame, bounds)
+        clear_screen()
+        print(f"=== Global Limit Profile Loaded: '{name}' (frame={frame}) ===")
+        self._profile_frame = frame
+        try:
+            self._print_profile_summary(bounds)
+        finally:
+            self._profile_frame = None
+        print("Clamping is now live in the mapper — drive past a bound to "
+              "verify.")
+        press_enter()
+
+    def action_clear_global_limit_profile(self):
+        """Drop the global limit profile for both arms (restore full range)."""
+        for arm in ('l', 'r'):
+            msg = String()
+            msg.data = f'clearg {arm}'
+            self.limit_profile_pub.publish(msg)
+        self._spin_drain(1)
+        self._current_global_profile = {}
+        clear_screen()
+        print("Global limit profile cleared for both arms — full range restored.\n")
         press_enter()
 
     def action_save_pose(self, to_file):
@@ -1126,6 +1376,10 @@ class IKSolverCLI(Node):
                 "Load limit profile                  (named box from file)",
                 "Clear limit profile                 (both arms, restore range)",
                 "Create limit profile                 (manual, per-arm box)",
+                "Save global limit profile           (current live global box to file)",
+                "Load global limit profile           (named global box from file)",
+                "Clear global limit profile          (both arms, restore range)",
+                "Create global limit profile         (marker-frame box, per-arm)",
                 "Reset to home                       (re-enable all, go home)",
                 "Show arm group status               (which groups enabled)",
                 "Show kinematic tree",
@@ -1149,9 +1403,13 @@ class IKSolverCLI(Node):
                 7:  self.action_load_limit_profile,
                 8:  self.action_clear_limit_profile,
                 9:  self.action_create_limit_profile,
-                10: self.action_reset_home,
-                11: self.action_show_status,
-                12: self.action_show_tree,
+                10: self.action_save_global_limit_profile,
+                11: self.action_load_global_limit_profile,
+                12: self.action_clear_global_limit_profile,
+                13: self.action_create_global_limit_profile,
+                14: self.action_reset_home,
+                15: self.action_show_status,
+                16: self.action_show_tree,
             }
 
             action = action_map.get(idx)

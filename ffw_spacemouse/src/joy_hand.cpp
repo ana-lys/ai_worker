@@ -20,6 +20,11 @@
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/float32.hpp"
 #include "ffw_spacemouse_msgs/msg/left_control_override.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "tf2/exceptions.h"
+#include "tf2/time.h"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
 
 using std::placeholders::_1;
 
@@ -57,6 +62,14 @@ public:
     this->declare_parameter("ee_orientation_slack_deg", 1.0);
     target_arm_ = this->get_parameter("target_arm").as_string();
     ee_orientation_slack_ = this->get_parameter("ee_orientation_slack_deg").as_double() * M_PI / 180.0;
+
+    // Global limit profile: ee_goal_'s assumed native frame, used as the
+    // source frame when TF-looking-up into a global profile's target frame
+    // (e.g. an AprilTag "marker_frame" published by ffw_odom).
+    this->declare_parameter("ee_goal_frame", "base_link");
+    ee_goal_frame_ = this->get_parameter("ee_goal_frame").as_string();
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     // Remote control override: a single software bool that plays the role of the
     // Quest engage gesture. When TRUE the spacemouse stream is suppressed at the
@@ -404,6 +417,47 @@ public:
           RCLCPP_INFO(this->get_logger(), "Limit profile cleared (%s)", target_arm_.c_str());
           return;
         }
+        if (action == "clearg") {
+          global_limit_profile_.active = false;
+          RCLCPP_INFO(this->get_logger(), "Global limit profile cleared (%s)", target_arm_.c_str());
+          return;
+        }
+        if (action == "setg") {
+          // Format: "setg <arm> <frame> <12 bounds>" -- same 12-bound layout
+          // as "set", plus a leading frame token naming the TF frame the box
+          // was recorded in (e.g. "marker_frame").
+          std::string frame;
+          ss >> frame;
+          if (frame.empty()) {
+            RCLCPP_WARN(this->get_logger(),
+              "Invalid limit_profile setg format — missing frame token");
+            return;
+          }
+          double bounds[12];
+          for (double &b : bounds) {
+            if (!(ss >> b)) {
+              RCLCPP_WARN(this->get_logger(),
+                "Invalid limit_profile setg format — need frame + 12 bounds, got partial parse");
+              return;
+            }
+          }
+          GlobalLimitProfile &gp = global_limit_profile_;
+          gp.frame_id = frame;
+          gp.px_min = bounds[0]; gp.px_max = bounds[1];
+          gp.py_min = bounds[2]; gp.py_max = bounds[3];
+          gp.pz_min = bounds[4]; gp.pz_max = bounds[5];
+          gp.roll_min = bounds[6]; gp.roll_max = bounds[7];
+          gp.pitch_min = bounds[8]; gp.pitch_max = bounds[9];
+          gp.yaw_min = bounds[10]; gp.yaw_max = bounds[11];
+          gp.active = true;
+          RCLCPP_INFO(this->get_logger(),
+            "Global limit profile set (%s, frame=%s): x[%.3f,%.3f] y[%.3f,%.3f] z[%.3f,%.3f] "
+            "roll[%.3f,%.3f] pitch[%.3f,%.3f] yaw[%.3f,%.3f]",
+            target_arm_.c_str(), gp.frame_id.c_str(), gp.px_min, gp.px_max, gp.py_min, gp.py_max,
+            gp.pz_min, gp.pz_max, gp.roll_min, gp.roll_max, gp.pitch_min, gp.pitch_max,
+            gp.yaw_min, gp.yaw_max);
+          return;
+        }
         if (action != "set") {
           RCLCPP_WARN(this->get_logger(), "Invalid limit_profile action: '%s'", action.c_str());
           return;
@@ -496,12 +550,40 @@ private:
            Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   }
 
+  // Hand-rolled TransformStamped -> Eigen::Isometry3d, consistent with this
+  // file's existing hand-rolled quaternion/rotation-matrix style (avoids
+  // adding a tf2_eigen dependency for one conversion).
+  static Eigen::Isometry3d transform_to_eigen(const geometry_msgs::msg::TransformStamped &t) {
+    Eigen::Isometry3d out = Eigen::Isometry3d::Identity();
+    out.translation() = Eigen::Vector3d(
+      t.transform.translation.x, t.transform.translation.y, t.transform.translation.z);
+    Eigen::Quaterniond q(t.transform.rotation.w, t.transform.rotation.x,
+                         t.transform.rotation.y, t.transform.rotation.z);
+    out.linear() = q.normalized().toRotationMatrix();
+    return out;
+  }
+
   // ── Manual limit profile (CLI-created per-arm position+orientation box) ──
   // Bounds in meters and radians, clamped onto the absolute world-frame goal
   // every tick before publishing. Guarded by ee_lock_mutex_ (subscription
   // callback writes; apply_limit_profile() reads under the caller's lock).
   struct LimitProfile {
     bool active {false};
+    double px_min {0}, px_max {0};
+    double py_min {0}, py_max {0};
+    double pz_min {0}, pz_max {0};
+    double roll_min {0}, roll_max {0};
+    double pitch_min {0}, pitch_max {0};
+    double yaw_min {0}, yaw_max {0};
+  };
+
+  // ── Global limit profile (CLI-created box expressed in an external TF
+  // frame, e.g. an AprilTag "marker_frame"). Same shape as LimitProfile plus
+  // frame_id so apply_global_limit_profile() knows what to TF-lookup against.
+  // Guarded by ee_lock_mutex_, same contract as limit_profile_.
+  struct GlobalLimitProfile {
+    bool active {false};
+    std::string frame_id;  // target frame the box was recorded in, e.g. "marker_frame"
     double px_min {0}, px_max {0};
     double py_min {0}, py_max {0};
     double pz_min {0}, pz_max {0};
@@ -552,6 +634,46 @@ private:
     double pitch = std::clamp(rpy.y(), p.pitch_min, p.pitch_max);
     double yaw = std::clamp(rpy.z(), p.yaw_min, p.yaw_max);
     ee_goal_.linear() = rpy_to_matrix(roll, pitch, yaw);
+  }
+
+  void apply_global_limit_profile() {
+    // Same contract as apply_limit_profile(): caller holds ee_lock_mutex_,
+    // call AFTER apply_ee_locks() and apply_limit_profile() so this is the
+    // outermost envelope. Fails OPEN (no clamp) if the target frame isn't
+    // currently broadcast -- never crashes, never clamps on stale/bad data.
+    if (!global_limit_profile_.active) return;
+
+    geometry_msgs::msg::TransformStamped t_lookup;
+    try {
+      t_lookup = tf_buffer_->lookupTransform(
+        global_limit_profile_.frame_id, ee_goal_frame_,
+        tf2::TimePointZero, tf2::durationFromSec(0.05));
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "Global limit profile (%s): TF lookup %s -> %s failed (%s) -- "
+        "not clamping this tick", target_arm_.c_str(),
+        ee_goal_frame_.c_str(), global_limit_profile_.frame_id.c_str(), ex.what());
+      return;
+    }
+
+    const Eigen::Isometry3d T_frame_from_goal = transform_to_eigen(t_lookup);
+    Eigen::Isometry3d goal_in_frame = T_frame_from_goal * ee_goal_;
+
+    const GlobalLimitProfile &p = global_limit_profile_;
+    Eigen::Vector3d tr = goal_in_frame.translation();
+    tr.x() = std::clamp(tr.x(), p.px_min, p.px_max);
+    tr.y() = std::clamp(tr.y(), p.py_min, p.py_max);
+    tr.z() = std::clamp(tr.z(), p.pz_min, p.pz_max);
+    goal_in_frame.translation() = tr;
+
+    Eigen::Vector3d rpy = extract_rpy(goal_in_frame.linear());
+    double roll = std::clamp(rpy.x(), p.roll_min, p.roll_max);
+    double pitch = std::clamp(rpy.y(), p.pitch_min, p.pitch_max);
+    double yaw = std::clamp(rpy.z(), p.yaw_min, p.yaw_max);
+    goal_in_frame.linear() = rpy_to_matrix(roll, pitch, yaw);
+
+    // Transform back into ee_goal_'s native frame.
+    ee_goal_ = T_frame_from_goal.inverse() * goal_in_frame;
   }
 
   // ── Quest override helpers (quest_teleop_plan §4-§10, Task 2) ──
@@ -1038,6 +1160,7 @@ private:
         std::lock_guard<std::mutex> lock(ee_lock_mutex_);
         apply_ee_locks();
         apply_limit_profile();
+        apply_global_limit_profile();
         publish_pose();
         return;
       }
@@ -1047,6 +1170,7 @@ private:
         std::lock_guard<std::mutex> lock(ee_lock_mutex_);
         apply_ee_locks();       // soft-locks still enforced in quest mode (§6)
         apply_limit_profile();  // profile: outer hard envelope on the whole pose
+        apply_global_limit_profile();  // global: outer envelope in an external (e.g. marker) frame
       }
       publish_pose(true);   // quest active → absolute-goal topic (solver pose path)
       return;   // SpaceMouse velocity suppressed while quest is active (§7)
@@ -1156,6 +1280,7 @@ private:
       std::lock_guard<std::mutex> lock(ee_lock_mutex_);
       apply_ee_locks();        // soft-locks: clamp locked roll/yaw/pitch axes
       apply_limit_profile();   // profile: outer hard envelope on the whole pose
+      apply_global_limit_profile();  // global: outer envelope in an external (e.g. marker) frame
     }
 
     publish_pose();
@@ -1319,6 +1444,13 @@ private:
 
   // ── Manual limit profile (CLI-created; guarded by ee_lock_mutex_) ──
   LimitProfile limit_profile_;
+
+  // ── Global limit profile (CLI-created; frame from an external TF source,
+  // e.g. an AprilTag marker board via ffw_odom's marker_frame_broadcaster) ──
+  GlobalLimitProfile global_limit_profile_;
+  std::string ee_goal_frame_;  // assumed native frame of ee_goal_; from param "ee_goal_frame"
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // ── Quest override state (quest_teleop_plan §4-§10, Task 2) ──
   QuestState quest_state_ {QuestState::SM_CONTROL};   // quest_active_ ⇔ != SM_CONTROL

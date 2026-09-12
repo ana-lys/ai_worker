@@ -1,0 +1,47 @@
+### Marker-frame EKF config ###
+# Fuses continuous wheel/swerve odometry (/odom, velocity only) with a
+# low-rate (~4-5 Hz) AprilTag marker-board absolute pose correction
+# (/oakd/marker_frame_baselink_pose, from marker_pose_corrector) into a
+# smooth, high-rate base_link pose in marker_frame. Same pattern as
+# ekf.yaml's map-frame fusion (odom + ICP correction), just anchored to the
+# marker board instead of the static wall map -- no map/localization stack
+# required. world_frame == odom_frame (no separate map_frame) so publish_tf
+# broadcasts marker_frame -> base_link directly, one hop.
+ekf_filter_node:
+  ros__parameters:
+    use_sim_time: false
+    clear_params: true
+
+    frequency: 50.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+
+    odom_frame: marker_frame
+    base_link_frame: base_link
+    world_frame: marker_frame
+
+    publish_tf: true
+    publish_acceleration: false
+
+    # Swerve wheel odometry (continuous prediction, velocity only)
+    odom0: /odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_queue_size: 10
+    odom0_differential: false
+    odom0_relative: false
+
+    # AprilTag marker board absolute pose correction (~4-5 Hz)
+    pose0: /oakd/marker_frame_baselink_pose
+    pose0_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    pose0_queue_size: 5
+    pose0_differential: false
+    pose0_relative: false
+    pose0_rejection_threshold: 5.0

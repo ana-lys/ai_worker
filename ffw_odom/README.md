@@ -44,6 +44,47 @@ The `scan_to_map_icp` node implements a point-to-line registration algorithm des
 
 ---
 
+## Marker-Frame EKF (`marker_pose_corrector` + `ekf_node`)
+
+Publishes a smooth, high-rate (50 Hz) `marker_frame <-> base_link` TF by
+fusing continuous wheel/swerve odometry (`/odom`, velocity only) with a
+low-rate (~4-5 Hz) AprilTag marker-board absolute pose correction — the same
+`robot_localization` `ekf_node` pattern already used above for the map-frame
+fusion (odom + ICP correction), just anchored to the marker board instead of
+the static wall map, so no map/localization stack is required. Added here as
+a convenience TF utility for the teleop "global limit" feature
+(`ffw_spacemouse`/`ffw_collision_checker`) even though the rest of this
+package is 2D lidar odometry/localization.
+
+* **`marker_pose_corrector`**: subscribes `/oakd/marker_board_pose`
+  (published by `ffw_depthai`'s AprilTag board detector), applies a fixed
+  `board_yaw_offset_rad` correction about the marker's own local Z axis so
+  its axes read as ROS front/left/up, inverts it into an absolute
+  base_link-in-marker_frame measurement, and publishes it as
+  `geometry_msgs/PoseWithCovarianceStamped` on `/oakd/marker_frame_baselink_pose`.
+* **`ekf_node`** (`robot_localization`, config `marker_ekf.yaml`): fuses that
+  correction with `/odom` and broadcasts `marker_frame -> base_link` via TF
+  (`publish_tf: true`).
+
+### `marker_pose_corrector` parameters
+* `source_frame` (string, default: `base_link`): Frame the raw marker pose arrives in.
+* `child_frame` (string, default: `marker_frame`): World-anchor frame name used
+  downstream (must match `marker_ekf.yaml`'s `odom_frame`/`world_frame`).
+* `board_yaw_offset_rad` (double, default: `pi/2`): Fixed yaw correction about
+  the marker's own Z axis. Sign/axis convention is unverified — check with
+  `ros2 run tf2_ros tf2_echo marker_frame base_link` and adjust if needed.
+* `input_topic` (string, default: `/oakd/marker_board_pose`): Input pose topic.
+* `output_topic` (string, default: `/oakd/marker_frame_baselink_pose`): Output
+  pose-correction topic consumed by `marker_ekf.yaml`'s `pose0`.
+* `position_stddev_m` / `yaw_stddev_rad` / `orientation_stddev_rad`: diagonal
+  covariance filled on the output measurement.
+
+```bash
+ros2 launch ffw_odom marker_ekf.launch.py
+```
+
+---
+
 ## Launch Instructions
 
 ### Launching Odometry Fusion (rf2o + EKF)
