@@ -621,6 +621,26 @@ class IKSolverCLI(Node):
         p = pose.pose.position
         return (p.x, p.y, p.z), self._quat_to_rpy(pose.pose.orientation)
 
+    def _wait_for_transform(self, target_frame, source_frame, timeout=1.0):
+        """Actively spin while polling for a transform (same retry pattern as
+        _wait_achieved). Necessary because the TF buffer/listener runs with
+        spin_thread=False (this node is already manually spun elsewhere —
+        see __init__): a bare lookup_transform(..., timeout=X) blocks THIS
+        thread for up to X seconds with nothing else spinning to deliver a
+        fresh /tf message in the meantime, so it can only succeed by luck —
+        whatever was already buffered from earlier spin_once() calls before
+        the lookup started. Returns the TransformStamped, or None on
+        timeout."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
+            try:
+                return self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, rclpy.time.Time())
+            except tf2_ros.TransformException:
+                continue
+        return None
+
     def _apply_profile_frame(self, pos, quat):
         """If self._profile_frame is set, transform (pos, quat) (quat as an
         (x, y, z, w) tuple) into it via a live TF lookup (source
@@ -629,11 +649,8 @@ class IKSolverCLI(Node):
         identical to the pre-global-limit behavior."""
         if self._profile_frame is None:
             return pos, self._quat_to_rpy(_QuatView(*quat))
-        try:
-            t = self.tf_buffer.lookup_transform(
-                self._profile_frame, EE_GOAL_FRAME,
-                rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=0.05))
-        except tf2_ros.TransformException:
+        t = self._wait_for_transform(self._profile_frame, EE_GOAL_FRAME)
+        if t is None:
             return None
         out_pos, out_quat = self._transform_pose(t, pos, quat)
         return out_pos, self._quat_to_rpy(_QuatView(*out_quat))
