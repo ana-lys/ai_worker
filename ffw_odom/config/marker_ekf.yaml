@@ -12,7 +12,10 @@ marker_ekf_filter_node:
     use_sim_time: false
     clear_params: true
 
-    frequency: 50.0
+    # 30 Hz: /odom (velocity input) publishes at 50 Hz, so 50 Hz output here
+    # was oversampling the actual input rate for no benefit while leaving no
+    # CPU headroom (was intermittently missing its own update-rate budget).
+    frequency: 30.0
     sensor_timeout: 0.2
     two_d_mode: true
 
