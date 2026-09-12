@@ -225,11 +225,18 @@ class IKSolverCLI(Node):
         self._current_global_profile = {}
 
         # ── TF buffer/listener for global (external-frame) limit profiles ──
-        # spin_thread=True so /tf, /tf_static keep getting processed even
-        # while the CLI is blocked in getch()/input() menu navigation, not
-        # just during the tight capture-loop spin_once() calls.
+        # spin_thread=False (default): this node is already manually spun via
+        # rclpy.spin_once(self, ...) throughout the CLI (service calls,
+        # _wait_achieved, the capture-loop ticks); spin_thread=True would add
+        # a second background executor spinning this SAME node concurrently
+        # with those manual calls, which rclpy does not support (races inside
+        # wait_for_ready_callbacks — this crashed under exactly that
+        # combination). /tf, /tf_static get processed on this node's own
+        # subscriptions whenever any of the existing spin_once() calls run;
+        # they just don't update while the CLI is blocked in getch()/input()
+        # between those calls.
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True)
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         # Set for the duration of a global-profile wizard call; None = local
         # (native goal frame) behavior, unchanged from before this feature.
         self._profile_frame = None

@@ -7,7 +7,7 @@
 # marker board instead of the static wall map -- no map/localization stack
 # required. world_frame == odom_frame (no separate map_frame) so publish_tf
 # broadcasts marker_frame -> base_link directly, one hop.
-ekf_filter_node:
+marker_ekf_filter_node:
   ros__parameters:
     use_sim_time: false
     clear_params: true
