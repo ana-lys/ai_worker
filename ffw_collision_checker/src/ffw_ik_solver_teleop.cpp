@@ -2785,6 +2785,10 @@ int main(int argc, char **argv) {
   bool ee_waking_l = false;
   bool ee_waking_r = false;
   int ee_wake_ramp_ticks_l = 0;
+  // Previous tick's RAW (pre-clip) target: used ONLY for wake detection (see
+  // below) -- NOT the clipped current_target_l/r used everywhere else.
+  Eigen::Isometry3d prev_raw_target_l = init_l;
+  Eigen::Isometry3d prev_raw_target_r = init_r;
   int ee_wake_ramp_ticks_r = 0;
   constexpr int kMaxWakeRampTicks = 100;  // ~1s at the 100Hz control rate: safety cutoff only
 
@@ -2868,13 +2872,32 @@ int main(int argc, char **argv) {
       Eigen::AngleAxisd aa(a.rotation() * b.rotation().transpose());
       return std::abs(aa.angle()) > node->ee_wake_rot_threshold_rad();
     };
+    // Wake detection uses the RAW (pre-clip) target, NOT current_target_l/r.
+    // clip_target() runs unconditionally every tick (even while "asleep"),
+    // continuously re-pinning target_l_/r_ to within ~1cm of a frozen
+    // achieved pose -- so while asleep, the CLIPPED target barely moves
+    // tick-to-tick even though the operator keeps commanding motion and the
+    // underlying raw/accumulated goal keeps drifting further away
+    // underneath (accum_l_trans_/accum_r_trans_ are deliberately never
+    // leashed -- see clip_target's comment). Comparing clipped-target deltas
+    // for the wake check meant the solver could stay "asleep" indefinitely
+    // under continuous input, only waking once the clip-pinned value
+    // happened to jump far enough -- at which point it resumed chasing the
+    // ENTIRE unclamped backlog in one jump. Raw isn't leash-suppressed, so
+    // it correctly reflects live operator intent on both the mapper/
+    // SpaceMouse delta path (raw_target_l_/r_ = the true unclamped
+    // accumulated goal) and the quest path (raw_target_l_/r_ = quest's own
+    // continuously-updating leashed target, which still moves every active
+    // tick) -- see the raw_target_l_/r_ assignments throughout this file.
+    Eigen::Isometry3d raw_target_l, raw_target_r;
+    node->get_raw_targets(raw_target_l, raw_target_r);
     // Snapshot pre-wake state for the ee_sleep_debug log below: was the
     // solver asleep going into this tick, and did this tick's target
     // actually cross the wake threshold (vs. is_solving_to_home forcing a
     // solve regardless)?
     bool ee_settled_before_check = ee_settled;
-    bool woke_l = target_moved(current_target_l, prev_target_l);
-    bool woke_r = target_moved(current_target_r, prev_target_r);
+    bool woke_l = target_moved(raw_target_l, prev_raw_target_l);
+    bool woke_r = target_moved(raw_target_r, prev_raw_target_r);
     bool woke_this_tick = woke_l || woke_r;
     if (woke_this_tick) {
       ee_settled = false;
@@ -2889,12 +2912,14 @@ int main(int argc, char **argv) {
     }
     if (node->ee_sleep_debug() && ee_settled_before_check && woke_this_tick) {
       RCLCPP_INFO(node->get_logger(),
-        "[EE_SLEEP] wake: |dL|=%.4fm |dR|=%.4fm (target crossed the "
-        "%.4fm/%.4frad wake threshold)",
-        (current_target_l.translation() - prev_target_l.translation()).norm(),
-        (current_target_r.translation() - prev_target_r.translation()).norm(),
+        "[EE_SLEEP] wake: |dL_raw|=%.4fm |dR_raw|=%.4fm (raw target crossed "
+        "the %.4fm/%.4frad wake threshold)",
+        (raw_target_l.translation() - prev_raw_target_l.translation()).norm(),
+        (raw_target_r.translation() - prev_raw_target_r.translation()).norm(),
         node->ee_wake_pos_threshold_m(), node->ee_wake_rot_threshold_rad());
     }
+    prev_raw_target_l = raw_target_l;
+    prev_raw_target_r = raw_target_r;
     // Wake-ramp: while an arm is "waking" (ee_waking_l/r), bound EVERY tick's
     // target to the same leash clip_target() applies everywhere else,
     // pulling it at most kMaxDist/kMaxAngle closer to that arm's own
