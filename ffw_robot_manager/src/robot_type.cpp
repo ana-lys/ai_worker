@@ -69,7 +69,9 @@ std::vector<BatteryInfo> FfwSg2Rev1RobotType::get_battery_configurations() const
 
 FfwSg2SmtmRobotType::FfwSg2SmtmRobotType()
 {
-  // Battery monitoring is not supported on the SMTM variant
+  // Shares the same ubetter battery model and dxl1/dxl61 power bus as
+  // ffw_sg2_rev1; only the right-arm gripper actuator differs.
+  battery_model_ = std::make_shared<UbetterBatteryModel>();
 }
 
 std::string FfwSg2SmtmRobotType::get_type_name() const
@@ -79,17 +81,37 @@ std::string FfwSg2SmtmRobotType::get_type_name() const
 
 bool FfwSg2SmtmRobotType::is_battery_monitoring_enabled() const
 {
-  return false;
+  return true;
 }
 
 std::shared_ptr<BatteryModel> FfwSg2SmtmRobotType::get_battery_model() const
 {
-  return nullptr;
+  return battery_model_;
 }
 
 std::vector<BatteryInfo> FfwSg2SmtmRobotType::get_battery_configurations() const
 {
-  return {};
+  std::vector<BatteryInfo> batteries;
+
+  // Left battery
+  BatteryInfo left_battery;
+  left_battery.name = "left";
+  left_battery.interface_name = "dxl1";
+  left_battery.topic_name = "ai_worker/battery/left/state";
+  left_battery.frame_id = "battery_left";
+  left_battery.voltage_index = std::numeric_limits<size_t>::max();
+  batteries.push_back(left_battery);
+
+  // Right battery
+  BatteryInfo right_battery;
+  right_battery.name = "right";
+  right_battery.interface_name = "dxl61";
+  right_battery.topic_name = "ai_worker/battery/right/state";
+  right_battery.frame_id = "battery_right";
+  right_battery.voltage_index = std::numeric_limits<size_t>::max();
+  batteries.push_back(right_battery);
+
+  return batteries;
 }
 
 std::shared_ptr<RobotType> create_robot_type(const std::string & type_name)

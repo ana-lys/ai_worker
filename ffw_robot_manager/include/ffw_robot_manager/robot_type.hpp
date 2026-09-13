@@ -95,7 +95,8 @@ private:
  * @brief FFW SG2 SMTM robot type implementation
  *
  * The SMTM variant replaces the RH-P12-RN-A gripper on the right arm with
- * an XM430-W350 and does not support battery monitoring.
+ * an XM430-W350. It shares the same dxl1/dxl61 battery power bus as the
+ * rev1 follower, so battery monitoring is supported identically.
  */
 class FfwSg2SmtmRobotType : public RobotType
 {
@@ -107,6 +108,9 @@ public:
   bool is_battery_monitoring_enabled() const override;
   std::shared_ptr<BatteryModel> get_battery_model() const override;
   std::vector<BatteryInfo> get_battery_configurations() const override;
+
+private:
+  std::shared_ptr<BatteryModel> battery_model_;
 };
 
 /**
