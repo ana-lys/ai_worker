@@ -77,6 +77,14 @@ def generate_launch_description():
             description='Whether to launch rf2o laser odometry',
         ),
         DeclareLaunchArgument(
+            'launch_ekf',
+            default_value='false',
+            description='Whether to launch the map-frame EKF (odom + ICP correction) -- '
+                        'off by default since scan_to_map_icp is also off by default '
+                        '(not currently needed); does not affect the separate '
+                        'marker-frame EKF (launch_marker_ekf)',
+        ),
+        DeclareLaunchArgument(
             'launch_marker_ekf',
             default_value='true',
             description='Whether to launch the AprilTag marker-frame EKF fusion '
@@ -120,6 +128,7 @@ def generate_launch_description():
     init_position_file = LaunchConfiguration('init_position_file')
     ros2_control_type = LaunchConfiguration('ros2_control_type')
     launch_rf2o = LaunchConfiguration('launch_rf2o')
+    launch_ekf = LaunchConfiguration('launch_ekf')
     launch_marker_ekf = LaunchConfiguration('launch_marker_ekf')
     dest_ip = LaunchConfiguration('dest_ip')
     base_port = LaunchConfiguration('base_port')
@@ -478,7 +487,7 @@ def generate_launch_description():
                                                             'launch',
                                                             'odom.launch.py'])),
         launch_arguments={
-            'use_ekf': 'true',
+            'use_ekf': launch_ekf,
             'launch_rf2o': launch_rf2o
         }.items(),
         condition=IfCondition(launch_lidar)
