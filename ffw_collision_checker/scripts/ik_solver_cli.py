@@ -619,6 +619,15 @@ class IKSolverCLI(Node):
                     return True
         return False
 
+    def _pose_age(self, arm):
+        """Seconds since the last achieved-pose message for this arm, or
+        None if none received yet. Diagnostic only (live-display staleness
+        check for the global limit-profile wizard)."""
+        pose = self._achieved.get(arm)
+        if pose is None:
+            return None
+        return time.time() - self._stamp_ns(pose)
+
     def _current(self, arm):
         """(pos, rpy) of the latest achieved pose for this arm, or None."""
         pose = self._achieved.get(arm)
@@ -709,10 +718,11 @@ class IKSolverCLI(Node):
                 if got is not None:
                     (p, rpy) = got
                     v = self._axis_value(axis, p, rpy)
+                    dbg = f"  [age={self._pose_age(arm):.2f}s]" if self._profile_frame is not None else ""
                     if is_angular:
-                        line = f"\r\033[2K    {axis.upper()}: {math.degrees(v):8.2f}°"
+                        line = f"\r\033[2K    {axis.upper()}: {math.degrees(v):8.2f}°{dbg}"
                     else:
-                        line = f"\r\033[2K    {axis.upper()}: {v*100:8.2f} cm"
+                        line = f"\r\033[2K    {axis.upper()}: {v*100:8.2f} cm{dbg}"
                     sys.stdout.write(line)
                     sys.stdout.flush()
                 elif self._profile_frame is not None:
@@ -832,8 +842,9 @@ class IKSolverCLI(Node):
                         value_str = f"{math.degrees(center):8.2f}°"
                     else:
                         value_str = f"{center * 100:8.2f} cm"
+                    dbg = f"  [age={self._pose_age(arm):.2f}s]" if self._profile_frame is not None else ""
                     sys.stdout.write(f"\r\033[2K    {axis.upper()}: "
-                                      f"{value_str} — {prompt_suffix}")
+                                      f"{value_str}{dbg} — {prompt_suffix}")
                     sys.stdout.flush()
                 elif self._profile_frame is not None:
                     sys.stdout.write(
