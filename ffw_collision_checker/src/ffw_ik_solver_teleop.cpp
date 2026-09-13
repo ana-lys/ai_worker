@@ -447,13 +447,22 @@ public:
     // real small input without waking on idle rest noise.
     this->declare_parameter<double>("ee_wake_pos_threshold_m", 1e-3);
     this->declare_parameter<double>("ee_wake_rot_threshold_rad", 5e-3);
-    // Diagnostic isolation switch: when true, bypasses the idle-sleep skip
-    // entirely -- solveStep() runs every tick regardless of ee_settled, as
-    // if idle-sleep didn't exist. Live-settable (ros2 param set). Use this
-    // to test whether a reported "stuck then jump" symptom is caused by the
-    // idle-sleep/wake mechanism at all: if the symptom persists identically
-    // with this true, idle-sleep is not the (or not the only) cause.
-    this->declare_parameter<bool>("disable_idle_sleep", false);
+    // Bypasses the idle-sleep skip entirely -- solveStep() runs every tick
+    // regardless of ee_settled, as if idle-sleep didn't exist. Live-settable
+    // (ros2 param set). Defaults to true: confirmed via repeated isolation
+    // testing (toggling this off and on) that idle-sleep's res.stalled
+    // plateau heuristic was causing a "stuck then jump" symptom during
+    // ACTIVE, continuous SpaceMouse teleop, not just at rest -- the
+    // recent-operator-activity gate added alongside this switch reduced but
+    // did not fully eliminate it (the ~150ms window is likely still too
+    // short for natural pauses between deliberate movements). Verified safe
+    // to disable outright: ee_settled has no correctness dependents anywhere
+    // else in this file, and continuous solveStep costs ~13% CPU on the
+    // (idle, 16-core) machine this node runs on -- unrelated to the
+    // Dynamixel/USB bus contention on the robot side, a completely separate
+    // machine. Set to false to re-enable idle-sleep once a more complete fix
+    // for res.stalled's plateau-under-continuous-input behavior exists.
+    this->declare_parameter<bool>("disable_idle_sleep", true);
     // clip_target()'s leash bounds, previously hardcoded default args (1cm /
     // 0.1rad) at its only call site. Tunable so the leash itself can be
     // loosened (e.g. 10.0 / 10.0 to effectively disable it) as a second
