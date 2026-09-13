@@ -435,6 +435,18 @@ public:
     // raw-vs-leashed target_l_/r_ gap at the moment solveStep resumes, so a
     // delay-then-jump report can be confirmed against this mechanism.
     this->declare_parameter<bool>("ee_sleep_debug", false);
+    // Idle-sleep wake threshold (target_moved(), used to decide a real new
+    // goal arrived vs. sensor jitter re-asserting an unchanged target).
+    // Tunable rather than a hardcoded constant: joy_hand.cpp's cubic
+    // SpaceMouse response curve heavily attenuates gentle input, so a small
+    // but genuinely intentional nudge can produce a target delta smaller
+    // than a fixed threshold -- silently failing to wake until the operator
+    // pushes hard enough to cross it. Defaults match the previous hardcoded
+    // values (1mm / ~0.29deg); lower them live (ros2 param set) while
+    // watching ee_sleep_debug's wake logging to find the level that wakes on
+    // real small input without waking on idle rest noise.
+    this->declare_parameter<double>("ee_wake_pos_threshold_m", 1e-3);
+    this->declare_parameter<double>("ee_wake_rot_threshold_rad", 5e-3);
 
     this->declare_parameter<std::string>("robot_model", "bg2");
     robot_model_ = this->get_parameter("robot_model").as_string();
@@ -459,6 +471,8 @@ public:
     collision_debug_ = true;
     quest_debug_solver_ = this->get_parameter("quest_debug_solver").as_bool();
     ee_sleep_debug_ = this->get_parameter("ee_sleep_debug").as_bool();
+    ee_wake_pos_threshold_m_ = this->get_parameter("ee_wake_pos_threshold_m").as_double();
+    ee_wake_rot_threshold_rad_ = this->get_parameter("ee_wake_rot_threshold_rad").as_double();
 
     parameter_callback_handle_ = this->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> &parameters) {
@@ -2278,6 +2292,8 @@ private:
   bool collision_debug_ = true;
   bool quest_debug_solver_ = false;
   bool ee_sleep_debug_ = false;
+  double ee_wake_pos_threshold_m_ = 1e-3;
+  double ee_wake_rot_threshold_rad_ = 5e-3;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
   std::vector<std::string> frozen_joints_{"head"};
@@ -2393,6 +2409,8 @@ public:
   bool is_hardware_mode() const { return hardware_mode_; }
   bool quest_debug_solver() const { return quest_debug_solver_; }
   bool ee_sleep_debug() const { return ee_sleep_debug_; }
+  double ee_wake_pos_threshold_m() const { return ee_wake_pos_threshold_m_; }
+  double ee_wake_rot_threshold_rad() const { return ee_wake_rot_threshold_rad_; }
   bool is_sync_requested() const { return hardware_sync_requested_; }
   const std::string &get_robot_model() const { return robot_model_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
@@ -2760,6 +2778,15 @@ int main(int argc, char **argv) {
   // (NOT applied every tick -- see there for why).
   Eigen::Isometry3d prev_achieved_l = init_l;
   Eigen::Isometry3d prev_achieved_r = init_r;
+  // Per-arm wake-ramp state: true while that arm's post-wake target is still
+  // being leashed toward its (continuously updating) achieved pose, one tick
+  // at a time, instead of a single clamp-then-fully-release. See the leash
+  // block below for why this replaced the old one-shot wake-guard.
+  bool ee_waking_l = false;
+  bool ee_waking_r = false;
+  int ee_wake_ramp_ticks_l = 0;
+  int ee_wake_ramp_ticks_r = 0;
+  constexpr int kMaxWakeRampTicks = 100;  // ~1s at the 100Hz control rate: safety cutoff only
 
   while (viewer.enabled() && rclcpp::ok()) {
     // Rail mode owns the tick: read once, gate everything below on it.
@@ -2830,67 +2857,109 @@ int main(int argc, char **argv) {
     }
     // Coarser than the isApprox check above (which also fires on float noise,
     // fine for an err_hist reset): waking the idle-sleep gate below needs an
-    // actually-new goal -- >1mm / >~0.3deg -- not sensor jitter re-asserting
-    // an unchanged target.
-    auto target_moved = [](const Eigen::Isometry3d &a, const Eigen::Isometry3d &b) {
-      constexpr double kPosEps = 1e-3;  // 1 mm
-      constexpr double kRotEps = 5e-3;  // ~0.29 deg
-      if ((a.translation() - b.translation()).norm() > kPosEps) return true;
+    // actually-new goal, not sensor jitter re-asserting an unchanged target.
+    // Thresholds are tunable params (ee_wake_pos_threshold_m/
+    // ee_wake_rot_threshold_rad), not hardcoded, so they can be dialed down
+    // live to catch a genuinely small/gentle input that joy_hand.cpp's cubic
+    // response curve has heavily attenuated, without requiring the operator
+    // to push hard enough to "break through" a fixed threshold.
+    auto target_moved = [&node](const Eigen::Isometry3d &a, const Eigen::Isometry3d &b) {
+      if ((a.translation() - b.translation()).norm() > node->ee_wake_pos_threshold_m()) return true;
       Eigen::AngleAxisd aa(a.rotation() * b.rotation().transpose());
-      return std::abs(aa.angle()) > kRotEps;
+      return std::abs(aa.angle()) > node->ee_wake_rot_threshold_rad();
     };
     // Snapshot pre-wake state for the ee_sleep_debug log below: was the
     // solver asleep going into this tick, and did this tick's target
     // actually cross the wake threshold (vs. is_solving_to_home forcing a
     // solve regardless)?
     bool ee_settled_before_check = ee_settled;
-    bool woke_this_tick = target_moved(current_target_l, prev_target_l) ||
-                          target_moved(current_target_r, prev_target_r);
+    bool woke_l = target_moved(current_target_l, prev_target_l);
+    bool woke_r = target_moved(current_target_r, prev_target_r);
+    bool woke_this_tick = woke_l || woke_r;
     if (woke_this_tick) {
       ee_settled = false;
+    }
+    if (ee_settled_before_check && woke_l && !ee_waking_l) {
+      ee_waking_l = true;
+      ee_wake_ramp_ticks_l = 0;
+    }
+    if (ee_settled_before_check && woke_r && !ee_waking_r) {
+      ee_waking_r = true;
+      ee_wake_ramp_ticks_r = 0;
     }
     if (node->ee_sleep_debug() && ee_settled_before_check && woke_this_tick) {
       RCLCPP_INFO(node->get_logger(),
         "[EE_SLEEP] wake: |dL|=%.4fm |dR|=%.4fm (target crossed the "
-        "1mm/0.29deg wake threshold)",
+        "%.4fm/%.4frad wake threshold)",
         (current_target_l.translation() - prev_target_l.translation()).norm(),
-        (current_target_r.translation() - prev_target_r.translation()).norm());
+        (current_target_r.translation() - prev_target_r.translation()).norm(),
+        node->ee_wake_pos_threshold_m(), node->ee_wake_rot_threshold_rad());
     }
-    // Wake-guard: bound ONLY the very first solveStep call after an
-    // idle-sleep gap to the same leash clip_target() applies everywhere else
-    // -- using prev_achieved_l/r (the achieved pose from when we went to
-    // sleep; it hasn't moved since, by definition of "settled"). This is
-    // local to current_target_l/r for this tick only; it does NOT touch
-    // target_l_/r_, so normal per-tick tracking speed is unaffected on every
-    // other tick. Without this, target_l_/r_ can sit at whatever raw,
+    // Wake-ramp: while an arm is "waking" (ee_waking_l/r), bound EVERY tick's
+    // target to the same leash clip_target() applies everywhere else,
+    // pulling it at most kMaxDist/kMaxAngle closer to that arm's own
+    // continuously-updating prev_achieved_l/r each tick -- a smooth,
+    // bounded-velocity catch-up toward wherever the operator is currently
+    // commanding, instead of the old single-tick clamp immediately followed
+    // by a fully unclamped jump to the raw target. This is local to
+    // current_target_l/r for this tick only; it does NOT touch target_l_/r_,
+    // so normal per-tick tracking speed is unaffected once the ramp ends.
+    // Without leashing at all here, target_l_/r_ can sit at whatever raw,
     // un-leashed value the mapper's ROS-thread callback last wrote during the
     // idle gap (clip_target() only re-clamps it at the end of THIS loop, i.e.
     // one tick too late), so the first resumed solveStep() would chase that
     // raw target directly -- an oversized step right after the "asleep"
-    // delay. A tighter, always-on leash (clip before every solveStep) was
-    // tried instead and reverted: it capped ordinary tracking speed to the
-    // leash rate on every tick, not just this one, and made all motion
-    // several times slower.
-    if (ee_settled_before_check && woke_this_tick) {
-      auto leash_local = [](Eigen::Isometry3d &target,
-                            const Eigen::Isometry3d &achieved) {
-        constexpr double kMaxDist = 0.01;   // mirrors clip_target's default
-        constexpr double kMaxAngle = 0.1;
-        Eigen::Vector3d err = target.translation() - achieved.translation();
-        if (err.norm() > kMaxDist) {
-          target.translation() =
-              achieved.translation() + err.normalized() * kMaxDist;
+    // delay. A tighter, always-on leash (clip before every solveStep,
+    // unconditionally) was tried instead and reverted: it capped ordinary
+    // tracking speed to the leash rate on every tick, not just the wake
+    // transient, and made all motion several times slower -- this leash
+    // must stay scoped to ee_waking_l/r, never applied outside a wake ramp.
+    auto leash_local = [](Eigen::Isometry3d &target,
+                          const Eigen::Isometry3d &achieved) -> bool {
+      constexpr double kMaxDist = 0.01;   // mirrors clip_target's default
+      constexpr double kMaxAngle = 0.1;
+      bool clamped = false;
+      Eigen::Vector3d err = target.translation() - achieved.translation();
+      if (err.norm() > kMaxDist) {
+        target.translation() =
+            achieved.translation() + err.normalized() * kMaxDist;
+        clamped = true;
+      }
+      Eigen::AngleAxisd err_rot(target.linear() *
+                                achieved.linear().transpose());
+      if (std::abs(err_rot.angle()) > kMaxAngle) {
+        Eigen::AngleAxisd clamped_rot(kMaxAngle * (err_rot.angle() > 0 ? 1 : -1),
+                                      err_rot.axis());
+        target.linear() = clamped_rot.toRotationMatrix() * achieved.linear();
+        clamped = true;
+      }
+      return clamped;
+    };
+    if (ee_waking_l) {
+      bool still_clamping = leash_local(current_target_l, prev_achieved_l);
+      ++ee_wake_ramp_ticks_l;
+      if (!still_clamping || ee_wake_ramp_ticks_l > kMaxWakeRampTicks) {
+        if (node->ee_sleep_debug()) {
+          RCLCPP_INFO(node->get_logger(),
+            "[EE_SLEEP] wake-ramp end (L): ticks=%d converged=%d",
+            ee_wake_ramp_ticks_l, still_clamping ? 0 : 1);
         }
-        Eigen::AngleAxisd err_rot(target.linear() *
-                                  achieved.linear().transpose());
-        if (std::abs(err_rot.angle()) > kMaxAngle) {
-          Eigen::AngleAxisd clamped(kMaxAngle * (err_rot.angle() > 0 ? 1 : -1),
-                                    err_rot.axis());
-          target.linear() = clamped.toRotationMatrix() * achieved.linear();
+        ee_waking_l = false;
+        ee_wake_ramp_ticks_l = 0;
+      }
+    }
+    if (ee_waking_r) {
+      bool still_clamping = leash_local(current_target_r, prev_achieved_r);
+      ++ee_wake_ramp_ticks_r;
+      if (!still_clamping || ee_wake_ramp_ticks_r > kMaxWakeRampTicks) {
+        if (node->ee_sleep_debug()) {
+          RCLCPP_INFO(node->get_logger(),
+            "[EE_SLEEP] wake-ramp end (R): ticks=%d converged=%d",
+            ee_wake_ramp_ticks_r, still_clamping ? 0 : 1);
         }
-      };
-      leash_local(current_target_l, prev_achieved_l);
-      leash_local(current_target_r, prev_achieved_r);
+        ee_waking_r = false;
+        ee_wake_ramp_ticks_r = 0;
+      }
     }
     prev_target_l = current_target_l;
     prev_target_r = current_target_r;
