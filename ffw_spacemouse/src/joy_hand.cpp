@@ -71,11 +71,6 @@ public:
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-    // Remote control override: a single software bool that plays the role of the
-    // Quest engage gesture. When TRUE the spacemouse stream is suppressed at the
-    // source and the external /quest goal stream (ZMQ gateway) is authoritative.
-    this->declare_parameter("control_override_topic", "/control_override");
-
     // ── Quest override parameters (quest_teleop_plan §7, Task 2) ──
     this->declare_parameter("quest_state_topic", "/quest_state");
     this->declare_parameter("quest_achieved_pose_topic_l", "/ik_solver/achieved_ee_pose_l");
@@ -207,41 +202,6 @@ public:
             left_ctrl_grip_ = msg->grip;
         });
     }
-
-    // ── Remote control override (single bool gate, mirrors the Quest engage) ──
-    // One bool on /control_override replaces the 2 s trigger gesture: when TRUE,
-    // joy_hand stops publishing /spacemouse/<arm>/ee_target_pose entirely, so the
-    // gateway's /quest/<arm>/ee_target_pose goals become the only goal stream and
-    // win in the solver (no delta re-assert). No mutex: single executor thread,
-    // same pattern as precision_mode_.
-    control_override_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-      this->get_parameter("control_override_topic").as_string(), 10,
-      [this](const std_msgs::msg::Bool::SharedPtr msg) {
-          bool now = msg->data;
-          // Override release edge (TRUE→FALSE): while the override held, the
-          // external /quest goal moved the arm out from under the frozen ee_goal_,
-          // so a plain resume would re-assert the pre-override pose. Adopt the
-          // real pose now — same re-base as the ARM switch (§11), so spacemouse
-          // deltas continue from where the arm actually is.
-          if (control_override_ && !now) {
-            if (current_mode_ == "ARM" && achieved_pose_valid_) {
-              ee_goal_ = achieved_pose_map_;
-              RCLCPP_INFO(this->get_logger(),
-                "Rebased ee_goal_ to achieved pose on override release (%s)",
-                target_arm_.c_str());
-            }
-            // The override branch below forces the solver into TRACK every tick
-            // so the gateway's gripper trigger is obeyed. Restore the real quest
-            // state on release — enter_quest_state only publishes on transitions,
-            // so this needs an explicit publish or the solver stays in TRACK.
-            if (quest_state_pub_) {
-              std_msgs::msg::String state_msg;
-              state_msg.data = quest_state_name();
-              quest_state_pub_->publish(state_msg);
-            }
-          }
-          control_override_ = now;
-      });
 
     // ── Achieved-pose subscription (quest_teleop_plan §5/§11, Task 1) ──
     // World-frame EE pose from the solver, used to re-base the mapper's delta
@@ -1120,25 +1080,6 @@ private:
   {
     if (current_mode_ == "BASE") return;
 
-    // ── Remote control override (single bool, mirrors the Quest engage) ──
-    // When TRUE the external /quest goal stream (ZMQ gateway) is authoritative:
-    // suppress the SpaceMouse velocity stream at the source so the solver keeps
-    // last_goal_from_quest_=true and nothing re-asserts the mapper hold pose.
-    if (control_override_) {
-      // The quest state machine below is frozen while the override holds (we
-      // return early every tick), so nothing publishes /quest/<arm>/state and
-      // the solver sits in CTRL — where update_grippers() drops the gateway's
-      // /quest/<arm>/trigger. Force TRACK here so the gripper command is obeyed,
-      // mirroring the physical quest engage (the pose leash is identical for
-      // CTRL and TRACK, so this changes nothing else).
-      if (quest_state_pub_) {
-        std_msgs::msg::String state_msg;
-        state_msg.data = "TRACK";
-        quest_state_pub_->publish(state_msg);
-      }
-      return;   // gateway /quest goals drive; spacemouse + quest-trigger silent
-    }
-
     // Left-quest grip override: runs every tick regardless of which path
     // below fills ee_goal_ (quest-engaged or SpaceMouse joystick), so holding
     // the grip re-levels the goal even if nothing else is moving it.
@@ -1364,7 +1305,6 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr precision_sub_;
   rclcpp::Subscription<ffw_spacemouse_msgs::msg::LeftControlOverride>::SharedPtr left_ctrl_sub_;  // /quest/left/control_override (right-arm instance only)
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr control_override_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ee_lock_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr limit_profile_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_sub_;
@@ -1406,7 +1346,6 @@ private:
   bool delta_seeded_ {false};
 
   bool precision_mode_ {false};
-  bool control_override_ {false};   // remote bool gate: suppresses spacemouse stream
   double left_ctrl_trigger_ {0.0};  // left-quest trigger, 0..1 (0 = no override)
   double left_ctrl_grip_ {0.0};     // left-quest grip/side button, 0..1
 
