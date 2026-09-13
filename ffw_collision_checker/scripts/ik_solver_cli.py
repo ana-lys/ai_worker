@@ -968,6 +968,17 @@ class IKSolverCLI(Node):
             if got is None:
                 print(f"\n{arm_name} arm: no transform into '{frame}' — skipped.")
                 continue
+            if frame is not None:
+                raw = self._achieved.get(arm)
+                rp = raw.pose.position
+                rq = raw.pose.orientation
+                t_dbg = self._lookup_profile_transform(frame, EE_GOAL_FRAME)
+                if t_dbg is not None:
+                    tt = t_dbg.transform.translation
+                    tr = t_dbg.transform.rotation
+                    print(f"\n[DEBUG] achieved({EE_GOAL_FRAME})=({rp.x:.3f},{rp.y:.3f},{rp.z:.3f}) "
+                          f"tf({frame}<-{EE_GOAL_FRAME}).translation=({tt.x:.3f},{tt.y:.3f},{tt.z:.3f}) "
+                          f"tf.rotation=({tr.x:.4f},{tr.y:.4f},{tr.z:.4f},{tr.w:.4f})")
             pos, rpy = got
             print(f"\n{arm_name.upper()} arm current: "
                   f"pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}) m "
