@@ -1017,8 +1017,10 @@ class IKSolverCLI(Node):
         if name is None:
             press_enter()
             return
-        header = [f"[{name}]"] if frame is None else [f"[{name}]", "type global", f"frame {frame}"]
-        lines = header + self._profile_set_lines(profile)
+        # _upsert_section/_rewrite_profiles add the "[name]" header line
+        # themselves (from the dict key) -- lines here must be body-only.
+        tag = [] if frame is None else ["type global", f"frame {frame}"]
+        lines = tag + self._profile_set_lines(profile)
         self._upsert_section(name, lines)
 
         clear_screen()
@@ -1216,7 +1218,9 @@ class IKSolverCLI(Node):
             press_enter()
             return
 
-        lines = [f"[{name}]"] + self._profile_set_lines(self._current_profile)
+        # _upsert_section/_rewrite_profiles add the "[name]" header line
+        # themselves (from the dict key) -- lines here must be body-only.
+        lines = self._profile_set_lines(self._current_profile)
 
         # Insert/replace the section (an existing name is updated in place).
         self._upsert_section(name, lines)
@@ -1284,7 +1288,9 @@ class IKSolverCLI(Node):
 
         frame = self._current_global_profile['frame']
         bounds = self._current_global_profile['bounds']
-        lines = ([f"[{name}]", "type global", f"frame {frame}"]
+        # _upsert_section/_rewrite_profiles add the "[name]" header line
+        # themselves (from the dict key) -- lines here must be body-only.
+        lines = (["type global", f"frame {frame}"]
                  + self._profile_set_lines(bounds))
 
         # Insert/replace the section (an existing name is updated in place).
