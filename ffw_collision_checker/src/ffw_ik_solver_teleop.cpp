@@ -447,6 +447,22 @@ public:
     // real small input without waking on idle rest noise.
     this->declare_parameter<double>("ee_wake_pos_threshold_m", 1e-3);
     this->declare_parameter<double>("ee_wake_rot_threshold_rad", 5e-3);
+    // Diagnostic isolation switch: when true, bypasses the idle-sleep skip
+    // entirely -- solveStep() runs every tick regardless of ee_settled, as
+    // if idle-sleep didn't exist. Live-settable (ros2 param set). Use this
+    // to test whether a reported "stuck then jump" symptom is caused by the
+    // idle-sleep/wake mechanism at all: if the symptom persists identically
+    // with this true, idle-sleep is not the (or not the only) cause.
+    this->declare_parameter<bool>("disable_idle_sleep", false);
+    // clip_target()'s leash bounds, previously hardcoded default args (1cm /
+    // 0.1rad) at its only call site. Tunable so the leash itself can be
+    // loosened (e.g. 10.0 / 10.0 to effectively disable it) as a second
+    // isolation test, independent of idle-sleep: if achieved pose still
+    // visibly holds-then-jumps with an enormous leash, the leash isn't the
+    // cause either, and the actuation/hardware-execution path (ros2_control/
+    // joint_trajectory_controller/dynamixel) becomes the next suspect.
+    this->declare_parameter<double>("clip_leash_max_dist_m", 0.01);
+    this->declare_parameter<double>("clip_leash_max_angle_rad", 0.1);
 
     this->declare_parameter<std::string>("robot_model", "bg2");
     robot_model_ = this->get_parameter("robot_model").as_string();
@@ -473,6 +489,9 @@ public:
     ee_sleep_debug_ = this->get_parameter("ee_sleep_debug").as_bool();
     ee_wake_pos_threshold_m_ = this->get_parameter("ee_wake_pos_threshold_m").as_double();
     ee_wake_rot_threshold_rad_ = this->get_parameter("ee_wake_rot_threshold_rad").as_double();
+    disable_idle_sleep_ = this->get_parameter("disable_idle_sleep").as_bool();
+    clip_leash_max_dist_m_ = this->get_parameter("clip_leash_max_dist_m").as_double();
+    clip_leash_max_angle_rad_ = this->get_parameter("clip_leash_max_angle_rad").as_double();
 
     parameter_callback_handle_ = this->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter> &parameters) {
@@ -506,6 +525,27 @@ public:
               goal_source_ = gs;
               publish_goal_source_state();
               RCLCPP_INFO(this->get_logger(), "goal_source set to %s", v.c_str());
+            } else if (param.get_name() == "quest_debug_solver") {
+              quest_debug_solver_ = param.as_bool();
+              RCLCPP_INFO(this->get_logger(), "quest_debug_solver set to %s", quest_debug_solver_ ? "true" : "false");
+            } else if (param.get_name() == "ee_sleep_debug") {
+              ee_sleep_debug_ = param.as_bool();
+              RCLCPP_INFO(this->get_logger(), "ee_sleep_debug set to %s", ee_sleep_debug_ ? "true" : "false");
+            } else if (param.get_name() == "ee_wake_pos_threshold_m") {
+              ee_wake_pos_threshold_m_ = param.as_double();
+              RCLCPP_INFO(this->get_logger(), "ee_wake_pos_threshold_m set to %.4f", ee_wake_pos_threshold_m_);
+            } else if (param.get_name() == "ee_wake_rot_threshold_rad") {
+              ee_wake_rot_threshold_rad_ = param.as_double();
+              RCLCPP_INFO(this->get_logger(), "ee_wake_rot_threshold_rad set to %.4f", ee_wake_rot_threshold_rad_);
+            } else if (param.get_name() == "disable_idle_sleep") {
+              disable_idle_sleep_ = param.as_bool();
+              RCLCPP_INFO(this->get_logger(), "disable_idle_sleep set to %s", disable_idle_sleep_ ? "true" : "false");
+            } else if (param.get_name() == "clip_leash_max_dist_m") {
+              clip_leash_max_dist_m_ = param.as_double();
+              RCLCPP_INFO(this->get_logger(), "clip_leash_max_dist_m set to %.4f", clip_leash_max_dist_m_);
+            } else if (param.get_name() == "clip_leash_max_angle_rad") {
+              clip_leash_max_angle_rad_ = param.as_double();
+              RCLCPP_INFO(this->get_logger(), "clip_leash_max_angle_rad set to %.4f", clip_leash_max_angle_rad_);
             }
           }
           return result;
@@ -2294,6 +2334,9 @@ private:
   bool ee_sleep_debug_ = false;
   double ee_wake_pos_threshold_m_ = 1e-3;
   double ee_wake_rot_threshold_rad_ = 5e-3;
+  bool disable_idle_sleep_ = false;
+  double clip_leash_max_dist_m_ = 0.01;
+  double clip_leash_max_angle_rad_ = 0.1;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
 
   std::vector<std::string> frozen_joints_{"head"};
@@ -2411,6 +2454,9 @@ public:
   bool ee_sleep_debug() const { return ee_sleep_debug_; }
   double ee_wake_pos_threshold_m() const { return ee_wake_pos_threshold_m_; }
   double ee_wake_rot_threshold_rad() const { return ee_wake_rot_threshold_rad_; }
+  bool disable_idle_sleep() const { return disable_idle_sleep_; }
+  double clip_leash_max_dist_m() const { return clip_leash_max_dist_m_; }
+  double clip_leash_max_angle_rad() const { return clip_leash_max_angle_rad_; }
   bool is_sync_requested() const { return hardware_sync_requested_; }
   const std::string &get_robot_model() const { return robot_model_; }
   void request_hardware_sync() { hardware_sync_requested_ = true; }
@@ -3013,7 +3059,7 @@ int main(int argc, char **argv) {
       // toward the target for several seconds (chasing the last few mm) before
       // finally sleeping. res.stalled is exactly the "close enough, no more
       // useful progress" signal that keeps that tail short, same as before.
-      if (!ee_settled || node->is_solving_to_home()) {
+      if (!ee_settled || node->is_solving_to_home() || node->disable_idle_sleep()) {
         res = solver.solveStep(d, current_target_l, current_target_r, active_cfg,
                                col_cfg, err_hist, dist_hist);
         ee_settled = res.converged || res.early_converged || res.stalled;
@@ -3236,7 +3282,8 @@ int main(int argc, char **argv) {
     node->publish_real_ee_error(real_err_l, real_err_r,
                                 real_seen && valid_real_l,
                                 real_seen && valid_real_r);
-    node->clip_target(achieved_l, achieved_r);
+    node->clip_target(achieved_l, achieved_r,
+                      node->clip_leash_max_dist_m(), node->clip_leash_max_angle_rad());
 
     // Update target variables so the viewer spheres reflect the clipped target
     node->get_targets(current_target_l, current_target_r);
