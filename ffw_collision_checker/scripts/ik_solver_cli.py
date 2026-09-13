@@ -636,45 +636,53 @@ class IKSolverCLI(Node):
         p = pose.pose.position
         return (p.x, p.y, p.z), self._quat_to_rpy(pose.pose.orientation)
 
-    def _wait_for_transform(self, target_frame, source_frame, timeout=1.0):
-        """Actively spin while polling for a transform (same retry pattern as
-        _wait_achieved). Necessary because the TF buffer/listener runs with
-        spin_thread=False (this node is already manually spun elsewhere —
-        see __init__): a bare lookup_transform(..., timeout=X) blocks THIS
-        thread for up to X seconds with nothing else spinning to deliver a
-        fresh /tf message in the meantime, so it can only succeed by luck —
-        whatever was already buffered from earlier spin_once() calls before
-        the lookup started. Returns the TransformStamped, or None on
-        timeout."""
+    def _lookup_profile_transform(self, target_frame, source_frame):
+        """Single, non-blocking TF lookup attempt -- whatever is currently
+        buffered, no internal spin/retry. Returns the TransformStamped, or
+        None if unavailable right now.
+
+        Deliberately does NOT spin internally (an earlier version did,
+        nesting a second rclpy.spin_once() inside loops that already spin
+        once per tick -- e.g. _capture_pose/_skip_lock_value's own
+        `while True: rclpy.spin_once(...)`. That nested-spin pattern is
+        unlike anything the local/native-frame path does, and lined up with
+        two separate live failures: a "failed to create timer... context is
+        not valid" rcl crash, and a reproducible freeze where the achieved-
+        pose subscription itself stopped advancing (confirmed via the
+        [age=...] diagnostic) as soon as this method's retry loop ran.
+        Removing the nested spin entirely fixed both. Callers that need a
+        retrying wait (the one-shot per-arm check, not the tight display
+        loops, which already re-call this every tick on their own) should
+        use _wait_for_pose() instead, which spins from the OUTER loop only."""
+        try:
+            return self.tf_buffer.lookup_transform(
+                target_frame, source_frame, rclpy.time.Time())
+        except tf2_ros.TransformException:
+            return None
+
+    def _wait_for_pose(self, arm, timeout=2.0):
+        """Retry _get_pose(arm) with spinning in between (single, non-nested
+        spin_once per attempt), for the one-shot initial per-arm check in
+        the limit-profile wizard. The tight display loops (_capture_pose,
+        _skip_lock_value) do NOT use this -- they already spin once per
+        tick themselves and call _get_pose() directly."""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            try:
-                rclpy.spin_once(self, timeout_sec=0.05)
-                return self.tf_buffer.lookup_transform(
-                    target_frame, source_frame, rclpy.time.Time())
-            except tf2_ros.TransformException:
-                continue
-            except Exception as e:
-                # Broader than tf2_ros.TransformException on purpose: a
-                # transient rcl/executor hiccup inside spin_once() here
-                # (observed once as "failed to create timer... context is
-                # not valid") must not kill the whole CLI process over one
-                # failed lookup attempt -- treat it the same as a lookup
-                # failure and keep retrying. (KeyboardInterrupt/SystemExit
-                # are BaseException, not Exception, so Ctrl-C still works.)
-                print(f"\n  (transform lookup error, retrying: {e})")
-                continue
+            rclpy.spin_once(self, timeout_sec=0.05)
+            got = self._get_pose(arm)
+            if got is not None:
+                return got
         return None
 
     def _apply_profile_frame(self, pos, quat):
         """If self._profile_frame is set, transform (pos, quat) (quat as an
-        (x, y, z, w) tuple) into it via a live TF lookup (source
-        EE_GOAL_FRAME), returning (pos, rpy) or None on lookup failure. If
-        unset, returns (pos, rpy) unchanged (rpy computed from quat) —
-        identical to the pre-global-limit behavior."""
+        (x, y, z, w) tuple) into it via a single non-blocking TF lookup
+        (source EE_GOAL_FRAME), returning (pos, rpy) or None if unavailable
+        right now. If unset, returns (pos, rpy) unchanged (rpy computed from
+        quat) — identical to the pre-global-limit behavior."""
         if self._profile_frame is None:
             return pos, self._quat_to_rpy(_QuatView(*quat))
-        t = self._wait_for_transform(self._profile_frame, EE_GOAL_FRAME)
+        t = self._lookup_profile_transform(self._profile_frame, EE_GOAL_FRAME)
         if t is None:
             return None
         out_pos, out_quat = self._transform_pose(t, pos, quat)
@@ -956,7 +964,7 @@ class IKSolverCLI(Node):
             if not self._wait_achieved(arm):
                 print(f"\n{arm_name} arm: no fresh achieved pose — skipped.")
                 continue
-            got = self._get_pose(arm)
+            got = self._wait_for_pose(arm)
             if got is None:
                 print(f"\n{arm_name} arm: no transform into '{frame}' — skipped.")
                 continue
