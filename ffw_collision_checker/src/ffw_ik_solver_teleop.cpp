@@ -2837,6 +2837,22 @@ int main(int argc, char **argv) {
   Eigen::Isometry3d prev_raw_target_r = init_r;
   int ee_wake_ramp_ticks_r = 0;
   constexpr int kMaxWakeRampTicks = 100;  // ~1s at the 100Hz control rate: safety cutoff only
+  // Ticks since the raw target last moved (either arm) beyond the wake
+  // threshold -- i.e. how long ago the operator was last actively
+  // commanding motion. Confirmed empirically (disable_idle_sleep test) that
+  // idle-sleep is the cause of a reported "stuck then jump" symptom even
+  // with wake detection already fixed to use the raw (unleashed) target:
+  // res.stalled is a plateau heuristic on error-improvement RATE, which can
+  // read as flat even under continuous operator input once clip_target's
+  // leash keeps the tracked error small and roughly constant tick to tick
+  // (see clip_target's own comment). So res.stalled alone was letting the
+  // solver fall asleep mid-teleop, and each subsequent wake -- even though
+  // correctly detected and correctly ramped -- was a perceptible hitch. Only
+  // let stalled count as "settled" once the operator has ALSO been inactive
+  // for a short window; still-active input never sleeps, no matter how flat
+  // the error-improvement rate reads.
+  int ticks_since_raw_move = 1'000'000;  // start "long inactive" so genuine idle can still sleep
+  constexpr int kRecentActivityTicks = 15;  // ~150ms at 100Hz
 
   while (viewer.enabled() && rclcpp::ok()) {
     // Rail mode owns the tick: read once, gate everything below on it.
@@ -2947,6 +2963,9 @@ int main(int argc, char **argv) {
     bool woke_this_tick = woke_l || woke_r;
     if (woke_this_tick) {
       ee_settled = false;
+      ticks_since_raw_move = 0;
+    } else if (ticks_since_raw_move < 1'000'000) {
+      ++ticks_since_raw_move;
     }
     if (ee_settled_before_check && woke_l && !ee_waking_l) {
       ee_waking_l = true;
@@ -3049,24 +3068,43 @@ int main(int argc, char **argv) {
       // hold the current qpos -- mirrors apply_rail_sync's own rail_dirty_
       // hold-on-stale-tick. A real EE command re-arms this; OverrideCmd
       // already drives its own cadence through the rail branch below.
-      // res.stalled DOES count as settled: an earlier attempt to exclude it
-      // (only sleep on res.converged/early_converged) regressed normal
-      // teleop -- the hard tolerance check (solveStep's `error < cfg.tolerance`)
-      // is a tight bound that a damped/regularized gradient step approaches
+      // res.stalled DOES count as settled -- but ONLY once the operator has
+      // also been inactive for a short window (ticks_since_raw_move). An
+      // earlier attempt to exclude stalled entirely (only sleep on
+      // res.converged/early_converged) regressed normal teleop -- the hard
+      // tolerance check (solveStep's `error < cfg.tolerance`) is a tight
+      // bound that a damped/regularized gradient step approaches
       // asymptotically, so ordinary tracking routinely stalls (rate below
-      // ee_improvement_rate) well before crossing it. Without stalled counting
-      // as settled, every release of the input made the arm visibly creep
-      // toward the target for several seconds (chasing the last few mm) before
-      // finally sleeping. res.stalled is exactly the "close enough, no more
-      // useful progress" signal that keeps that tail short, same as before.
+      // ee_improvement_rate) well before crossing it. Without stalled
+      // counting as settled AT ALL, every release of the input made the arm
+      // visibly creep toward the target for several seconds (chasing the
+      // last few mm) before finally sleeping.
+      //
+      // But unconditionally letting stalled count as settled regressed the
+      // opposite way: confirmed via disable_idle_sleep isolation testing
+      // that idle-sleep itself was the cause of a reported "stuck then jump"
+      // symptom during ACTIVE, continuous teleop -- res.stalled's plateau
+      // heuristic (error-improvement rate over a window) can read as flat
+      // even while the operator keeps commanding motion, because
+      // clip_target's leash keeps the tracked error small and roughly
+      // constant tick to tick. That put the solver to sleep mid-teleop, and
+      // every subsequent wake -- even correctly detected and correctly
+      // ramped -- was a perceptible hitch. Gating stalled on recent operator
+      // inactivity keeps the fast-settle-on-release behavior (nothing here
+      // changes once ticks_since_raw_move crosses the window) while never
+      // sleeping mid-input.
+      bool operator_recently_active = ticks_since_raw_move < kRecentActivityTicks;
       if (!ee_settled || node->is_solving_to_home() || node->disable_idle_sleep()) {
         res = solver.solveStep(d, current_target_l, current_target_r, active_cfg,
                                col_cfg, err_hist, dist_hist);
-        ee_settled = res.converged || res.early_converged || res.stalled;
+        ee_settled = res.converged || res.early_converged ||
+                    (res.stalled && !operator_recently_active);
         if (node->ee_sleep_debug() && ee_settled && !ee_settled_before_check) {
           RCLCPP_INFO(node->get_logger(),
-            "[EE_SLEEP] sleep: converged=%d early=%d stalled=%d err=%.4f",
-            res.converged, res.early_converged, res.stalled, res.error);
+            "[EE_SLEEP] sleep: converged=%d early=%d stalled=%d "
+            "recently_active=%d err=%.4f",
+            res.converged, res.early_converged, res.stalled,
+            operator_recently_active, res.error);
         }
       } else {
         solver.computeContacts(d, active_cfg.topk_contacts, res.contacts);
