@@ -22,6 +22,14 @@
             <param name="number_of_joints">22</param>
             <param name="number_of_transmissions">22</param>
             <param name="disable_torque_at_init">true</param>
+            <!-- needs dynamixel_hardware_interface from ana-lys/dynamixel_hardware_interface
+                 branch ffw-fastread-fix (unknown params are ignored by the stock driver).
+                 use_fast_read=false: normal Bulk Read (one reply per motor). Fast Bulk Read
+                 locks in after its first success and never recovers from a mid-run failure,
+                 which deactivated the whole follower even with a healthy bus.
+                 timing_log_period_s: one bus-timing summary line every 10 s. -->
+            <param name="use_fast_read">false</param>
+            <param name="timing_log_period_s">10</param>
             <param name="dynamixel_state_pub_msg_name">ffw_follower/dxl_state</param>
             <param name="get_dynamixel_data_srv_name">ffw_follower/get_dxl_data</param>
             <param name="set_dynamixel_data_srv_name">ffw_follower/set_dxl_data</param>
