@@ -25,6 +25,7 @@ from launch.conditions import IfCondition
 from launch.conditions import UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import AndSubstitution
 from launch.substitutions import Command
 from launch.substitutions import FindExecutable
 from launch.substitutions import LaunchConfiguration
@@ -49,6 +50,14 @@ def generate_launch_description():
                               description='Whether to launch cameras.'),
         DeclareLaunchArgument('launch_lidar', default_value='true',
                               description='Whether to launch lidar.'),
+        DeclareLaunchArgument(
+            'launch_marker_ekf',
+            default_value='true',
+            description='Whether to launch the AprilTag marker-frame EKF fusion '
+                        '(marker_pose_corrector + robot_localization ekf_node), '
+                        'for the teleop global limit-profile feature. Only runs '
+                        'when launch_cameras is also true (needs the OAK-D tags)',
+        ),
         DeclareLaunchArgument('init_position', default_value='false',
                               description='Whether to launch the init_position node.'),
         DeclareLaunchArgument('model', default_value='ffw_sg2_rev1_follower',
@@ -94,6 +103,7 @@ def generate_launch_description():
     port_name = LaunchConfiguration('port_name')
     launch_cameras = LaunchConfiguration('launch_cameras')
     launch_lidar = LaunchConfiguration('launch_lidar')
+    launch_marker_ekf = LaunchConfiguration('launch_marker_ekf')
     init_position = LaunchConfiguration('init_position')
     model = LaunchConfiguration('model')
     use_head_eef_tracker = LaunchConfiguration('use_head_eef_tracker')
@@ -461,6 +471,24 @@ def generate_launch_description():
         actions=[odom_launch_include]
     )
 
+    # Marker-frame EKF (marker_pose_corrector + robot_localization ekf_node):
+    # fuses the ~4-5 Hz AprilTag marker-board detection with continuous
+    # /odom into a smooth marker_frame <-> base_link TF, consumed by the
+    # teleop CLI/mapper's "global limit profile" feature. Gated on
+    # launch_marker_ekf, and on launch_cameras since the OAK-D streamer is
+    # its only marker source.
+    marker_ekf_launch_include = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
+                                                            'launch',
+                                                            'marker_ekf.launch.py'])),
+        condition=IfCondition(AndSubstitution(launch_cameras, launch_marker_ekf))
+    )
+
+    marker_ekf_launch_delayed = TimerAction(
+        period=8.0,
+        actions=[marker_ekf_launch_include]
+    )
+
     return LaunchDescription(
         declared_arguments + [
             control_node,
@@ -482,5 +510,6 @@ def generate_launch_description():
             ffw_laser_filter_node,
             dual_laser_merger_node,
             odom_launch_delayed,
+            marker_ekf_launch_delayed,
         ]
     )

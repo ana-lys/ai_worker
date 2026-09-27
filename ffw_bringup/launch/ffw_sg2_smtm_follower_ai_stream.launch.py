@@ -32,6 +32,7 @@ from launch.conditions import IfCondition
 from launch.conditions import UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import AndSubstitution
 from launch.substitutions import Command
 from launch.substitutions import FindExecutable
 from launch.substitutions import LaunchConfiguration
@@ -89,7 +90,8 @@ def generate_launch_description():
             default_value='true',
             description='Whether to launch the AprilTag marker-frame EKF fusion '
                         '(marker_pose_corrector + robot_localization ekf_node), '
-                        'for the teleop global limit-profile feature',
+                        'for the teleop global limit-profile feature. Only runs '
+                        'when launch_cameras is also true (needs the OAK-D tags)',
         ),
         # --- NEW ARGUMENTS FOR UDP STREAMER ---
         DeclareLaunchArgument('dest_ip', default_value='192.168.0.241',
@@ -502,12 +504,13 @@ def generate_launch_description():
     # fuses the ~4-5 Hz AprilTag marker-board detection with continuous
     # /odom into a smooth marker_frame <-> base_link TF, consumed by the
     # teleop CLI/mapper's "global limit profile" feature. Independent of the
-    # lidar/map localization stack above -- gated on launch_marker_ekf only.
+    # lidar/map localization stack above -- gated on launch_marker_ekf, and
+    # on launch_cameras since the OAK-D streamer is its only marker source.
     marker_ekf_launch_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
                                                             'launch',
                                                             'marker_ekf.launch.py'])),
-        condition=IfCondition(launch_marker_ekf)
+        condition=IfCondition(AndSubstitution(launch_cameras, launch_marker_ekf))
     )
 
     marker_ekf_launch_delayed = TimerAction(
