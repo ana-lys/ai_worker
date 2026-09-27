@@ -364,12 +364,12 @@ def generate_launch_description():
     # ffw_depthai/scripts/sweep_and_solve_camera_calibration.py to redo it if
     # the board or camera mount ever changes.
     # 2026-09-27, new 3D-printed camera mount: rotation re-solved (translation
-    # kept) with ffw_collision_checker/scripts/camera_calib_solve.py --rot-only
-    # over 219 detections / 11 base poses. The board read ~3.3 deg tilted in
-    # base_link; the fit puts ~2.1 deg on the camera mount and ~1.2 deg on the
-    # table/floor vs base_link. Chosen over the all-on-camera (-3.25 deg)
-    # variant because it best converges hand-placed pad-centre snapshots across
-    # base poses (2D marker TF spread 6.8 -> 2.7 mm). Previous rpy:
+    # kept) with ffw_collision_checker/scripts/camera_calib_padfit.py from 26
+    # hand-centred load-cell-pad snapshots over 13 base poses: the ball (arm FK)
+    # is fixed at the pad centre, so its x,y in the 2D marker frame must agree
+    # at every base pose. Worst pad disagreement across poses 9.9 -> 5.5 mm
+    # (leave-one-pose-out 3.7 mm mean). Board reads ~1.8 deg tilted in
+    # base_link afterwards (table/floor vs base). Previous rpy:
     # 0.013260 -0.001668 0.006747.
     oakd_cam_static_tf = Node(
         package='tf2_ros',
@@ -377,7 +377,7 @@ def generate_launch_description():
         arguments=['--frame-id', 'camera_calibration_link',
                    '--child-frame-id', 'head_camera_frame',
                    '--x', '-0.006335', '--y', '-0.007832', '--z', '0.016026',
-                   '--roll', '-0.023212', '--pitch', '0.003704', '--yaw', '0.011447'],
+                   '--roll', '-0.011448', '--pitch', '-0.001424', '--yaw', '-0.001780'],
         output='screen',
         condition=IfCondition(launch_cameras),
     )
