@@ -189,8 +189,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">3591</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">50</param>  <!-- 2026-10-03: was 250; servo-side smoothing lagged streamed goals -->
-        <param name="Profile Time">150</param>  <!-- 2026-10-03: was 500 -->
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">262144</param>
         <param name="Min Position Limit">-262144</param>
         <param name="Position P Gain">1583185</param>
@@ -213,8 +213,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">3591</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">50</param>  <!-- 2026-10-03: was 250; servo-side smoothing lagged streamed goals -->
-        <param name="Profile Time">150</param>  <!-- 2026-10-03: was 500 -->
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">0</param>
         <param name="Min Position Limit">-262144</param>
         <param name="Position P Gain">1583185</param>
@@ -237,8 +237,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">3591</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">50</param>  <!-- 2026-10-03: was 250; servo-side smoothing lagged streamed goals -->
-        <param name="Profile Time">150</param>  <!-- 2026-10-03: was 500 -->
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">262144</param>
         <param name="Min Position Limit">-262144</param>
         <param name="Position P Gain">1583185</param>
@@ -261,8 +261,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">6486</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">50</param>  <!-- 2026-10-03: was 250; servo-side smoothing lagged streamed goals -->
-        <param name="Profile Time">150</param>  <!-- 2026-10-03: was 500 -->
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">90000</param>
         <param name="Min Position Limit">-245000</param>
         <param name="Position P Gain">1583185</param>
@@ -285,8 +285,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">6486</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">50</param>  <!-- 2026-10-03: was 250; servo-side smoothing lagged streamed goals -->
-        <param name="Profile Time">150</param>  <!-- 2026-10-03: was 500 -->
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">262144</param>
         <param name="Min Position Limit">-262144</param>
         <param name="Position P Gain">1583185</param>
@@ -309,8 +309,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">6486</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">50</param>  <!-- 2026-10-03: was 250; servo-side smoothing lagged streamed goals -->
-        <param name="Profile Time">150</param>  <!-- 2026-10-03: was 500 -->
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">131072</param>
         <param name="Min Position Limit">-131072</param>
         <param name="Position P Gain">1583185</param>
@@ -366,8 +366,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">3591</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">250</param>
-        <param name="Profile Time">500</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">262144</param>
         <param name="Min Position Limit">-262144</param>
         <param name="Position P Gain">1583185</param>
@@ -390,8 +390,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">3591</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">250</param>
-        <param name="Profile Time">500</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">262144</param>
         <param name="Min Position Limit">0</param>
         <param name="Position P Gain">1583185</param>
@@ -414,8 +414,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">3591</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">250</param>
-        <param name="Profile Time">500</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">262144</param>
         <param name="Min Position Limit">-262144</param>
         <param name="Position P Gain">1583185</param>
@@ -438,8 +438,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">6486</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">250</param>
-        <param name="Profile Time">500</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">90000</param>
         <param name="Min Position Limit">-245000</param>
         <param name="Position P Gain">1583185</param>
@@ -462,8 +462,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">6486</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">250</param>
-        <param name="Profile Time">500</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">262144</param>
         <param name="Min Position Limit">-262144</param>
         <param name="Position P Gain">1583185</param>
@@ -486,8 +486,8 @@
         <param name="Acceleration Limit">35910</param>
         <param name="Profile Velocity">6486</param>
         <param name="Profile Acceleration">3591</param>
-        <param name="Profile Acceleration Time">250</param>
-        <param name="Profile Time">500</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">131072</param>
         <param name="Min Position Limit">-131072</param>
         <param name="Position P Gain">1583185</param>
@@ -543,8 +543,8 @@
         <param name="Acceleration Limit">2020</param>
         <param name="Profile Velocity">300</param>
         <param name="Profile Acceleration">300</param>
-        <param name="Profile Acceleration Time">250</param>
-        <param name="Profile Time">500</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
         <param name="Max Position Limit">0</param>
         <param name="Min Position Limit">-50000</param>
         <param name="Position P Gain">1583185</param>
@@ -619,8 +619,8 @@
         <param name="Acceleration Limit">1010</param>
         <param name="Return Delay Time">0</param>
         <param name="Profile Velocity">12592</param>
-        <param name="Profile Acceleration Time">500</param>
-        <param name="Profile Time">1000</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
       </gpio>
       <!-- RIGHT WHEEL -->
       <gpio name="dxl103">
@@ -640,8 +640,8 @@
         <param name="Acceleration Limit">1010</param>
         <param name="Return Delay Time">0</param>
         <param name="Profile Velocity">12592</param>
-        <param name="Profile Acceleration Time">500</param>
-        <param name="Profile Time">1000</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
       </gpio>
       <!-- REAR WHEEL -->
       <gpio name="dxl105">
@@ -661,8 +661,8 @@
         <param name="Acceleration Limit">1010</param>
         <param name="Return Delay Time">0</param>
         <param name="Profile Velocity">12592</param>
-        <param name="Profile Acceleration Time">500</param>
-        <param name="Profile Time">1000</param>
+        <param name="Profile Acceleration Time">100</param>
+        <param name="Profile Time">250</param>
       </gpio>
     </ros2_control>
   </xacro:macro>
