@@ -78,6 +78,8 @@ class EpisodeConfig:
     # the last good state. "intervene": the machine pulls out, traces back, same episode (the old way).
     failure_mode: str = "terminate"
     intervene_time: float = 10.0        # s added to the timeout once the expert has taken over
+    intervene_seat: bool = True         # after the pull-out, re-seat the hole (the server's edge press, "seat"
+                                        # mode: the policy's bind may have shifted it in its play) before the expert
     pull_out_step: float = 0.002        # m per tick for the machine's pull-out (2026-10-04: 6.67 mm/tick
                                         # = 100 mm/s left the arm ~2 cm behind when the next phase began)
     clear: float = 0.005                # m: pull out until the tip is this far above the rim
@@ -130,7 +132,7 @@ class EpisodeMachine:
         f_pb = terms["push_back_N"]
         self.f_ticks = self.f_ticks + 1 if f_pb > c.f_intervene and self.can_touch(ins) else 0
         driving = self.mode                                     # who moved the robot this tick
-        state = wire.FS_INTERVENTION if driving in ("pull_out", "trace_back", "expert") else wire.FS_POLICY
+        state = wire.FS_INTERVENTION if driving in ("pull_out", "trace_back", "seat", "expert") else wire.FS_POLICY
         reason, penalty = wire.TR_NONE, False
         if driving == "policy":
             self._remember(ins, T_peg)
@@ -152,7 +154,11 @@ class EpisodeMachine:
                           wire.TR_OFF_AXIS if ins["depth"] > c.off_axis_depth and ins["lateral"] > c.zone_radius
                           else wire.TR_BIND)
         elif driving == "pull_out" and -ins["depth"] >= c.clear:
+            self.mode = "seat" if c.intervene_seat else "expert"
+            self._f_peak_policy = self.reward.f_peak            # the machine's seat press is not the policy's force
+        elif driving == "seat" and arrived:                     # the server reports the seat done
             self.mode = "expert"
+            self.reward.f_peak = self._f_peak_policy
         if terms["fail"] != 0.0 and reason not in (wire.TR_JAM, wire.TR_RIM):
             # reward.py's fail rule fired but did not end the episode (the machine was pulling out,
             # or another rule ended it first): the fail penalty belongs to a terminal jam / rim only

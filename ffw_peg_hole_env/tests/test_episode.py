@@ -76,9 +76,12 @@ def test_intervention_cycle():
     r = run(m, [(6, 12.0, 0.0)] + [(d, 0.0, 0.0) for d in (2, -2, -6)])     # 12 N while pulling out (2026-10-04 live)
     check("12 N during the machine's pull-out: no further penalty, episode goes on",
           r[0]["terms"]["fail"] == 0.0 and r[0]["frame_state"] == wire.FS_INTERVENTION and r[0]["reward"] > -0.1)
-    check("pulling out: INTERVENTION frames, the expert takes over once the tip is 5 mm clear",
-          all(x["frame_state"] == wire.FS_INTERVENTION for x in r) and r[-1]["mode"] == "expert"
+    check("pulling out: INTERVENTION frames, the machine re-seats the hole once the tip is 5 mm clear",
+          all(x["frame_state"] == wire.FS_INTERVENTION for x in r) and r[-1]["mode"] == "seat"
           and [x["mode"] for x in r[:-1]] == ["pull_out"] * 3)
+    r = [m.tick(DT, ins(-5), None, None, None, pose(-5)), m.tick(DT, ins(-5), None, None, None, pose(-5), arrived=True)]
+    check("re-seating: INTERVENTION frames, the expert takes over when the server reports the seat done",
+          all(x["frame_state"] == wire.FS_INTERVENTION for x in r) and r[0]["mode"] == "seat" and r[1]["mode"] == "expert")
     r = run(m, [(d, 1.0, 0.0) for d in (-5, -3, 0, 10, 20, 30)])
     check("the expert inserting: INTERVENTION frames, mode stays expert", all(x["frame_state"] == wire.FS_INTERVENTION
           and x["mode"] == "expert" for x in r))
@@ -92,7 +95,8 @@ def test_intervention_expert_fails():
     m = machine()
     m.start(3, ins(-20), None, None, None, pose(-20))
     run(m, [(-3, 0.0, 0.0), (5, 7.5, 0.0), (5, 7.5, 0.0)])                   # trigger -> pull_out
-    run(m, [(d, 0.0, 0.0) for d in (2, -2, -6)])                             # -> expert
+    run(m, [(d, 0.0, 0.0) for d in (2, -2, -6)])                             # -> seat
+    m.tick(DT, ins(-6), None, None, None, pose(-6), arrived=True)            # -> expert
     r = run(m, [(4, 7.5, 0.0), (5, 7.5, 0.0)])
     check("the expert binding too: TERMINATED BIND with a fail penalty (no second intervention)",
           r[-1]["frame_state"] == wire.FS_TERMINATED and r[-1]["reason"] == wire.TR_BIND and r[-1]["terms"]["fail"] < -0.4

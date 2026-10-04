@@ -44,15 +44,17 @@ def take(trig):
 
 def hold(srv, trig):
     print(f"HOLDING -- touch {trig}/expert | reset | quit", flush=True)
-    n = 0
-    while True:
-        srv.t.st.tick(None)
-        n += 1
-        if n % 10 == 0 and srv.state == wire.FS_POLICY:
-            srv.measure()                                 # peg clear: re-zero the gear guard / hole watch (a
-        k = take(trig)                                    # static wrist current drifts ~+450 mA a minute)
-        if k:
-            return k
+    state, srv.state = srv.state, (wire.FS_RESET if srv.state == wire.FS_POLICY else srv.state)
+    try:                                                  # holding is reset time: no gear guard (nothing moves;
+        while True:                                       # touching the block tripped it at +500 mA)
+            srv.t.st.tick(None)
+            k = take(trig)
+            if k:
+                return k
+    finally:
+        srv.state = state
+        if state == wire.FS_POLICY:
+            srv.measure()                                 # peg clear: fresh gear-guard / hole-watch reference
 
 
 def run_expert(srv, out):

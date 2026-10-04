@@ -106,6 +106,44 @@ class Expert:
         self.phase, self.settled, self.n_int, self.k_align = "approach", 0, srv.em.interventions, 0
         self.s = pht.TOP + a.hover
         self.hole_hist = []
+        self.seat_phase, self.seat_s, self.seat_k, self.seat_over, self.seat_contact = "go", None, 0, 0, None
+
+    def seat_delta(self):
+        """The intervention's re-seat, one tick at a time (frames keep flowing): over the server's edge
+        point (srv.seat: offset beside the hole, force), down at 5 mm/s until the push-back passes the
+        force after contact (> 3 N on 2 ticks), up again. -> (delta, done). The same press the resets
+        do: the policy's bind may have shifted the hole within its play."""
+        srv, a = self.srv, self.a
+        if srv.seat is None:
+            return np.zeros(6), True
+        off_y, f_max, _ = srv.seat
+        OFF = phs.T_from([0.0, self.off_mm[0] / 1000.0 + off_y, self.off_mm[1] / 1000.0], np.eye(3))
+        tgt = lambda s: srv.t.peg_target(s, OFF)[0] @ srv.t.st.arms["right"].map    # noqa: E731
+        top = pht.TOP + 0.005
+        if self.seat_phase == "go":
+            T = tgt(top)
+            err = pose_error(srv.T_cmd, T)
+            self.seat_k = self.seat_k + 1 if err[0] < 5e-4 and err[1] < np.radians(0.5) else 0
+            if self.seat_k >= 3:
+                self.seat_phase, self.seat_s, self.seat_k = "press", top, 0
+            return clip_delta(delta_between(srv.T_cmd, T), a.hover_speed / HZ, MAX_ROT), False
+        if self.seat_phase == "press":
+            f = float(srv.info.get("push_back", 0.0))         # the last tick's push-back (episode_info)
+            self.seat_k += 1
+            self.seat_over = self.seat_over + 1 if f > 3.0 and self.seat_k > 5 else 0
+            if self.seat_contact is None and self.seat_over >= 2:
+                self.seat_contact = self.seat_s
+            if (self.seat_contact is not None and (f > f_max or self.seat_s < self.seat_contact - 0.006)) \
+                    or self.seat_s < pht.TOP - 0.012:
+                print(f"    seat: pressed {f:.1f} N, then up")
+                self.seat_phase = "lift"
+            else:
+                self.seat_s -= 0.5 * a.insert_speed / HZ
+                return clip_delta(delta_between(srv.T_cmd, tgt(self.seat_s)), MAX_TRANS, MAX_ROT), False
+        T = tgt(top)                                          # lift
+        if pose_error(srv.T_cmd, T)[0] < 5e-4:
+            return np.zeros(6), True
+        return clip_delta(delta_between(srv.T_cmd, T), a.hover_speed / HZ, MAX_ROT), False
 
     def target(self, s):
         t = self.srv.t
@@ -210,7 +248,7 @@ class SerlServer:
         self.set_offset(o)
         print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
         self.next_pair = None                             # (hole EE, peg start rel) for the next reset only
-        self.expert = None                                # the machine intervention's Expert, this episode
+        self.expert, self.seat_done = None, False         # the machine intervention's Expert, this episode
         self.seat = None                                  # (offset, force, depth): seat_hole() in every reset
         self.seat_path = None                             # taught waypoints (peg_hole_waypoint_gui.py), before the press
         # episode starts: EnvCmd RESET params[0] (wire.RESET_*); retries from the last good state
@@ -799,11 +837,14 @@ class SerlServer:
         elif mode == "pull_out":
             d = self.em.pull_out_delta((self.io.ee("left") @ pht.HOLE_TOOL)[:3, 0])
             self.raw_delta = None
-        elif mode == "expert":                                 # SERL machine intervention: the expert to the goal
+        elif mode in ("seat", "expert"):                       # SERL machine intervention: re-seat, then the expert
             if self.expert is None:
                 self.expert = Expert(self, EXPERT_CFG, self.offset_mm)
-                print(f"  step {self.step}: the expert takes over")
-            d = self.expert.delta()
+                print(f"  step {self.step}: the machine re-seats the hole, then the expert takes over")
+            if mode == "seat":
+                d, self.seat_done = self.expert.seat_delta()
+            else:
+                d = self.expert.delta()
             self.raw_delta = None
         else:                                                 # trace_back
             target = self.trace_target()
@@ -827,8 +868,9 @@ class SerlServer:
         blocked = self.block.update(now, s_real, s_cmd) is not None
         safety = tripped is not None or self.edge.update(now, s_real, self.io.raw_js) == "edge_hard" or \
             abs(self.io.effort[6] - self.e0[6]) > self.t.a.hard_j7 or self.abort
-        arrived = mode == "trace_back" and \
-            all(e < tol for e, tol in zip(pose_error(self.T_cmd, self.trace_target()), (0.001, np.radians(1.0))))
+        arrived = (mode == "trace_back" and all(e < tol for e, tol in zip(
+            pose_error(self.T_cmd, self.trace_target()), (0.001, np.radians(1.0))))) or \
+            (mode == "seat" and self.seat_done)
         hole_shift, dj7 = self.sideways(self.hole_ref), abs(float(self.io.effort[6]) - self.j7_ref)
         r = self.em.tick(period, ins, q, amps, lift, self.T_cmd, blocked=blocked, safety=safety, arrived=arrived,
                          hole_shift=hole_shift, dj7=dj7)
@@ -953,6 +995,7 @@ def main():
         srv.auto_reset, srv.max_retries = a.auto_reset, a.max_retries
         if t is not None:
             srv.em.cfg.failure_mode = a.failure_mode
+            srv.em.cfg.intervene_seat = srv.seat is not None
         if a.images:
             srv.cams = images.WristCameras()
         srv.running = bool(a.autostart and t is not None)

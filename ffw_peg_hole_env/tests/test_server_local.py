@@ -282,7 +282,7 @@ def main():
         n_int = len(st) - 1 - k_int
         check(f"7 the policy's last frame (the bad state) carries the fail penalty ({r_trig:+.3f}); the machine's "
               f"{n_int} frames move it (modes {sorted(modes)} = pull_out, expert)",
-              r_trig < -0.4 and modes <= {wire.MODE_CODES["pull_out"], wire.MODE_CODES["expert"]}
+              r_trig < -0.4 and modes <= {wire.MODE_CODES["pull_out"], wire.MODE_CODES["seat"], wire.MODE_CODES["expert"]}
               and np.mean([np.abs(x[2]).max() > 0 for x in c.trace[k_int:-1]]) > 0.8)
         check(f"7 the episode ends with the success reward ({end['reward']:+.3f})", end["reward"] > 0.9)
     check(f"every frame type {wire.MSG_FRAME}, finite ({c.frames} frames)", c.bad_frames == 0 and c.frames > 100)
