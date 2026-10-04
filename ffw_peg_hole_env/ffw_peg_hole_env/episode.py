@@ -26,7 +26,8 @@ heading down BESIDE the block (the 2026-10-04 incident): the machine halts it an
 intervenes.
 
 Intervention triggers (only while the peg can touch the hole): the tip below the rim
-outside the zone; push-back above f_intervene (below reward.f_hard, so the machine
+outside the zone; push-back above f_intervene for f_hold ticks (below reward.f_hard and the
+rim rule's f_rim x rim_hold, so the machine
 steps in before the jam fail); blocked progress; or the left j7 current changed more
 than j7_intervene since the peg was last clear.
 
@@ -54,7 +55,9 @@ from .reward import PegHoleReward, RewardConfig
 @dataclass
 class EpisodeConfig:
     timeout_s: float = 20.0
-    f_intervene: float = 6.0            # N push-back -> machine steps in (fail is at reward f_hard = 10 N)
+    f_intervene: float = 7.0            # N push-back for f_hold ticks -> machine steps in (fail: 10 N, rim 8 N x 2)
+    f_hold: int = 2                     # 2026-10-04 demos: 6 N on one tick stopped 13/13 tries mid-chamfer (normal
+                                        # entries read 6-8 N; model verify median peak 7.4 N); 7 N x 2: 0/13, 0/19 clean
     zone_radius: float = 0.02           # m: free interaction within this of the axis; outside + below the rim -> machine
     j7_intervene: float = 300.0         # mA left j7 change since last clear -> machine steps in
     hole_shift_max: float = 0.006       # m hole pushed sideways since last clear -> SAFETY
@@ -80,7 +83,7 @@ class EpisodeMachine:
         """New episode, right after a reset: (ins, q, amps, lift) as for reward.py,
         T_peg = the peg's commanded EE pose (base_link)."""
         self.episode_id, self.step, self.t = episode_id, 0, 0.0
-        self.mode, self.interventions, self.restore = "policy", 0, None
+        self.mode, self.interventions, self.restore, self.f_ticks = "policy", 0, None, 0
         self.reward.observe_reset(ins, q, amps, lift)
         self._remember(ins, T_peg)
 
@@ -96,7 +99,7 @@ class EpisodeMachine:
         c = self.cfg
         if not self.can_touch(ins):
             return False
-        return (f_pb > c.f_intervene or blocked or dj7 > c.j7_intervene
+        return (self.f_ticks >= c.f_hold or blocked or dj7 > c.j7_intervene
                 or (ins["depth"] > 0.0 and ins["lateral"] > c.zone_radius))
 
     def tick(self, dt, ins, q, amps, lift, T_peg, blocked=False, safety=False, arrived=False,
@@ -109,6 +112,7 @@ class EpisodeMachine:
         self.t += dt
         reward, success, failed, terms = self.reward(ins, q, amps, lift)
         f_pb = terms["push_back_N"]
+        self.f_ticks = self.f_ticks + 1 if f_pb > c.f_intervene and self.can_touch(ins) else 0
         driving = self.mode                                     # who moved the robot this tick
         state = wire.FS_INTERVENTION if driving in ("pull_out", "trace_back") else wire.FS_POLICY
         reason = wire.TR_NONE

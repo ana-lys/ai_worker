@@ -60,7 +60,9 @@ class RewardConfig:
     rim_hold: int = 2                   # ticks above f_rim (~0.13 s at 15 Hz; EdgeForce holds 0.1 s)
     r_fail: float = -0.5
     r_fail_shallow: float = -0.5        # extra, scaled by the depth still missing at the failure
-    ref_window: int = 8                 # ticks above the rim the reference is the median of
+    ref_window: int = 3                 # ticks above the rim the reference is the median of: short, so it is the
+                                        # MOVING arm's (motor friction shifts the axial estimate ~6-8 N between
+                                        # the static hover and the descent -- 8 ticks held the hover, 2026-10-04)
     ref_clear: float = 0.0005           # m: tip at least this far above the rim to update the reference
 
 

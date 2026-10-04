@@ -65,9 +65,10 @@ def test_clean_success():
 def test_intervention_cycle():
     m = machine()
     m.start(2, ins(-20), None, None, None, pose(-20))
-    trace = [(d, 2.0, 0.0) for d in (-15, -10, -6, -3, 0, 4, 8)] + [(10, 7.0, 0.0)]   # binds at 10 mm
-    r = run(m, trace)
-    check("binding at 7 N: frame still POLICY (the policy drove it), next mode pull_out",
+    r = run(m, [(d, 2.0, 0.0) for d in (-15, -10, -6, -3, 0, 4)] + [(6, 7.5, 0.0), (7, 2.0, 0.0), (8, 6.5, 0.0), (8.5, 6.5, 0.0)])
+    check("one 7.5 N tick, or 6.5 N held: no intervention (normal chamfer entry)", all(x["mode"] == "policy" for x in r))
+    r = run(m, [(9, 7.5, 0.0), (10, 7.5, 0.0)])                                     # binds at 10 mm
+    check("binding at 7.5 N for 2 ticks: frame still POLICY (the policy drove it), next mode pull_out",
           r[-1]["frame_state"] == wire.FS_POLICY and r[-1]["mode"] == "pull_out" and r[-1]["interventions"] == 1)
     check("restore pose = the last policy pose near the hole top (tip 3 mm above the rim)",
           np.allclose(m.restore, pose(-3)))
@@ -91,7 +92,7 @@ def test_intervention_limit():
     m.start(3, ins(-20), None, None, None, pose(-20))
     last = None
     for k in range(4):
-        r = run(m, [(-3, 0.0, 0.0), (5, 7.0, 0.0)])
+        r = run(m, [(-3, 0.0, 0.0), (5, 7.5, 0.0), (5, 7.5, 0.0)])
         last = r[-1]
         if last["mode"] == "reset":
             break

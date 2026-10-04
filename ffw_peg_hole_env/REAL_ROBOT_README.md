@@ -109,7 +109,7 @@ by motion state (gravity current turns into fake ~10 N forces).
    episode. Triggers, only while the peg can touch the hole (tip within 1 mm of the rim
    or lower):
    - tip below the rim more than **2 cm** off the calibrated axis (heading down beside the block);
-   - push-back > **6 N**;
+   - push-back > **7 N for 2 ticks** (was 6 N on one tick: it stopped normal chamfer entries);
    - blocked progress (command descends, peg does not);
    - left j7 current change > **300 mA** since the peg was last clear.
 4. **TERMINATED:**
