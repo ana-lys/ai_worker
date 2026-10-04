@@ -46,6 +46,19 @@ New messages:
                        (uint16), right RGB bytes, left RGB bytes]. Sent right
                        after the Obs of the same tick; pair by (episode_id, step).
 
+  Frame (11)           server -> controller, OBS, real robot: one per 15 Hz tick.
+                       The 131-double Obs payload above, then the tag:
+                       episode_id, step (uint32); frame_state, reason (uint8);
+                       reward (float64); action (6 float64: the right-arm delta
+                       actually applied this tick -- the policy's, or the
+                       machine's on INTERVENTION frames). 1126-byte frame.
+                       frame_state: FS_IDLE, FS_POLICY, FS_INTERVENTION,
+                       FS_TERMINATED, FS_RESET, FS_FAULT. reason (on TERMINATED):
+                       TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT,
+                       TR_SAFETY, TR_INTERVENTIONS, TR_ABORT. Store POLICY and
+                       INTERVENTION frames, TERMINATED ends the episode, skip
+                       RESET / IDLE / FAULT.
+
 MSG_CONTROL_DELTA = 6 follows the HIL-SERL spec. Agreed 2026-10-02: it keeps 6,
 and the robot gateway's SetMode (also 6 today) moves to another number.
 """
@@ -68,6 +81,7 @@ MSG_CONTROL_DELTA = 6
 MSG_ENV_CMD = 8
 MSG_ENV_STATUS = 9
 MSG_IMAGES = 10
+MSG_FRAME = 11
 
 # EnvCmd.cmd
 RESET, PAUSE, RESUME, ABORT, PING = 1, 2, 3, 4, 5
@@ -75,6 +89,11 @@ CMD_NAMES = {RESET: "RESET", PAUSE: "PAUSE", RESUME: "RESUME", ABORT: "ABORT", P
 # EnvStatus.state
 IDLE, RESETTING, READY, RUNNING, PAUSED, DONE, FAULT = range(7)
 STATE_NAMES = ["IDLE", "RESETTING", "READY", "RUNNING", "PAUSED", "DONE", "FAULT"]
+# Frame.frame_state / Frame.reason
+FS_IDLE, FS_POLICY, FS_INTERVENTION, FS_TERMINATED, FS_RESET, FS_FAULT = range(6)
+FS_NAMES = ["IDLE", "POLICY", "INTERVENTION", "TERMINATED", "RESET", "FAULT"]
+TR_NONE, TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT, TR_SAFETY, TR_INTERVENTIONS, TR_ABORT = range(9)
+TR_NAMES = ["NONE", "SUCCESS", "JAM", "RIM", "BLOCKED", "TIMEOUT", "SAFETY", "INTERVENTIONS", "ABORT"]
 # EnvStatus.backend
 BACKEND_SIM, BACKEND_REAL = 0, 1
 
@@ -98,6 +117,7 @@ _DELTA = struct.Struct("<14d")
 _ENV_CMD = struct.Struct("<BqI8d")
 _ENV_STATUS = struct.Struct("<6B3I4d")
 _IMAGES = struct.Struct("<2I2H")
+_TAG = struct.Struct("<2I2Bd6d")                  # episode_id, step, frame_state, reason, reward, action
 
 if gw is not None:                                # the copy above must match the gateway exactly
     assert gw._HEADER.format == _HEADER.format
@@ -182,3 +202,26 @@ def decode_obs(data):
         "ee_right_marker": v[95:101], "limit_diff_right": v[101:113],
         "ee_left_marker": v[113:119], "limit_diff_left": v[119:131],
     }, ts
+
+
+def encode_frame(obs_frame, episode_id, step, frame_state, reason=TR_NONE, reward=0.0, action=(0.0,) * 6):
+    """Frame from a gateway Obs frame (its 1060 bytes, header included): same timestamp,
+    type MSG_FRAME, the tag appended."""
+    if len(obs_frame) != _HEADER.size + _OBS.size or msg_type(obs_frame) != MSG_OBS:
+        raise ValueError("encode_frame needs a gateway Obs frame")
+    ts = _HEADER.unpack_from(obs_frame, 0)[1]
+    return (_HEADER.pack(MSG_FRAME, ts) + obs_frame[_HEADER.size:]
+            + _TAG.pack(episode_id, step, frame_state, reason, reward, *action))
+
+
+def decode_frame(data):
+    """-> (obs dict as decode_obs, tag dict, timestamp)."""
+    if len(data) != _HEADER.size + _OBS.size + _TAG.size:
+        raise ValueError(f"type {MSG_FRAME}: expected {_HEADER.size + _OBS.size + _TAG.size} bytes, got {len(data)}")
+    t, ts = _HEADER.unpack_from(data, 0)
+    if t != MSG_FRAME:
+        raise ValueError(f"type {t}, expected {MSG_FRAME}")
+    obs, _ = decode_obs(_HEADER.pack(MSG_OBS, ts) + data[_HEADER.size:_HEADER.size + _OBS.size])
+    v = _TAG.unpack_from(data, _HEADER.size + _OBS.size)
+    return obs, {"episode_id": v[0], "step": v[1], "frame_state": v[2], "reason": v[3],
+                 "reward": v[4], "action": v[5:11]}, ts

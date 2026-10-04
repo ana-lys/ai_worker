@@ -74,5 +74,5 @@ Out of scope now: sim parity, human SpaceMouse intervention.
 
 ## Status
 
-- [ ] 0 contract  - [ ] 1 logic  - [ ] 2 idle server  - [ ] 3 policy + reset
+- [x] 0 contract  - [ ] 1 logic  - [ ] 2 idle server  - [ ] 3 policy + reset
 - [ ] 4 intervention  - [ ] 5 images

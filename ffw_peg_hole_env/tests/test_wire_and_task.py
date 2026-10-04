@@ -73,6 +73,20 @@ def test_obs_layout():
           and np.allclose(d["limit_diff_right"], o.limit_diff[0]) and np.allclose(d["limit_diff_left"], o.limit_diff[1]))
     check("standalone decode_obs == gateway encode_obs, all 131 fields", ok)
     check("Obs frame is 1060 bytes", len(gw.encode_obs(o)) == 1060)
+    obs_frame = gw.encode_obs(o, ts=7.25)
+    act = (0.001, -0.002, 0.003, 0.01, -0.02, 0.03)
+    f = wire.encode_frame(obs_frame, 12, 34, wire.FS_INTERVENTION, wire.TR_NONE, -0.125, act)
+    fo, tag, ts = wire.decode_frame(f)
+    check("Frame is 1126 bytes, type 11, Obs timestamp kept", len(f) == 1126 and wire.msg_type(f) == wire.MSG_FRAME and ts == 7.25)
+    check("Frame Obs part == decode_obs", all(np.allclose(fo[k], d[k]) for k in d))
+    check("Frame tag round-trip", tag["episode_id"] == 12 and tag["step"] == 34 and tag["frame_state"] == wire.FS_INTERVENTION
+          and tag["reason"] == wire.TR_NONE and tag["reward"] == -0.125 and np.allclose(tag["action"], act))
+    bad = False
+    try:
+        wire.encode_frame(f, 0, 0, wire.FS_IDLE)
+    except ValueError:
+        bad = True
+    check("encode_frame rejects a non-Obs frame", bad)
 
 
 def test_standalone_import():
