@@ -233,7 +233,7 @@ class Recorder:
         return k
 
     # --- one demo pose -------------------------------------------------------------------------
-    def episode(self, k, pose, attempt, off):
+    def episode(self, k, pose, attempt, off, kind):
         srv = self.srv
         srv.set_offset(off)
         srv.next_pair = pose["pair"]
@@ -251,7 +251,7 @@ class Recorder:
         res = {"episode_id": srv.episode_id, "reason": wire.TR_NAMES[srv.reason], "steps": srv.step,
                "interventions": int(srv.em.interventions), "return": float(info.get("return", np.nan)),
                "push_back_peak": float(info.get("push_back_peak", np.nan)), "offset_mm": off.tolist(),
-               "offset_kind": self.a.offset, "attempt": attempt, "frames": len(srv.buf),
+               "offset_kind": kind, "attempt": attempt, "frames": len(srv.buf),
                "time": datetime.now().isoformat(timespec="seconds")}
         return res
 
@@ -366,12 +366,14 @@ class Recorder:
                                                               self.pool["entries"][-1]["z_mm"]]})
                     self.save_index()
                 attempt = sum("calibrated_mm" not in e for e in rec["attempts"]) + 1
-                off = predict(self.model, pose, a.offset)
+                cal = [e["calibrated_mm"] for e in rec["attempts"] if "calibrated_mm" in e]
+                # a pose you calibrated is retaken at YOUR alignment: one pool point barely moves the fit
+                off = np.array(cal[-1], float) if cal else predict(self.model, pose, a.offset)
                 print(f"\npose {k} ({self.n_done()}/{n} done) try {attempt}: hole y {pose['grid_m'][0] * 100:+.1f} "
                       f"z {pose['grid_m'][1] * 100:+.1f} cm, height {pose['hole_height_m'] * 1000:+.1f} mm, tilt "
                       f"{pose['hole_tilt_deg'][0]:+.1f} {pose['hole_tilt_deg'][1]:+.1f} deg; offset "
-                      f"{off[0]:+.2f} {off[1]:+.2f} mm")
-                res = self.episode(k, pose, attempt, off)
+                      f"{off[0]:+.2f} {off[1]:+.2f} mm{' (your calibration)' if cal else ''}")
+                res = self.episode(k, pose, attempt, off, "calibrated" if cal else a.offset)
                 if res is None:
                     rec["attempts"].append({"attempt": attempt, "reason": "FAULT"})
                     self.save_index()
