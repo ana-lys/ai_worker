@@ -14,7 +14,7 @@ about 3 axes -- taken in order; reach-check failures are skipped. Evenly covers 
 at any count (a 6+ dim grid of 100 points can't).
 
 Expert: the peg-tool offset from the fitted model (config/peg_hole_offset_model.json,
---offset model | const), over to the hole axis --hover above the rim at --approach-speed,
+--offset model | const), over to the hole axis --hover above the rim at --hover-speed,
 settle, then straight down the axis at --insert-speed. A demo counts only if it ends
 SUCCESS with no machine intervention (--allow-interventions to keep those too).
 
@@ -162,7 +162,7 @@ class Expert:
             self.settled = self.settled + 1 if e[0] < 2e-4 and e[1] < np.radians(0.2) else 0
             if self.settled >= a.settle_ticks:
                 self.phase = "insert"
-            return clip_delta(delta_between(srv.T_cmd, tgt), a.approach_speed / HZ, MAX_ROT)
+            return clip_delta(delta_between(srv.T_cmd, tgt), a.hover_speed / HZ, MAX_ROT)
         self.s = max(self.s - a.insert_speed / HZ, pht.TOP - srv.t.a.push - 0.002)
         return clip_delta(delta_between(srv.T_cmd, self.target(self.s)), MAX_TRANS, MAX_ROT)
 
@@ -199,7 +199,7 @@ class Recorder:
             self.index = {"plan": {"n": a.n, "sobol_seed": a.sobol_seed, "dims": DIMS, "extent_m": a.extent,
                                    "height_m": a.height, "tilt_range_deg": a.tilt_range, "xy_m": a.xy,
                                    "tilt_deg": a.tilt, "hover_m": a.hover, "insert_speed": a.insert_speed,
-                                   "approach_speed": a.approach_speed, "offset": a.offset, "lift": a.lift,
+                                   "hover_speed": a.hover_speed, "offset": a.offset, "lift": a.lift,
                                    "started": datetime.now().isoformat(timespec="seconds")}, "poses": {}}
         p = self.index["plan"]
         for k in ("sobol_seed", "extent_m", "height_m", "tilt_range_deg", "xy_m", "tilt_deg"):
@@ -392,7 +392,7 @@ def main():
     ap.add_argument("--height", type=float, nargs=2, default=[-0.02, 0.0], help="m, hole along its axis")
     ap.add_argument("--tilt-range", type=float, default=3.0, help="deg, hole tilt about each cross axis")
     ap.add_argument("--hover", type=float, default=0.005, help="m above the rim the expert aligns at")
-    ap.add_argument("--approach-speed", type=float, default=0.03, help="m/s to the hover pose")
+    ap.add_argument("--hover-speed", type=float, default=0.03, help="m/s to the hover pose")
     ap.add_argument("--insert-speed", type=float, default=None, help="m/s down the axis (default --speed)")
     ap.add_argument("--settle-ticks", type=int, default=5, help="ticks on the hover pose before inserting")
     ap.add_argument("--offset", choices=("model", "const"), default="model")

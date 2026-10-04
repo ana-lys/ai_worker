@@ -544,7 +544,7 @@ def main():
     ex.add_node(io)
     spin = threading.Thread(target=ex.spin, daemon=True)
     spin.start()
-    t, lift_before = None, None
+    t, lift_before, srv = None, None, None
     try:
         t0 = time.monotonic()
         while (gateway_obs(io) is None or io.effort is None or io.ee("left") is None or io.ee("right") is None) \
@@ -578,6 +578,8 @@ def main():
     except KeyboardInterrupt:
         print("\ninterrupted")
     finally:
+        if srv is not None and srv.cams is not None:
+            srv.cams.stop()                               # decoder threads killed at exit abort the process
         if t is not None:
             print(f"session saved: {t.rec.save_session()}")
             t.summary.close()
