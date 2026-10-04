@@ -1,5 +1,8 @@
 # ffw_peg_hole_env
 
+> **Real robot:** see `REAL_ROBOT_README.md` (server, wire `Frame`, episode rules, offset
+> calibration, safety, remaining plan). This file describes the parked MuJoCo sim server.
+
 Server side of the peg-in-hole task for HIL-SERL: the functions that run when
 HIL-SERL's ZMQ messages arrive. One server, the same event handling for the
 MuJoCo simulator and (next) the real robot; only the timing differs.
