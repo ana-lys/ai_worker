@@ -486,6 +486,7 @@ def main():
     ap.add_argument("--allow-interventions", action="store_true", help="count SUCCESS demos with interventions")
     ap.add_argument("--port-base", type=int, default=7611, help="Frames are published here too")
     ap.add_argument("--no-images", action="store_true")
+    srvmod.add_seat_args(ap)
     a = ap.parse_args()
     a.insert_speed = a.insert_speed if a.insert_speed is not None else a.speed
     if not a.allow_motion:
@@ -529,6 +530,7 @@ def main():
         t.take_right()
         srv = DemoServer(io, a.port_base, t)
         srv.cams = cams
+        srv.seat = srvmod.seat_from_args(a)
         print(f"teach recording to {t.out}; demos to {a.demo_dir}; frames also on port {a.port_base}")
         Recorder(srv, a).run()
     except (KeyboardInterrupt, Quit, pht.Abort) as e:

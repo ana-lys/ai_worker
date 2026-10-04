@@ -137,6 +137,7 @@ class SerlServer:
         self.set_offset(o)
         print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
         self.next_pair = None                             # (hole EE, peg start rel) for the next reset only
+        self.seat = None                                  # (offset, force, depth): seat_hole() in every reset
         self.cams, self.last_images = None, None          # images.WristCameras (--images): newest crops per tick
         # Frame state: obs limit boxes, EE velocity memory, the episode's priv values
         self.profiles = observation.load_profiles()
@@ -375,6 +376,8 @@ class SerlServer:
             self.retract()
             self.j7_ref, self.j7_since = float(self.io.effort[6]), None        # peg clear: unloaded reference
             ok = self.t.hw_reset(self.start_pair())
+            if ok and self.seat is not None:
+                ok = self.seat_hole() and self.t.go_start()
         except (phr.LagTrip, HoleMoved, GuardTrip) as e:
             print(f"reset stopped: {e}")
             ok = False
@@ -401,6 +404,43 @@ class SerlServer:
         self.info = self.episode_info(ins, s_cmd)
         self.publish()                                        # step 0: the observation after the reset
         print(f"episode {self.episode_id}: start, peg depth {ins['depth'] * 1000:+.1f} mm")
+        return True
+
+    def seat_hole(self):
+        """Seat the hole block in the left gripper before the episode: press the peg down on the block
+        top beside the hole (self.seat = (offset across the axis [m], force [N], depth past the top [m])),
+        then lift it back up the axis. 2026-10-04 demos: the first contact after a reset moved the
+        hole another 0.7-0.8 mm (retries: 0.05-0.2) -- most first tries failed, their retries went in.
+        RESET frames; the gear guard and the hole watch (> 6 mm sideways -> FAULT) stay on."""
+        off_y, f_max, depth = self.seat
+        t, arm = self.t, self.t.st.arms["right"]
+        OFF = phs.T_from([0.0, self.offset_mm[0] / 1000.0 + off_y, self.offset_mm[1] / 1000.0], np.eye(3))
+        T, _ = t.peg_target(pht.TOP + t.a.clear, OFF)
+        t.move_right(T, t.a.move_speed, "hover")                 # above the block top, beside the hole
+        T, _ = t.peg_target(pht.TOP + 0.005, OFF)
+        t.move_right(T, t.a.speed, "to_top")
+        h0 = self.hole_now()
+        rw = self.em.reward
+        rw.reset()
+        s_cmd, f = pht.TOP + 0.005, 0.0
+        t.phase("push")
+        while s_cmd > pht.TOP - depth:
+            s_cmd -= 0.5 * t.a.speed / HZ                        # half speed: the block is rigid, F rises fast
+            self.command_site(t.peg_target(s_cmd, OFF)[0] @ arm.map)
+            t_end = time.monotonic() + 1.0 / HZ
+            while time.monotonic() < t_end - phs.CTRL_DT / 2:
+                t.st.tick(None)
+            ins, q, amps, lift, _, _ = self.measure()
+            f = rw.push_back_force(ins, q, amps, lift)
+            if self.em.can_touch(ins) and f > f_max:          # first tick over: held 2 it overshot 8 -> 10 N
+                break
+        t.held(0.3)
+        moved = self.sideways(h0)
+        T, _ = t.peg_target(pht.TOP + t.a.clear, OFF)
+        t.move_right(T, t.a.speed, "retract")                    # straight back up the axis
+        print(f"  seat: pressed {f:.1f} N at {(pht.TOP - s_cmd) * 1000:+.1f} mm, {off_y * 1000:.0f} mm beside the "
+              f"hole; hole moved {moved * 1000:.2f} mm")
+        t.phase("idle")
         return True
 
     def start_pair(self):
@@ -529,8 +569,21 @@ class SerlServer:
                 t_next = time.monotonic()
 
 
+def add_seat_args(ap):
+    ap.add_argument("--no-seat", action="store_true", help="skip seating the hole block in each reset")
+    ap.add_argument("--seat-offset", type=float, default=0.012,
+                    help="m beside the hole axis (peg tool +y) where the reset presses on the block top")
+    ap.add_argument("--seat-force", type=float, default=8.0, help="N push-back that ends the press")
+    ap.add_argument("--seat-depth", type=float, default=0.004, help="m past the block top the press goes at most")
+
+
+def seat_from_args(a):
+    return None if a.no_seat else (a.seat_offset, a.seat_force, a.seat_depth)
+
+
 def main():
     ap = pht.build_parser(__doc__, default_out=str(HERE / "recordings" / "peg_hole_serl"))
+    add_seat_args(ap)
     ap.add_argument("--port-base", type=int, default=7601)
     ap.add_argument("--duration", type=float, default=None, help="s, then quit (tests)")
     ap.add_argument("--images", action="store_true", help="decode the wrist D405s (priv image_t; ROI crops)")
@@ -567,6 +620,7 @@ def main():
             t.take_right()
             print(f"recording to {t.out}")
         srv = SerlServer(io, a.port_base, t)
+        srv.seat = seat_from_args(a)
         if a.images:
             srv.cams = images.WristCameras()
         srv.running = bool(a.autostart and t is not None)
