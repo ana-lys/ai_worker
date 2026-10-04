@@ -28,6 +28,7 @@ by the teach tool's recorder under --out.
   source ROS; .venv/bin/python peg_hole_serl_server.py --allow-motion --continuous   # real episodes
 """
 import argparse
+import json
 import sys
 import threading
 import time
@@ -63,9 +64,20 @@ BOX_ACROSS, BOX_UP, BOX_TILT = 0.06, 0.06, np.radians(10.0)
 # and the reset then dragged it sideways into the block, pushing the hole 88 mm)
 ON_AXIS, FLOOR = 0.003, 0.002
 HOLE_SHIFT_MAX = 0.006                                  # m: hole pushed sideways -> stop (resets too)
+# Gear guard, every control tick in every phase (episode, intervention, retract, reset):
+# left j7 current change from its unloaded reference > J7_HARD at once, or > J7_SUSTAIN for
+# J7_HOLD s. Recordings: clean pushes peak <= 400 mA and never stay > 300 mA longer than
+# 0.30 s; the 2026-10-04 reset drag pinned j7 at 1.5 A for ~40 s (this trips at 450 mA,
+# ~0.05 s into the drag). During a retract only a RISE of the load trips (unloading is fine).
+J7_HARD, J7_SUSTAIN, J7_HOLD, J7_RISE = 450.0, 300.0, 0.35, 150.0
+OFFSET_MODEL = HERE.parent / "config" / "peg_hole_offset_model.json"
 
 
 class HoleMoved(Exception):
+    pass
+
+
+class GuardTrip(Exception):
     pass
 
 
@@ -104,6 +116,14 @@ class SerlServer:
         self.last_pub, self.delta, self.delta_t = 0.0, None, 0.0
         self.running, self.paused, self.abort = False, False, False
         self.watch = None                                 # (hole pos, axis) the hole must not leave during a retract
+        self.j7_ref = float(io.effort[6]) if io.effort is not None else 0.0   # unloaded left j7 [mA]
+        self.j7_since, self.retract_floor = None, None
+        if teach is not None:
+            o = json.load(open(OFFSET_MODEL))["const"] if OFFSET_MODEL.exists() else [0.0, 0.0]
+            self.offset_mm = np.array(o, dtype=float)
+            # calibrated hole axis in the hole tool frame: the peg-tool y/z offset rotated by the roll
+            self.axis_c = (Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix() @ np.r_[0.0, o[0], o[1]] / 1000.0)[1:]
+            print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
         if teach is not None:
             self.em = EpisodeMachine()
             inner = teach.st.on_tick
@@ -160,9 +180,27 @@ class SerlServer:
         if self.watch is not None and self.sideways(self.watch) > HOLE_SHIFT_MAX:
             self.watch = None
             raise HoleMoved(f"hole pushed {HOLE_SHIFT_MAX * 1000:.0f}+ mm sideways")
+        if self.t is not None and self.state in (wire.FS_POLICY, wire.FS_INTERVENTION, wire.FS_RESET):
+            self.guard()                                      # only while something is being commanded
         if self.state in (wire.FS_RESET, wire.FS_IDLE, wire.FS_FAULT) and time.monotonic() - self.last_pub >= 1.0 / HZ:
             self.poll_commands()
             self.publish()
+
+    def guard(self):
+        """Gear guard on the left j7 current (see J7_*)."""
+        d = abs(float(self.io.effort[6]) - self.j7_ref)
+        if self.retract_floor is not None:                     # retract: only a rising load trips
+            if d > max(J7_HARD, self.retract_floor + J7_RISE):
+                raise GuardTrip(f"left j7 load rose to {d:.0f} mA while retracting")
+            return
+        if d > J7_HARD:
+            raise GuardTrip(f"left j7 +{d:.0f} mA > {J7_HARD:.0f}")
+        if d > J7_SUSTAIN:
+            self.j7_since = self.j7_since if self.j7_since is not None else time.monotonic()
+            if time.monotonic() - self.j7_since > J7_HOLD:
+                raise GuardTrip(f"left j7 > {J7_SUSTAIN:.0f} mA for {J7_HOLD:.2f} s")
+        else:
+            self.j7_since = None
 
     # --- measurements ---------------------------------------------------------------------
     def hole_now(self):
@@ -175,19 +213,25 @@ class SerlServer:
         d = self.hole_now()[0] - ref[0]
         return float(np.linalg.norm(d - (d @ ref[1]) * ref[1]))
 
+    def peg_in_hole(self, T_peg_ee):
+        """(height on the axis, lateral from the CALIBRATED axis, tilt deg) of a right EE pose."""
+        P = np.linalg.inv(self.io.ee("left") @ pht.HOLE_TOOL) @ T_peg_ee @ pht.PEG_TOOL
+        lat = float(np.hypot(P[1, 3] - self.axis_c[0], P[2, 3] - self.axis_c[1]))
+        return float(P[0, 3]), lat, float(np.degrees(np.arccos(np.clip(P[0, 0], -1.0, 1.0))))
+
     def measure(self):
-        """(ins, q, amps, lift, s_real, s_cmd) of the right arm / peg now."""
-        T_l, T_r = self.io.ee("left"), self.io.ee("right")
-        lat, tilt, s_real = phs.axis_error(T_l, T_r, pht.HOLE, pht.PEG)
+        """(ins, q, amps, lift, s_real, s_cmd) of the right arm / peg now (lateral from the
+        calibrated axis)."""
+        s_real, lat, tilt = self.peg_in_hole(self.io.ee("right"))
         arm = self.t.st.arms["right"]
-        s_cmd = phs.axis_error(T_l, arm.last_goal_eff, pht.HOLE, pht.PEG)[2] if arm.last_goal_eff is not None else s_real
+        s_cmd = self.peg_in_hole(arm.last_goal_eff)[0] if arm.last_goal_eff is not None else s_real
         raw = self.io.raw_js
         idx = {n: i for i, n in enumerate(raw[1])}
         q = np.array([raw[2][idx[n]] for n in RIGHT])
         amps = np.array([raw[4][idx[n]] for n in RIGHT]) * effort.EFF_TO_A
         ins = {"depth": pht.TOP - s_real, "lateral": lat, "across": (lat, 0.0), "tilt_deg": tilt}
         if not self.em.can_touch(ins):                        # contact impossible: re-zero the hole watch
-            self.hole_ref, self.j7_ref = self.hole_now(), float(self.io.effort[6])
+            self.hole_ref, self.j7_ref = self.hole_now(), float(self.io.effort[6])   # (and the gear guard)
         return ins, q, amps, raw[2][idx["lift_joint"]], s_real, s_cmd
 
     def site_cmd(self):
@@ -207,7 +251,8 @@ class SerlServer:
                         [pht.TOP + BOX_UP, BOX_ACROSS, BOX_ACROSS], [BOX_TILT] * 3, R_ref)
         T_peg, _ = box.clamp(T_peg)
         p = np.linalg.inv(H) @ np.r_[T_peg[:3, 3], 1.0]                   # x = height on the axis
-        if np.hypot(p[1], p[2]) > ON_AXIS and p[0] < pht.TOP + FLOOR:    # beside the hole: stay above the rim
+        if np.hypot(p[1] - self.axis_c[0], p[2] - self.axis_c[1]) > ON_AXIS and p[0] < pht.TOP + FLOOR:
+            # beside the (calibrated) hole: stay above the rim
             p[0] = pht.TOP + FLOOR
             T_peg = T_peg.copy()
             T_peg[:3, 3] = (H @ p)[:3]
@@ -220,8 +265,9 @@ class SerlServer:
         self.state, self.reason, self.reward, self.action = wire.FS_RESET, wire.TR_NONE, 0.0, np.zeros(6)
         try:
             self.retract()
+            self.j7_ref, self.j7_since = float(self.io.effort[6]), None        # peg clear: unloaded reference
             ok = self.t.hw_reset()
-        except (phr.LagTrip, HoleMoved) as e:
+        except (phr.LagTrip, HoleMoved, GuardTrip) as e:
             print(f"reset stopped: {e}")
             ok = False
         if not ok:
@@ -257,10 +303,11 @@ class SerlServer:
         T_up = T_peg.copy()
         T_up[:3, 3] += rise * H[:3, 0]
         self.watch = self.hole_now()
+        self.retract_floor = abs(float(self.io.effort[6]) - self.j7_ref)
         try:
             self.t.move_right(T_up @ np.linalg.inv(pht.PEG_TOOL), self.t.a.speed, "reset_out")
         finally:
-            self.watch = None
+            self.watch, self.retract_floor = None, None
 
     def episode_tick(self):
         """One 15 Hz frame of an episode: act (policy or machine), let the robot move for the
@@ -275,16 +322,22 @@ class SerlServer:
             d = self.em.pull_out_delta((self.io.ee("left") @ pht.HOLE_TOOL)[:3, 0])
         else:                                                 # trace_back
             target = self.em.restore if self.em.restore is not None else \
-                self.t.peg_target(pht.TOP + self.em.cfg.clear)[0] @ self.t.st.arms["right"].map
+                self.t.peg_target(pht.TOP + self.em.cfg.clear, phs.T_from([0.0, *(self.offset_mm / 1000.0)], np.eye(3)))[0] \
+                @ self.t.st.arms["right"].map
             d = self.em.toward_delta(self.T_cmd, target)
         self.T_cmd = self.command_site(apply_delta(self.T_cmd, d))
         self.action = d
-        while time.monotonic() < t_end - phs.CTRL_DT / 2:
-            self.t.st.tick(None)
+        tripped = None
+        try:
+            while time.monotonic() < t_end - phs.CTRL_DT / 2:
+                self.t.st.tick(None)
+        except (GuardTrip, HoleMoved) as e:                   # gear guard: end the episode at once
+            tripped = str(e)
+            print(f"  step {self.step + 1}: SAFETY stop: {e}")
         ins, q, amps, lift, s_real, s_cmd = self.measure()
         now = time.monotonic() - self.t0
         blocked = self.block.update(now, s_real, s_cmd) is not None
-        safety = self.edge.update(now, s_real, self.io.raw_js) == "edge_hard" or \
+        safety = tripped is not None or self.edge.update(now, s_real, self.io.raw_js) == "edge_hard" or \
             abs(self.io.effort[6] - self.e0[6]) > self.t.a.hard_j7 or self.abort
         arrived = mode == "trace_back" and self.em.restore is not None and \
             all(e < tol for e, tol in zip(pose_error(self.T_cmd, self.em.restore), (0.001, np.radians(1.0))))

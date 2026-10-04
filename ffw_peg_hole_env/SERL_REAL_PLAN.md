@@ -114,3 +114,21 @@ frames peg_hole_frame_l/r). joy_hand clamps SpaceMouse goals only; scripted
 Plane scan result (`recordings/peg_hole_teach/20261004_134329/plane_scan.json`): 3/16
 poses under 10 N (all at 9.4-10 N), 170 pushes; the -y half sits at 9.5-11.8 N, the +y
 side at 16-25 N.
+
+## True peg offset and the gear guard (2026-10-04, later)
+
+Eye alignment over 25 hole poses (`peg_hole_align_gui.py`, `recordings/peg_hole_align/20261004_152716`):
+the true peg offset is peg-tool y -1.84 +- 0.32, z -3.08 +- 0.68 mm -- z is twice the +-1.5 mm every
+earlier search used (why the plane scan pinned at its bound and the first verify got 12/50). A linear
+model in position / height / tilt predicts z to 0.30 mm (constant 0.71), but on the robot it does not
+beat the constant: model-verify on 10 new random poses (`recordings/peg_hole_teach/20261004_153905`),
+model 20/20 full depth, median 7.4 N vs constant 20/20, 7.5 N (paired +0.17 +- 1.16 N). The constant
+(-1.84, -3.08) is in `config/peg_hole_offset_model.json` ("const"); the server measures every on-axis
+rule (success, beside-the-hole, floor clamp) from the axis corrected by it, and the plane scan
+warm-starts there.
+
+The user attributes the offset change to the incident (j7 pinned at 1.5 A ~40 s while the reset dragged
+the peg into the block). Gear guard in the server, every control tick while anything is commanded
+(episode, intervention, retract, reset): left j7 change from its unloaded reference > 450 mA at once,
+or > 300 mA for 0.35 s -> SAFETY / FAULT; during a retract only a rising load trips. Replays: the
+incident trips at 14.01 s (before the drag started ~14.4 s); 0/205 clean pushes trip.
