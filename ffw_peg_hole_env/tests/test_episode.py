@@ -103,6 +103,21 @@ def test_intervention_limit():
           and last["terms"]["fail"] < -0.5)
 
 
+def test_rim_band():
+    m = machine()
+    m.start(6, ins(-20), None, None, None, pose(-20))
+    r = run(m, [(-3, 0.0, 0.0), (0.5, 6.5, 0.0), (1.0, 6.5, 0.0), (1.5, 6.5, 0.0)])
+    check("light edge contact at the rim (6.5 N held): no intervention, no end", all(x["mode"] == "policy" for x in r))
+    r = run(m, [(1.0, 8.5, 0.0), (1.5, 8.5, 0.0)])
+    check("8.5 N for 2 ticks within 2 mm of the rim: TERMINATED RIM",
+          r[-1]["frame_state"] == wire.FS_TERMINATED and r[-1]["reason"] == wire.TR_RIM)
+    m = machine()
+    m.start(7, ins(-20), None, None, None, pose(-20))
+    r = run(m, [(-3, 0.0, 0.0), (3.0, 8.5, 0.0), (3.5, 8.5, 0.0)])
+    check("8.5 N for 2 ticks 3 mm in (past the rim band): machine intervenes, episode goes on",
+          r[-1]["frame_state"] == wire.FS_POLICY and r[-1]["mode"] == "pull_out")
+
+
 def test_other_terminations():
     m = machine()
     m.start(4, ins(-20), None, None, None, pose(-20))
@@ -169,6 +184,7 @@ if __name__ == "__main__":
     test_clean_success()
     test_intervention_cycle()
     test_intervention_limit()
+    test_rim_band()
     test_other_terminations()
     test_real_robot_rules()
     test_machine_deltas()

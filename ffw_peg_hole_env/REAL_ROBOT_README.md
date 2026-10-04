@@ -114,7 +114,7 @@ by motion state (gravity current turns into fake ~10 N forces).
    - left j7 current change > **300 mA** since the peg was last clear.
 4. **TERMINATED:**
    - SUCCESS — tip 34 mm in, within 2 mm of the calibrated axis;
-   - JAM / RIM — push-back > 10 N, or > 8 N for 2 ticks within 6 mm of the rim;
+   - JAM / RIM — push-back > 10 N, or > 8 N for 2 ticks within 2 mm of the rim (light edge contact never ends it);
    - SAFETY — hole pushed > 6 mm sideways, gear guard, hard edge (25 N), left j7 > 450 mA;
    - INTERVENTIONS / BLOCKED — a 4th trigger;
    - TIMEOUT — 20 s.

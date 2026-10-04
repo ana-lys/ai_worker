@@ -56,7 +56,9 @@ class RewardConfig:
     f_rim: float = 8.0                  # N: near the rim -> rim strike, episode ends (EdgeForce's 4 N trips 21/50
                                         #    normal entries at 15 Hz -- their peak in the first 6 mm is ~4.9 N, p75 5.8;
                                         #    a real rim strike climbs to 17-23 N in sim)
-    rim_band: float = 0.006             # m: tip at most this deep for the rim check (EdgeForce band)
+    rim_band: float = 0.002             # m: tip at most this deep for the rim check -- a rim strike happens AT the
+                                        # rim; deeper is chamfer / bore, where binding gets the machine's
+                                        # intervention (7 N x 2) and only a 10 N jam ends it (was 6 mm, 2026-10-04)
     rim_hold: int = 2                   # ticks above f_rim (~0.13 s at 15 Hz; EdgeForce holds 0.1 s)
     r_fail: float = -0.5
     r_fail_shallow: float = -0.5        # extra, scaled by the depth still missing at the failure
