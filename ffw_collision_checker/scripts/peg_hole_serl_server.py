@@ -227,7 +227,7 @@ class SerlServer:
         self.raw_delta = None
         print("limit profiles: " + ", ".join(f"{a}: {f}" for a, (f, _, _) in self.profiles.items()))
         if teach is not None:
-            self.em = EpisodeMachine()
+            self.em = EpisodeMachine(success_depth=teach.a.push - 0.001)   # success = push - 1 mm (35 -> 34)
             inner = teach.st.on_tick
             teach.st.on_tick = lambda: (inner(), self.background())
 

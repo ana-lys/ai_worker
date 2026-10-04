@@ -66,7 +66,7 @@ Always receive with `recv_multipart()` and decode with `wire.decode_frame_parts(
 
 | value | name | when | negative fail reward | RESET AUTO next |
 |---|---|---|---|---|
-| 1 | SUCCESS | tip ≥ 34 mm in, ≤ 2 mm off the axis | — (success bonus) | new pair |
+| 1 | SUCCESS | tip ≥ push − 1 mm in (34 mm at the 35 mm push; 29 mm at the 30 mm push the lift −0.30 setup uses since 2026-10-05), ≤ 2 mm off the axis | — (success bonus) | new pair |
 | 2 | JAM | push-back > 10 N | yes | retry |
 | 3 | RIM | > 8 N for 2 ticks within 2 mm of the rim | yes | retry |
 | 10 | BIND | push-back > 7 N for 2 ticks (or the hole arm loaded > 300 mA) | yes | retry |
