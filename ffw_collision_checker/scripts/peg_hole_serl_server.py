@@ -665,6 +665,49 @@ class SerlServer:
                     np.linalg.norm(hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0]) < 0.0002:
                 return
 
+    def run_path(self, wps, v_press=0.005):
+        """Replay taught waypoints (peg_hole_waypoint_gui.py) at the LIVE hole: each is the commanded peg
+        tool pose relative to the hole tool frame (full pose: a tilted peg replays tilted). "move"
+        waypoints at --move-speed, "press" ones -- and any segment that starts or ends below the block
+        top + 3 mm -- at v_press. Getting to the first waypoint: 10 mm above it along the hole axis
+        first, then down slowly; leaving the hole for a waypoint above the top: straight up the axis
+        (same pose) first. A scripted reset move: no policy limits; the gear guard and the hole watch
+        stay on. Ends 5 mm up the axis."""
+        t = self.t
+        H = self.io.ee("left") @ pht.HOLE_TOOL
+        h0, ax = self.hole_now()
+        Hi = np.linalg.inv(H)
+
+        def low(T):                                               # peg tool near / under the block top
+            return (Hi @ T @ pht.PEG_TOOL)[0, 3] < pht.TOP + 0.003
+
+        def up_axis(T, d):
+            U = T.copy()
+            U[:3, 3] += d * H[:3, 0]
+            return U
+
+        prev = None
+        for w in wps:
+            T = H @ np.array(w["rel_cmd"]) @ np.linalg.inv(pht.PEG_TOOL)       # TF EE goal
+            slow = w["kind"] == "press" or low(T) or (prev is not None and low(prev))
+            if prev is None:
+                self.quick_move(up_axis(T, 0.010), t.a.move_speed, "hover")      # 10 mm above the first, same pose
+                self.wait_hole_still()
+            elif low(prev) and not low(T):                                  # leaving the hole: straight up first
+                rise = pht.TOP + 0.005 - (Hi @ prev @ pht.PEG_TOOL)[0, 3]
+                self.quick_move(up_axis(prev, rise), v_press, "retract")
+                slow = False
+            self.quick_move(T, v_press if slow else t.a.move_speed, "push" if slow else "hover")
+            prev = T
+        dh = self.hole_now()[0] - h0
+        side = dh - (dh @ ax) * ax
+        self.quick_move(up_axis(self.io.ee("right"), 0.005), t.a.move_speed, "retract")
+        lat = side @ H[:3, :3]                                   # hole frame components of the sideways move
+        print(f"  path: {len(wps)} waypoints ({sum(w['kind'] == 'press' for w in wps)} press); block moved "
+              f"{np.linalg.norm(side) * 1000:.2f} mm sideways (base x {side[0] * 1000:+.2f}, y {side[1] * 1000:+.2f} mm; "
+              f"hole frame y {lat[1] * 1000:+.2f}, z {lat[2] * 1000:+.2f})")
+        t.phase("idle")
+
     def peg_lateral(self):
         """Measured peg tool point across the hole axis, hole tool frame (y, z) [m]."""
         P = np.linalg.inv(self.io.ee("left") @ pht.HOLE_TOOL) @ self.io.ee("right") @ pht.PEG_TOOL
