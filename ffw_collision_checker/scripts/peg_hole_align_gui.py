@@ -219,10 +219,12 @@ def main():
     ap.add_argument("--grid-n", type=int, default=5)
     ap.add_argument("--extent", type=float, default=0.04, help="m, grid spans +- this across the axis")
     ap.add_argument("--height", type=float, nargs=2, default=[-0.02, 0.0], help="m, random hole height along the axis")
+    ap.add_argument("--hover", type=float, default=HOVER, help="m above ON_TOP where each pose starts (default 1.5 mm)")
     ap.add_argument("--tilt-range", dest="tilt_hole", type=float, default=3.0,
                     help="deg, random hole tilt about each cross axis")
     a = ap.parse_args()
     pht.apply_setup(a)
+    globals()["HOVER"] = a.hover
     if not a.allow_motion:
         ap.error("pass --allow-motion")
     rclpy.init(signal_handler_options=rclpy.signals.SignalHandlerOptions.NO)
