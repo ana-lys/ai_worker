@@ -31,8 +31,10 @@ paired with the wrong tick.
 
 Conventions: base_link; poses (x, y, z, roll, pitch, yaw) with R = Rx·Ry·Rz (the Obs /
 `ControlCmdDelta` convention); m, rad, s, N, A unless stated. Joints in
-`wire.JOINT_STATE_NAMES` order. **NaN** = not available in this frame state (episode values
-outside an episode). Velocities are finite differences between consecutive frames, angular
+`wire.JOINT_STATE_NAMES` order. **No NaN anywhere**: a field that does not apply reads 0 (episode
+values outside an episode); `*_valid` / `image_ok` flags mark where 0 would be ambiguous, ages are
+capped at {wire.NO_NAN_CAP:g} s (= none). Type-12 frames (the 2026-10-04 demos, NaN for "n/a") still
+decode: `decode_frame` upgrades them to this layout. Velocities are finite differences between consecutive frames, angular
 velocity as a vector (not rpy rates). Limit margins: the IK EE pose in the arm's
 `peg_hole_frame_<l|r>` (static TF from `peg_hole_safe_setup.py`) against the
 `peg_hole_safe_real_<l|r>` box in `ffw_collision_checker/config/limit_profiles.txt`;
@@ -43,7 +45,7 @@ Tag `frame_state`: {", ".join(f"{i} {n}" for i, n in enumerate(wire.FS_NAMES))}.
 INTERVENTION frames, TERMINATED ends the episode, skip RESET / IDLE / FAULT. `reason` (on
 TERMINATED): {", ".join(f"{i} {n}" for i, n in enumerate(wire.TR_NAMES) if i)}. `action` = the
 right-arm delta actually applied this tick (the policy's after clipping, or the machine's on
-INTERVENTION frames); `priv.policy_delta` is what the policy sent.
+INTERVENTION frames); `priv.policy_delta` is what the policy sent (`policy_delta_valid`).
 
 """
 

@@ -78,8 +78,8 @@ def test_obs_layout():
     act = (0.001, -0.002, 0.003, 0.01, -0.02, 0.03)
     f = wire.encode_frame(obs, priv, 12, 34, wire.FS_INTERVENTION, wire.TR_NONE, -0.125, act, ts=7.25)
     fo, fp, tag, ts = wire.decode_frame(f)
-    check(f"Frame is {wire.FRAME_BYTES} bytes, type 12, timestamp kept",
-          len(f) == wire.FRAME_BYTES and wire.msg_type(f) == wire.MSG_FRAME == 12 and ts == 7.25)
+    check(f"Frame is {wire.FRAME_BYTES} bytes, type 13, timestamp kept",
+          len(f) == wire.FRAME_BYTES and wire.msg_type(f) == wire.MSG_FRAME == 13 and ts == 7.25)
     check("Frame obs / priv vectors round-trip", np.array_equal(fo["vector"], obs) and np.array_equal(fp["vector"], priv))
     check("obs names tile the vector in order",
           np.array_equal(np.concatenate([np.atleast_1d(fo[k]) for k, _, _ in wire.OBS_FIELDS]), obs))
@@ -109,6 +109,24 @@ def test_obs_layout():
     check("multipart [Frame, right, left]: frame + images round-trip, empty part = None",
           np.array_equal(po["vector"], obs) and np.array_equal(pim["right"], imgs["right"]) and pim["left"] is None)
     check("decode_frame_parts takes a bare Frame too", wire.decode_frame_parts(f)[4] == {"right": None, "left": None})
+    # type 12 (NaN for n/a; the recorded demos) decodes, upgraded to the type-13 layout without NaN
+    import struct as _st
+    p12 = rng.normal(size=sum(n for _, n, _ in wire.PRIV_FIELDS_V12))
+    sl = wire.PRIV_SLICES_V12
+    p12[slice(*sl["policy_delta"])] = np.nan
+    p12[slice(*sl["delta_age"])] = np.nan
+    p12[slice(*sl["force_ref"])] = np.nan
+    p12[sl["image_t"][0]] = 100.0
+    p12[sl["image_t"][0] + 1] = np.nan
+    f12 = (wire._HEADER.pack(12, 100.25) + _st.pack("<%dd" % wire.OBS_N, *obs) + _st.pack("<%dd" % len(p12), *p12)
+           + wire._TAG.pack(3, 4, wire.FS_POLICY, 0, 0.5, *act))
+    o12, q, t12, ts12 = wire.decode_frame(f12)
+    check("type-12 frame decodes, upgraded: no NaN, flags and ages derived",
+          len(f12) == wire.FRAME_BYTES_V12 and np.isfinite(q["vector"]).all() and q["vector"].size == wire.PRIV_N
+          and q["policy_delta_valid"] == 0.0 and q["force_ref_valid"] == 0.0 and q["delta_age"] == wire.NO_NAN_CAP
+          and list(q["image_ok"]) == [1.0, 0.0] and np.isclose(q["image_age"][0], 0.25)
+          and q["image_age"][1] == wire.NO_NAN_CAP and np.array_equal(o12["vector"], obs) and t12["step"] == 4
+          and q["gateway_obs"][0] == p12[sl["gateway_obs"][0]] and q["depth"] == p12[sl["depth"][0]])
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
     import write_frame_md
     md = Path(__file__).resolve().parents[1] / "FRAME.md"

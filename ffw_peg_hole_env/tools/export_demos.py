@@ -7,7 +7,7 @@ one transition per frame step:
 
   observations / next_observations  dict:
       "state"        (123,) float32  Frame obs (FRAME.md): what a deployed actor measures
-      "priv"         (191,) float32  Frame priv: everything the server derives (critic only)
+      "priv"         (195,) float32  Frame priv: everything the server derives (critic only; no NaN)
       "image_right"  (128, 128, 3) uint8 RGB  right wrist D405 ROI (peg)
       "image_left"   (128, 128, 3) uint8 RGB  left wrist D405 ROI (hole)
   actions   (6,) float32 in [-1, 1]: the right-arm delta applied in that step (dx, dy, dz,

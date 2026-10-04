@@ -1,7 +1,7 @@
 # Peg-in-hole HIL-SERL interface (real robot)
 
 The contract between the robot-side server (`peg_hole_serl_server.py`, ROS workstation) and a
-HIL-SERL client. Version: **Frame type 12**, obs 123 + priv 191 float64, 2590 bytes
+HIL-SERL client. Version: **Frame type 13**, obs 123 + priv 195 float64, 2622 bytes
 (`wire.MSG_FRAME`, `wire.OBS_N`, `wire.PRIV_N`, `wire.FRAME_BYTES`). 2026-10-04.
 
 `wire.py` is the reference implementation and the only file a client needs (struct + numpy +
@@ -19,10 +19,10 @@ ZMQ, both sockets bound by the server; ports = base + offset (server `--port-bas
 Every message starts with a 12-byte little-endian header: `int32 type, float64 timestamp`
 (sender's `time.time()`). Wrong size or type → ignored (counted as bad).
 
-## Server → client: Frame (type 12)
+## Server → client: Frame (type 13)
 
 ```
-header (12) | obs: 123 float64 | priv: 191 float64 | tag: uint32 episode_id, uint32 step,
+header (12) | obs: 123 float64 | priv: 195 float64 | tag: uint32 episode_id, uint32 step,
             |                  |                   |      uint8 frame_state, uint8 reason,
             |                  |                   |      float64 reward, 6 float64 action
 ```
@@ -34,8 +34,10 @@ header (12) | obs: 123 float64 | priv: 191 float64 | tag: uint32 episode_id, uin
 - **priv** — everything the server derives (critic inputs / logging): reward + terms + episode
   return, the push-back force estimate (N), depth / lateral / tilt of the peg against the
   calibrated hole axis, hole pose, commanded EE pose, the policy's raw delta, env flags
-  (mode, interventions, can_touch, success, …), image receive times, the gateway's full Obs.
-  NaN = not available in this frame state.
+  (mode, interventions, can_touch, success, …), image ages, the gateway's full Obs.
+  **No NaN anywhere** (a learner that drops NaN transitions is safe): a field that does not
+  apply reads 0, with `force_ref_valid`, `policy_delta_valid`, `image_ok` flags where 0 would be
+  ambiguous; `delta_age` / `image_age` are capped at 10 s (= none).
 - **tag** — the label of this frame; it travels inside the same message as obs/priv, so a
   frame can never be paired with the wrong label.
 
@@ -123,7 +125,7 @@ peak force median 1.1 N. One npz per episode (`pose_KKK.npz`):
 
 | key | shape | content |
 |---|---|---|
-| `frames` | (N, 2590) uint8 | raw Frames, step 0 … TERMINATED — `wire.decode_frame(row.tobytes())` |
+| `frames` | (N, 2590) uint8 | raw type-12 Frames, step 0 … TERMINATED — `wire.decode_frame(row.tobytes())` reads them and returns the type-13 layout (NaN replaced, flags derived) |
 | `img_right`, `img_left` | (N, 128, 128, 3) uint8 | the wrist images of each frame (RGB) |
 | `img_ok` | (N, 2) bool | image present (right, left) |
 | `meta` | JSON string | reason, interventions, offset, start pose, … |
@@ -134,7 +136,8 @@ actions normalized to [-1, 1] as above).
 
 ## Versioning
 
-Any layout change bumps `MSG_FRAME` and changes `FRAME_BYTES`; a client built against another
+Any layout change bumps `MSG_FRAME` and changes `FRAME_BYTES`; 13 = 12 without NaN (+4 flag / age
+fields; `decode_frame` still reads 12, upgraded); a client built against another
 layout gets a size / type error from `decode_frame`, never silently shifted fields. Types 9
 (EnvStatus) and 10 (Images) in `wire.py` belong to the MuJoCo sim server only; type 11 (the
 first Frame) is retired.

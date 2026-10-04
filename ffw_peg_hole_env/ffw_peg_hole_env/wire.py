@@ -56,7 +56,10 @@ New messages:
                        the server derives (critic / logging). Field tables:
                        OBS_FIELDS, PRIV_FIELDS below (name, size, meaning);
                        decode_frame() returns them as named arrays, FRAME.md
-                       documents them. NaN = not available in this state.
+                       documents them. No NaN anywhere: a field that does not apply
+                       reads 0 (episode values outside an episode), with *_valid /
+                       image_ok flags where 0 is ambiguous. Type-12 frames (NaN for
+                       n/a, the recorded demos) decode too, upgraded to this layout.
                        frame_state: FS_IDLE, FS_POLICY, FS_INTERVENTION,
                        FS_TERMINATED, FS_RESET, FS_FAULT. reason (on TERMINATED):
                        TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT,
@@ -92,7 +95,7 @@ MSG_CONTROL_DELTA = 6
 MSG_ENV_CMD = 8
 MSG_ENV_STATUS = 9
 MSG_IMAGES = 10
-MSG_FRAME = 12                                    # 11 = the retired Obs + tag Frame
+MSG_FRAME = 13                                    # 12 = the same with NaN for "n/a" (decoded + upgraded below); 11 retired
 
 # EnvCmd.cmd
 RESET, PAUSE, RESUME, ABORT, PING = 1, 2, 3, 4, 5
@@ -156,7 +159,8 @@ PRIV_FIELDS = (
     ("push_back", 1, "F_pb: push-back on the peg along its axis, N (> 0 = pushed back) = ref - axial"),
     ("push_back_peak", 1, "highest F_pb since the peg could first touch the hole, N"),
     ("force_axial", 1, "raw axial force estimate before the reference, N"),
-    ("force_ref", 1, "free-motion reference (median while the peg cannot touch), N"),
+    ("force_ref", 1, "free-motion reference (median while the peg cannot touch), N; 0 until known"),
+    ("force_ref_valid", 1, "1 = force_ref (and so push_back) is established"),
     # task geometry (calibrated hole axis = modelled axis + the eye-calibrated peg offset)
     ("depth", 1, "peg tip below the rim, m (< 0 = above), measured"),
     ("depth_cmd", 1, "the same for the commanded pose, m"),
@@ -168,8 +172,9 @@ PRIV_FIELDS = (
     ("ee_right_cmd", 6, "right commanded IK EE pose after the server's clamps, base_link"),
     ("hole_offset", 2, "calibrated peg-tool (y, z) offset in use, m"),
     # control
-    ("policy_delta", 6, "the policy's raw delta received for this tick (NaN = none / stale)"),
-    ("delta_age", 1, "s since the newest policy delta arrived (NaN = none yet)"),
+    ("policy_delta", 6, "the policy's raw delta used for this tick; 0 when none / stale (policy_delta_valid)"),
+    ("policy_delta_valid", 1, "1 = a fresh policy delta drove this tick"),
+    ("delta_age", 1, "s since the newest policy delta arrived, capped at 10 (10 = none yet)"),
     ("clamped", 1, "1 = the server's box / above-rim clamp changed the command this tick"),
     # env flags / episode state
     ("mode", 1, "machine mode driving the NEXT tick: 0 idle, 1 policy, 2 pull_out, 3 trace_back, "
@@ -186,7 +191,8 @@ PRIV_FIELDS = (
     ("hole_shift", 1, "hole moved sideways since the peg was last clear, m"),
     ("j7_left_change", 1, "|left j7 current change| since the peg was last clear, mA (gear guard input)"),
     ("limit_frame_ok", 2, "1 = peg_hole_frame_r / _l found on TF (obs limit_* valid)"),
-    ("image_t", 2, "receive time (time.time) of the right / left wrist image paired with this tick; NaN = none"),
+    ("image_age", 2, "s between receiving the right / left wrist image and this frame, capped at 10 (10 = none)"),
+    ("image_ok", 2, "1 = a right / left wrist image is paired with this tick"),
     # everything else: the robot gateway's full Obs, as it would publish it
     ("gateway_obs", OBS_N_DOUBLES, "the gateway's 131-double Obs (decode_gateway_obs() names it): "
                                    "joint blocks, ee + grippers, marker block"),
@@ -208,6 +214,32 @@ def _offsets(fields):
 
 
 OBS_SLICES, PRIV_SLICES = _offsets(OBS_FIELDS), _offsets(PRIV_FIELDS)
+NO_NAN_CAP = 10.0                                 # delta_age / image_age when there is none
+
+# Frame type 12 (2026-10-04 demos): the same obs; priv without the *_valid / image_ok flags, image_t
+# (receive time) instead of image_age, and NaN for "not available". decode_frame() reads it and
+# returns the type-13 layout, so recorded demos stay usable.
+_V12_ADDED = ("force_ref_valid", "policy_delta_valid", "image_age", "image_ok")
+_v12 = [f for f in PRIV_FIELDS if f[0] not in _V12_ADDED]
+_g = [f[0] for f in _v12].index("gateway_obs")
+PRIV_FIELDS_V12 = tuple(_v12[:_g] + [("image_t", 2, "")] + _v12[_g:])
+PRIV_SLICES_V12 = _offsets(PRIV_FIELDS_V12)
+_PRIV_V12 = struct.Struct("<%dd" % sum(n for _, n, _ in PRIV_FIELDS_V12))
+FRAME_BYTES_V12 = _HEADER.size + _OBS_V.size + _PRIV_V12.size + _TAG.size
+
+
+def _upgrade_v12(p12, ts):
+    """Type-12 priv vector -> type-13 priv vector (flags derived from where 12 had NaN)."""
+    import numpy as np
+    old = {k: p12[a:b] for k, (a, b) in PRIV_SLICES_V12.items()}
+    new = {name: np.nan_to_num(old[name], nan=0.0) for name, _, _ in PRIV_FIELDS if name in old}
+    new["force_ref_valid"] = np.array([float(not np.isnan(old["force_ref"][0]))])
+    new["policy_delta_valid"] = np.array([float(not np.isnan(old["policy_delta"][0]))])
+    new["delta_age"] = np.nan_to_num(np.minimum(old["delta_age"], NO_NAN_CAP), nan=NO_NAN_CAP)
+    ok = ~np.isnan(old["image_t"])
+    new["image_ok"] = ok.astype(float)
+    new["image_age"] = np.where(ok, np.minimum(ts - np.nan_to_num(old["image_t"]), NO_NAN_CAP), NO_NAN_CAP)
+    return np.concatenate([np.atleast_1d(new[name]).astype(float) for name, _, _ in PRIV_FIELDS])
 
 if gw is not None:                                # the copy above must match the gateway exactly
     assert gw._HEADER.format == _HEADER.format
@@ -317,14 +349,19 @@ def decode_frame(data):
     PRIV_FIELDS; size-1 fields as floats) plus "vector" = the whole flat block; obs also has
     joint_pos / joint_vel / joint_effort (25 each) split out of "joints"."""
     import numpy as np
-    if len(data) != FRAME_BYTES:
-        raise ValueError(f"type {MSG_FRAME}: expected {FRAME_BYTES} bytes, got {len(data)}")
-    t, ts = _HEADER.unpack_from(data, 0)
-    if t != MSG_FRAME:
-        raise ValueError(f"type {t}, expected {MSG_FRAME}")
-    o = np.array(_OBS_V.unpack_from(data, _HEADER.size))
-    p = np.array(_PRIV_V.unpack_from(data, _HEADER.size + _OBS_V.size))
-    v = _TAG.unpack_from(data, _HEADER.size + _OBS_V.size + _PRIV_V.size)
+    t, ts = _HEADER.unpack_from(data, 0) if len(data) >= _HEADER.size else (None, None)
+    if t == 12 and len(data) == FRAME_BYTES_V12:      # recorded 2026-10-04 demos: upgrade
+        o = np.array(_OBS_V.unpack_from(data, _HEADER.size))
+        p = _upgrade_v12(np.array(_PRIV_V12.unpack_from(data, _HEADER.size + _OBS_V.size)), ts)
+        v = _TAG.unpack_from(data, _HEADER.size + _OBS_V.size + _PRIV_V12.size)
+    else:
+        if len(data) != FRAME_BYTES:
+            raise ValueError(f"type {MSG_FRAME}: expected {FRAME_BYTES} bytes, got {len(data)}")
+        if t != MSG_FRAME:
+            raise ValueError(f"type {t}, expected {MSG_FRAME}")
+        o = np.array(_OBS_V.unpack_from(data, _HEADER.size))
+        p = np.array(_PRIV_V.unpack_from(data, _HEADER.size + _OBS_V.size))
+        v = _TAG.unpack_from(data, _HEADER.size + _OBS_V.size + _PRIV_V.size)
 
     def named(vec, slices):
         d = {k: (float(vec[a]) if b - a == 1 else vec[a:b]) for k, (a, b) in slices.items()}
@@ -344,7 +381,7 @@ _IMG_BYTES = IMG * IMG * 3
 
 def frame_parts(frame, images):
     """The PUB message with images: [Frame, right RGB, left RGB] (128x128x3 uint8 raw each; an empty
-    part = no image from that camera this tick, priv image_t is NaN then)."""
+    part = no image from that camera this tick, priv image_ok is 0 then)."""
     parts = [frame]
     for cam in ("right", "left"):
         im = None if images is None else images.get(cam)

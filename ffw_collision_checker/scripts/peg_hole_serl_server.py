@@ -235,7 +235,8 @@ class SerlServer:
                          else np.full(12, wire.NO_LIMIT_DIFF))
         obs = observation.build_obs(o.joint_pos, o.joint_vel, o.joint_effort,
                                     {a: observation.pose6(sites[a]) for a in sites}, vel, limits)
-        p = {name: np.full(n, np.nan) for name, n, _ in wire.PRIV_FIELDS}
+        p = {name: np.zeros(n) for name, n, _ in wire.PRIV_FIELDS}     # no NaN: n/a = 0 (+ flags)
+        p["delta_age"], p["image_age"] = np.array([wire.NO_NAN_CAP]), np.full(2, wire.NO_NAN_CAP)
         p["gateway_obs"] = np.array(wire._OBS.unpack_from(gw.encode_obs(o), wire._HEADER.size))
         H = T_l @ pht.HOLE_TOOL
         P = np.linalg.inv(H) @ T_r @ pht.PEG_TOOL
@@ -246,13 +247,26 @@ class SerlServer:
                  hole_offset=self.offset_mm / 1000.0,
                  j7_left_change=abs(float(self.io.effort[6]) - self.j7_ref),
                  limit_frame_ok=np.array([frame_ok["right"], frame_ok["left"]], float),
-                 mode={wire.FS_IDLE: 0, wire.FS_RESET: 4, wire.FS_FAULT: 5}.get(self.state, np.nan))
+                 mode={wire.FS_IDLE: 0, wire.FS_RESET: 4, wire.FS_FAULT: 5}.get(self.state, 0))
         if self.cams is not None:
             self.last_images, img_t = self.cams.grab()
-            p["image_t"] = np.array([img_t["right"], img_t["left"]])
+            t_now = time.time()
+            ok = np.array([self.last_images[c] is not None for c in ("right", "left")], float)
+            age = np.array([t_now - img_t[c] if self.last_images[c] is not None else wire.NO_NAN_CAP
+                            for c in ("right", "left")])
+            p["image_ok"], p["image_age"] = ok, np.clip(age, 0.0, wire.NO_NAN_CAP)
         if self.state in (wire.FS_POLICY, wire.FS_INTERVENTION, wire.FS_TERMINATED):
             p.update(self.info)
         priv = np.concatenate([np.atleast_1d(np.asarray(p[name], float)) for name, _, _ in wire.PRIV_FIELDS])
+        for name, vec, fields in (("obs", obs, wire.OBS_FIELDS), ("priv", priv, wire.PRIV_FIELDS)):
+            bad = ~np.isfinite(vec)
+            if bad.any():                                 # never send NaN / inf (the learner drops them)
+                where = sorted({f for f, n, _ in fields for i in range(*(wire.OBS_SLICES if name == "obs"
+                                else wire.PRIV_SLICES)[f]) if bad[i]})
+                if where != getattr(self, "_nan_warned", {}).get(name):
+                    print(f"  WARNING: non-finite {name} fields {where} sent as 0")
+                    self.__dict__.setdefault("_nan_warned", {})[name] = where
+                vec[bad] = 0.0
         return obs, priv
 
     def episode_info(self, ins, s_cmd, r=None, blocked=False, safety=False, hole_shift=0.0, dj7=0.0):
@@ -267,12 +281,13 @@ class SerlServer:
         return {
             "reward": reward, "return": self.ep_return,
             "r_success": terms["success"], "r_shape": terms["shape"], "r_force": terms["force"], "r_fail": terms["fail"],
-            "push_back": rw.push_back, "push_back_peak": rw.f_peak, "force_axial": rw.f_axial,
-            "force_ref": np.nan if rw.ref is None else rw.ref,
+            "push_back": rw.push_back, "push_back_peak": rw.f_peak,
+            "force_axial": 0.0 if not np.isfinite(rw.f_axial) else rw.f_axial,
+            "force_ref": 0.0 if rw.ref is None else rw.ref, "force_ref_valid": float(rw.ref is not None),
             "depth_cmd": pht.TOP - s_cmd,
             "ee_right_cmd": observation.pose6(self.T_cmd),
-            "policy_delta": self.raw_delta if fresh else np.full(6, np.nan),
-            "delta_age": time.monotonic() - self.delta_t if self.delta_t else np.nan,
+            "policy_delta": self.raw_delta if fresh else np.zeros(6), "policy_delta_valid": float(fresh),
+            "delta_age": min(time.monotonic() - self.delta_t, wire.NO_NAN_CAP) if self.delta_t else wire.NO_NAN_CAP,
             "clamped": float(self.clamped),
             "mode": wire.MODE_CODES[self.em.mode],
             "interventions": self.em.interventions, "t_episode": self.em.t,
