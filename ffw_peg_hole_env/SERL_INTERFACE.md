@@ -148,8 +148,9 @@ with the success reward.
 
 `--failure-mode intervene` (server) is a **SERL intervention** instead: on a trigger the policy's
 last frame gets the fail penalty (the bad state), then the machine takes over for the rest of the
-episode — pulls the peg straight out (`priv.mode` 2), then the scripted expert (the one that
-recorded the 100 demos) aligns over the axis and inserts (`priv.mode` 6) — INTERVENTION frames
+episode — pulls the peg straight out (`priv.mode` 2), re-seats the hole with the reset's edge press
+(`priv.mode` 7: the bind may have shifted it in its play), then the scripted expert (the one that
+recorded the demos) aligns over the axis and inserts (`priv.mode` 6) — INTERVENTION frames
 whose `tag.action` is the expert's applied delta; the episode ends SUCCESS (or the expert's own
 failure reason) and gets 10 s extra before TIMEOUT. Store INTERVENTION transitions with
 `is_intervention=True`, exactly like a human (SpaceMouse) intervention on the client side.

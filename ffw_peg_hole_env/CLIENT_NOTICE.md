@@ -45,10 +45,11 @@ with the negative fail reward**, and the retry is a **new** episode that can end
 
 INTERVENTION frames (2) only appear if the server runs `--failure-mode intervene`, which is a
 **SERL intervention**: the policy's last frame (the bad state) gets the fail penalty, then the
-machine pulls out and the scripted expert drives to the goal in the same episode (the policy
-does not get control back), ending SUCCESS. Store INTERVENTION transitions with
+machine pulls out, re-seats the hole with an 8 N edge press, and the scripted expert drives to
+the goal in the same episode (the policy does not get control back), ending SUCCESS. Store INTERVENTION transitions with
 **`is_intervention=True`** (expert data — also into the offline buffer), like a human
-intervention. `priv.mode`: 2 = the machine pulling out, 6 = the expert.
+intervention. `priv.mode`: 2 = the machine pulling out, 7 = re-seating, 6 = the expert.
+Live 2026-10-05: bind 9 N -> pull out -> seat 8.8 N -> expert -> SUCCESS, 131 INTERVENTION frames.
 
 ## 4. Reply to every POLICY frame immediately — lockstep
 
