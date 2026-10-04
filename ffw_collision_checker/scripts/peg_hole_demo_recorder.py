@@ -314,12 +314,14 @@ class Recorder:
 
     @staticmethod
     def fails_since_calibration(rec):
-        """Failed expert tries of a pose since its last manual calibration (FAULTs don't count)."""
+        """Failed expert tries of a pose since its last manual calibration (FAULTs don't count; after a
+        calibration only the tries that used it)."""
+        calibrated = any("calibrated_mm" in e for e in rec["attempts"])
         n = 0
         for e in reversed(rec["attempts"]):
             if "calibrated_mm" in e:
                 break
-            n += e.get("reason") not in (None, "FAULT")
+            n += e.get("reason") not in (None, "FAULT") and (not calibrated or e.get("offset_kind") == "calibrated")
         return n
 
     def add_to_pool(self, k, pose, y, z):
