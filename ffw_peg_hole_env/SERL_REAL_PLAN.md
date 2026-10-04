@@ -74,5 +74,11 @@ Out of scope now: sim parity, human SpaceMouse intervention.
 
 ## Status
 
-- [x] 0 contract  - [ ] 1 logic  - [ ] 2 idle server  - [ ] 3 policy + reset
+- [x] 0 contract  - [x] 1 logic  - [ ] 2 idle server  - [ ] 3 policy + reset
 - [ ] 4 intervention  - [ ] 5 images
+
+Slice 1 notes: `episode.py` EpisodeMachine + `tests/test_episode.py`. Replayed on
+recordings: gentle manual pushes (`20261004_090934`) 4/4 SUCCESS, no intervention;
+the 35 mm jam session (`20261004_023307`) triggers on every push -- ~30 deep at
+22-24 mm (push-back rising through 6 N, as intended) and ~20 at the entry (3-6 mm,
+5-7 N normal entry bumps). `f_intervene` (6 N) is the knob for the first live run.
