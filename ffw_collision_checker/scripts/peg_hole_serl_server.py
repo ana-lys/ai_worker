@@ -67,7 +67,8 @@ BOX_ACROSS, BOX_UP, BOX_TILT = 0.06, 0.06, np.radians(10.0)
 # it the peg may touch the block top / chamfer / rim (the force rules and the gear guard limit
 # that). episode.EpisodeMachine halts + intervenes if it gets below the rim outside anyway.
 ZONE, FLOOR = 0.02, 0.005                              # FLOOR covers the arm's ~0.2 s lag (2.4 mm overshoot seen live)
-RETRACT_SPEED = 0.02                                    # m/s pulling the peg out of the bore (insertion: 0.01)
+RETRACT_SPEED = 0.03                                    # m/s pulling the peg out of the bore (insertion: 0.01)
+QUICK_SETTLE = 0.1                                      # s pause after an intermediate reset move (teach: 0.3)
 HOLE_SHIFT_MAX = 0.006                                  # m: hole pushed sideways -> stop (resets too)
 # Gear guard, every control tick in every phase (episode, intervention, retract, reset):
 # left j7 current change from its unloaded reference > J7_HARD at once, or > J7_SUSTAIN for
@@ -376,9 +377,17 @@ class SerlServer:
         try:
             self.retract()
             self.j7_ref, self.j7_since = float(self.io.effort[6]), None        # peg clear: unloaded reference
-            ok = self.t.hw_reset(self.start_pair())
-            if ok and self.seat is not None:
-                ok = self.seat_hole() and self.t.go_start()
+            if self.seat is None:
+                ok = self.t.hw_reset(self.start_pair())
+            else:
+                # the hole moves with the peg riding above it (no trip to the peg start and back): seat
+                # the hole, THEN go to the start once
+                go_start, self.t.go_start = self.t.go_start, lambda tries=10: True
+                try:
+                    ok = self.t.hw_reset(self.start_pair())
+                finally:
+                    self.t.go_start = go_start
+                ok = ok and self.seat_hole() and self.t.go_start()
         except (phr.LagTrip, HoleMoved, GuardTrip) as e:
             print(f"reset stopped: {e}")
             ok = False
@@ -417,8 +426,18 @@ class SerlServer:
         t, arm = self.t, self.t.st.arms["right"]
         OFF = phs.T_from([0.0, self.offset_mm[0] / 1000.0 + off_y, self.offset_mm[1] / 1000.0], np.eye(3))
         T, _ = t.peg_target(pht.TOP + 0.005, OFF)
-        t.move_right(T, t.a.move_speed, "hover")                 # straight to 5 mm above the block top (both ends
-        h0 = self.hole_now()                                     # of the move are above it, so the line is too)
+        self.quick_move(T, t.a.move_speed, "hover")              # straight to 5 mm above the block top (both ends
+                                                                 # of the move are above it, so the line is too)
+        # the hole must be still before the press: right after its reset move it is still settling, and
+        # a press on a moving hole shoves it 3 mm instead of seating it (live, 3/5 never built force)
+        hist, t_end = [], time.monotonic() + 2.0
+        while time.monotonic() < t_end:
+            t.st.tick(None)
+            hist = (hist + [(time.monotonic(), self.hole_now()[0])])[-30:]
+            if hist[-1][0] - hist[0][0] >= 0.25 and \
+                    np.linalg.norm(hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0]) < 0.0002:
+                break
+        h0 = self.hole_now()
         rw = self.em.reward
         rw.reset()
         s_cmd, f = pht.TOP + 0.005, 0.0
@@ -440,11 +459,18 @@ class SerlServer:
         t.held(0.15)
         moved = self.sideways(h0)
         T, _ = t.peg_target(max(s_cmd, pht.TOP) + 0.005, OFF)
-        t.move_right(T, t.a.move_speed, "retract")               # 5 mm straight up off the block; go_start() next
+        self.quick_move(T, t.a.move_speed, "retract")            # 5 mm straight up off the block; go_start() next
         print(f"  seat: pressed {f:.1f} N at {(pht.TOP - s_cmd) * 1000:+.1f} mm, {off_y * 1000:.0f} mm beside the "
               f"hole; hole moved {moved * 1000:.2f} mm")
         t.phase("idle")
         return True
+
+    def quick_move(self, T, speed, phase):
+        """teach.move_right with a QUICK_SETTLE pause (the lag check still runs)."""
+        t = self.t
+        t.phase(phase)
+        t.st.move("right", T, speed, None, anchor=self.io.ee("left"))
+        t.st.settle(QUICK_SETTLE, t.a.reach_lag, t.a.settle_timeout)
 
     def start_pair(self):
         """None = the teach tool's random reset (peg start +- --xy across, tilted). With
@@ -484,10 +510,11 @@ class SerlServer:
         self.watch = self.hole_now()
         self.retract_floor = abs(float(self.io.effort[6]) - self.j7_ref)
         try:
-            for up, speed in legs:
+            for k, (up, speed) in enumerate(legs):
                 T_up = T_peg.copy()
                 T_up[:3, 3] += up * H[:3, 0]
-                self.t.move_right(T_up @ np.linalg.inv(pht.PEG_TOOL), speed, "reset_out")
+                (self.quick_move if k < len(legs) - 1 else self.t.move_right)(
+                    T_up @ np.linalg.inv(pht.PEG_TOOL), speed, "reset_out")
         finally:
             self.watch, self.retract_floor = None, None
 

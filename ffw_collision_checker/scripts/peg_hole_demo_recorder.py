@@ -488,7 +488,7 @@ def main():
     ap.add_argument("--settle-ticks", type=int, default=5, help="ticks on the hover pose before inserting")
     ap.add_argument("--align-tol", type=float, default=0.0004, help="m: measured peg off the axis to start inserting")
     ap.add_argument("--hole-still", type=float, default=0.0002, help="m/s: hole speed to start inserting")
-    ap.add_argument("--align-gain", type=float, default=0.15, help="per tick, integral on the measured error (the arm lags ~3 ticks)")
+    ap.add_argument("--align-gain", type=float, default=0.15, help="per tick, integral on the measured error (0.25 oscillated live)")
     ap.add_argument("--align-timeout", type=float, default=3.0, help="s at hover before inserting anyway")
     ap.add_argument("--offset", choices=("model", "const"), default="model")
     ap.add_argument("--allow-interventions", action="store_true", help="count SUCCESS demos with interventions")
