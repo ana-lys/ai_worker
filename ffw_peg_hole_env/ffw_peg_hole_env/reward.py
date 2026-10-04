@@ -98,7 +98,7 @@ class PegHoleReward:
     def reset(self):
         self.ref_buf, self.ref, self.phi = [], None, None
         self.rim_ticks = 0
-        self.push_back, self.f_peak = 0.0, 0.0
+        self.push_back, self.f_peak, self.f_axial = 0.0, 0.0, float("nan")
 
     def potential(self, ins):
         c = self.cfg
@@ -121,7 +121,7 @@ class PegHoleReward:
     def push_back_force(self, ins, q, amps, lift):
         """F_pb [N] (> 0 = the peg is pushed back up its axis); updates the reference."""
         c = self.cfg
-        f = self.force.axial(q, lift, effort.torque_from_amps("right", amps))
+        f = self.f_axial = self.force.axial(q, lift, effort.torque_from_amps("right", amps))
         if self.clear_of_hole(ins):
             self.ref_buf = (self.ref_buf + [f])[-c.ref_window:]
             self.ref = float(np.median(self.ref_buf))

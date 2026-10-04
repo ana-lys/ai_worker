@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """HIL-SERL peg-in-hole server for the REAL robot (ffw_peg_hole_env/SERL_REAL_PLAN.md).
 
-Publishes one Frame per 15 Hz tick on base+0: the gateway's Obs (joint block in A,
-achieved IK EE poses, grippers; marker block at defaults) plus the tag
-(episode_id, step, frame_state, reason, reward, applied action), and listens on
-base+1 for ControlCmdDelta / EnvCmd (ffw_peg_hole_env/wire.py).
+Publishes one Frame per 15 Hz tick on base+0: obs (what a deployed actor measures: 25
+joints x [pos, vel, effort], both IK EE poses + velocities, both arms' margins to their
+peg_hole_safe_real limit box), priv (everything the server derives: reward terms and
+return, the push-back force estimate, task geometry, env flags, the gateway's full Obs)
+and the tag (episode_id, step, frame_state, reason, reward, applied action); listens on
+base+1 for ControlCmdDelta / EnvCmd. Layout: ffw_peg_hole_env/wire.py, FRAME.md.
 
 Without --allow-motion: IDLE frames only, subscribe-only (a wire check).
 With --allow-motion (slices 3-4): episodes, all automatic after the first EnvCmd RESET
@@ -44,7 +46,7 @@ import zmq
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "ffw_peg_hole_env"))
 sys.path.insert(0, str(HERE.parents[1] / "ffw_zmqinterface"))
-from ffw_peg_hole_env import effort, wire  # noqa: E402
+from ffw_peg_hole_env import effort, observation, wire  # noqa: E402
 from ffw_peg_hole_env.episode import EpisodeMachine  # noqa: E402
 from ffw_peg_hole_env.geometry import SafetyBox, apply_delta, clip_delta, pose_error  # noqa: E402
 from ffw_zmqinterface import gateway_node as gwn, protocol as gw  # noqa: E402
@@ -83,8 +85,8 @@ class GuardTrip(Exception):
     pass
 
 
-def obs_frame(io):
-    """Gateway-identical Obs frame from /joint_states + /ik_solver/achieved_ee_pose_{r,l},
+def gateway_obs(io):
+    """Gateway-identical gw.Obs from /joint_states + /ik_solver/achieved_ee_pose_{r,l},
     or None until both are in."""
     raw = io.raw_js
     sites = [io.latest_site("right"), io.latest_site("left")]          # Obs ee0 = right, ee1 = left
@@ -100,7 +102,18 @@ def obs_frame(io):
     o.ee = (tuple(float(v) for v in ee[0]), tuple(float(v) for v in ee[1]))
     pos = dict(zip(raw[1], raw[2]))
     o.gripper = tuple(gwn._normalize_grip(pos.get(gwn._GRIP_JOINT[i]), i) for i in (0, 1))
-    return gw.encode_obs(o)
+    return o
+
+
+
+def tf_matrix(io, frame):
+    """base_link -> frame from TF (4x4), or None."""
+    try:
+        t = io.tf_buffer.lookup_transform(phs.BASE_FRAME, frame, rclpy.time.Time())
+    except Exception:
+        return None
+    tr, q = t.transform.translation, t.transform.rotation
+    return phs.T_from([tr.x, tr.y, tr.z], Rot.from_quat([q.x, q.y, q.z, q.w]).as_matrix())
 
 
 class SerlServer:
@@ -120,12 +133,18 @@ class SerlServer:
         self.watch = None                                 # (hole pos, axis) the hole must not leave during a retract
         self.j7_ref = float(io.effort[6]) if io.effort is not None else 0.0   # unloaded left j7 [mA]
         self.j7_since, self.retract_floor = None, None
-        if teach is not None:
-            o = json.load(open(OFFSET_MODEL))["const"] if OFFSET_MODEL.exists() else [0.0, 0.0]
-            self.offset_mm = np.array(o, dtype=float)
-            # calibrated hole axis in the hole tool frame: the peg-tool y/z offset rotated by the roll
-            self.axis_c = (Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix() @ np.r_[0.0, o[0], o[1]] / 1000.0)[1:]
-            print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
+        o = json.load(open(OFFSET_MODEL))["const"] if OFFSET_MODEL.exists() else [0.0, 0.0]
+        self.offset_mm = np.array(o, dtype=float)
+        # calibrated hole axis in the hole tool frame: the peg-tool y/z offset rotated by the roll
+        self.axis_c = (Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix() @ np.r_[0.0, o[0], o[1]] / 1000.0)[1:]
+        print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
+        # Frame state: obs limit boxes, EE velocity memory, the episode's priv values
+        self.profiles = observation.load_profiles()
+        self.limit_T = {}                                 # arm -> its (static) profile frame, once on TF
+        self.prev_sites, self.prev_t = None, None
+        self.info, self.ep_return, self.T_cmd, self.clamped = {}, 0.0, None, False
+        self.raw_delta = None
+        print("limit profiles: " + ", ".join(f"{a}: {f}" for a, (f, _, _) in self.profiles.items()))
         if teach is not None:
             self.em = EpisodeMachine()
             inner = teach.st.on_tick
@@ -166,14 +185,87 @@ class SerlServer:
             self.abort = True
 
     def publish(self):
-        f = obs_frame(self.io)
-        if f is None:
+        vecs = self.frame_vectors()
+        if vecs is None:
             return False
-        self.pub.send(wire.encode_frame(f, self.episode_id, self.step, self.state, self.reason,
+        self.pub.send(wire.encode_frame(*vecs, self.episode_id, self.step, self.state, self.reason,
                                         self.reward, self.action))
         self.counts["frames"] += 1
         self.last_pub = time.monotonic()
         return True
+
+    def frame_vectors(self):
+        """(obs, priv) for this tick (wire.OBS_FIELDS / PRIV_FIELDS), or None until the robot
+        state is in. Geometry is measured live in every state; episode values come from
+        self.info (set by episode_tick / reset, NaN outside an episode)."""
+        o = gateway_obs(self.io)
+        T_l, T_r = self.io.ee("left"), self.io.ee("right")
+        if o is None or T_l is None or T_r is None:
+            return None
+        sites = {a: self.io.latest_site(a) for a in ("right", "left")}
+        now = time.monotonic()
+        dt = 0.0 if self.prev_t is None else now - self.prev_t
+        vel = {a: observation.velocity(None if self.prev_sites is None else self.prev_sites[a], sites[a], dt)
+               for a in sites}
+        self.prev_sites, self.prev_t = sites, now
+        limits, frame_ok = {}, {}
+        for a in ("right", "left"):
+            k = a[0]
+            if k in self.profiles and k not in self.limit_T:
+                T_f = tf_matrix(self.io, self.profiles[k][0])
+                if T_f is not None:
+                    self.limit_T[k] = T_f
+            T_f = self.limit_T.get(k)
+            frame_ok[a] = T_f is not None
+            limits[a] = (observation.limit_margins(sites[a], T_f, *self.profiles[k][1:]) if T_f is not None
+                         else np.full(12, wire.NO_LIMIT_DIFF))
+        obs = observation.build_obs(o.joint_pos, o.joint_vel, o.joint_effort,
+                                    {a: observation.pose6(sites[a]) for a in sites}, vel, limits)
+        p = {name: np.full(n, np.nan) for name, n, _ in wire.PRIV_FIELDS}
+        p["gateway_obs"] = np.array(wire._OBS.unpack_from(gw.encode_obs(o), wire._HEADER.size))
+        H = T_l @ pht.HOLE_TOOL
+        P = np.linalg.inv(H) @ T_r @ pht.PEG_TOOL
+        lat_yz = np.array([P[1, 3] - self.axis_c[0], P[2, 3] - self.axis_c[1]])
+        p.update(hole_pose=observation.pose6(H), peg_in_hole=observation.pose6(P), lateral_yz=lat_yz,
+                 lateral=np.linalg.norm(lat_yz), depth=pht.TOP - P[0, 3],
+                 tilt=np.degrees(np.arccos(np.clip(P[0, 0], -1.0, 1.0))),
+                 hole_offset=self.offset_mm / 1000.0,
+                 j7_left_change=abs(float(self.io.effort[6]) - self.j7_ref),
+                 limit_frame_ok=np.array([frame_ok["right"], frame_ok["left"]], float),
+                 mode={wire.FS_IDLE: 0, wire.FS_RESET: 4, wire.FS_FAULT: 5}.get(self.state, np.nan))
+        if self.state in (wire.FS_POLICY, wire.FS_INTERVENTION, wire.FS_TERMINATED):
+            p.update(self.info)
+        priv = np.concatenate([np.atleast_1d(np.asarray(p[name], float)) for name, _, _ in wire.PRIV_FIELDS])
+        return obs, priv
+
+    def episode_info(self, ins, s_cmd, r=None, blocked=False, safety=False, hole_shift=0.0, dj7=0.0):
+        """priv values of an episode tick (r = EpisodeMachine.tick's result; None = step 0)."""
+        rw = self.em.reward
+        terms = r["terms"] if r is not None else {"success": 0.0, "shape": 0.0, "force": 0.0, "fail": 0.0,
+                                                  "rim_strike": False}
+        reward = r["reward"] if r is not None else 0.0
+        self.ep_return = (self.ep_return if r is not None else 0.0) + reward
+        reason = r["reason"] if r is not None else wire.TR_NONE
+        fresh = self.raw_delta is not None
+        return {
+            "reward": reward, "return": self.ep_return,
+            "r_success": terms["success"], "r_shape": terms["shape"], "r_force": terms["force"], "r_fail": terms["fail"],
+            "push_back": rw.push_back, "push_back_peak": rw.f_peak, "force_axial": rw.f_axial,
+            "force_ref": np.nan if rw.ref is None else rw.ref,
+            "depth_cmd": pht.TOP - s_cmd,
+            "ee_right_cmd": observation.pose6(self.T_cmd),
+            "policy_delta": self.raw_delta if fresh else np.full(6, np.nan),
+            "delta_age": time.monotonic() - self.delta_t if self.delta_t else np.nan,
+            "clamped": float(self.clamped),
+            "mode": wire.MODE_CODES[self.em.mode],
+            "interventions": self.em.interventions, "t_episode": self.em.t,
+            "can_touch": float(self.em.can_touch(ins)), "in_zone": float(ins["lateral"] <= ZONE),
+            "success": float(reason == wire.TR_SUCCESS),
+            "failed": float(reason in (wire.TR_JAM, wire.TR_RIM)),
+            "rim_strike": float(bool(terms["rim_strike"])),
+            "blocked": float(blocked), "safety": float(safety),
+            "hole_shift": hole_shift, "j7_left_change": dj7,
+        }
 
     def background(self):
         """Every 100 Hz control tick: keep RESET / IDLE / FAULT frames flowing at 15 Hz while
@@ -251,10 +343,12 @@ class SerlServer:
         R_ref = (H @ phs.T_from([0, 0, 0], Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix()))[:3, :3]
         box = SafetyBox(H, [pht.TOP - self.t.a.push - 0.003, -BOX_ACROSS, -BOX_ACROSS],
                         [pht.TOP + BOX_UP, BOX_ACROSS, BOX_ACROSS], [BOX_TILT] * 3, R_ref)
-        T_peg, _ = box.clamp(T_peg)
+        T_peg, hit = box.clamp(T_peg)
+        self.clamped = bool(np.any(hit))
         p = np.linalg.inv(H) @ np.r_[T_peg[:3, 3], 1.0]                   # x = height on the axis
         if np.hypot(p[1] - self.axis_c[0], p[2] - self.axis_c[1]) > ZONE and p[0] < pht.TOP + FLOOR:
             # outside the interaction zone: stay above the rim
+            self.clamped = True
             p[0] = pht.TOP + FLOOR
             T_peg = T_peg.copy()
             T_peg[:3, 3] = (H @ p)[:3]
@@ -265,6 +359,7 @@ class SerlServer:
     def reset(self):
         """RESET frames while the teach tool resets; -> True when the next episode starts."""
         self.state, self.reason, self.reward, self.action = wire.FS_RESET, wire.TR_NONE, 0.0, np.zeros(6)
+        self.info, self.T_cmd = {}, None
         try:
             self.retract()
             self.j7_ref, self.j7_since = float(self.io.effort[6]), None        # peg clear: unloaded reference
@@ -291,6 +386,8 @@ class SerlServer:
         self.hole_ref, self.j7_ref = self.hole_now(), float(self.io.effort[6])
         self.t0 = time.monotonic()
         self.state, self.action = wire.FS_POLICY, np.zeros(6)
+        self.raw_delta = None
+        self.info = self.episode_info(ins, s_cmd)
         self.publish()                                        # step 0: the observation after the reset
         print(f"episode {self.episode_id}: start, peg depth {ins['depth'] * 1000:+.1f} mm")
         return True
@@ -348,12 +445,15 @@ class SerlServer:
         if mode == "policy":
             stale = self.delta is None or time.monotonic() - self.delta_t > WATCHDOG_S
             d = np.zeros(6) if stale else clip_delta(self.delta, MAX_TRANS, MAX_ROT)
+            self.raw_delta = None if stale else self.delta.copy()
             self.delta = None
         elif mode == "pull_out":
             d = self.em.pull_out_delta((self.io.ee("left") @ pht.HOLE_TOOL)[:3, 0])
+            self.raw_delta = None
         else:                                                 # trace_back
             target = self.trace_target()
             d = self.em.toward_delta(self.T_cmd, target)
+            self.raw_delta = None
         self.T_cmd = self.command_site(apply_delta(self.T_cmd, d))
         self.action = d
         tripped = None
@@ -370,12 +470,14 @@ class SerlServer:
             abs(self.io.effort[6] - self.e0[6]) > self.t.a.hard_j7 or self.abort
         arrived = mode == "trace_back" and \
             all(e < tol for e, tol in zip(pose_error(self.T_cmd, self.trace_target()), (0.001, np.radians(1.0))))
+        hole_shift, dj7 = self.sideways(self.hole_ref), abs(float(self.io.effort[6]) - self.j7_ref)
         r = self.em.tick(period, ins, q, amps, lift, self.T_cmd, blocked=blocked, safety=safety, arrived=arrived,
-                         hole_shift=self.sideways(self.hole_ref), dj7=abs(float(self.io.effort[6]) - self.j7_ref))
+                         hole_shift=hole_shift, dj7=dj7)
         if self.abort and r["frame_state"] == wire.FS_TERMINATED:
             r["reason"], self.abort, self.paused = wire.TR_ABORT, False, True
         self.step = r["step"]
         self.state, self.reason, self.reward = r["frame_state"], r["reason"], r["reward"]
+        self.info = self.episode_info(ins, s_cmd, r, blocked, safety, hole_shift, dj7)
         self.publish()
         if r["mode"] != mode and r["mode"] != "reset":
             print(f"  step {self.step}: {mode} -> {r['mode']} (push-back {r['terms']['push_back_N']:.1f} N, "
@@ -430,10 +532,10 @@ def main():
     t, lift_before = None, None
     try:
         t0 = time.monotonic()
-        while (obs_frame(io) is None or io.effort is None or io.ee("left") is None or io.ee("right") is None) \
+        while (gateway_obs(io) is None or io.effort is None or io.ee("left") is None or io.ee("right") is None) \
                 and time.monotonic() - t0 < 15.0:
             time.sleep(0.1)
-        if obs_frame(io) is None:
+        if gateway_obs(io) is None:
             print("no /joint_states or achieved EE poses in 15 s - is the teleop running?")
             return
         if a.allow_motion:

@@ -73,20 +73,75 @@ def test_obs_layout():
           and np.allclose(d["limit_diff_right"], o.limit_diff[0]) and np.allclose(d["limit_diff_left"], o.limit_diff[1]))
     check("standalone decode_obs == gateway encode_obs, all 131 fields", ok)
     check("Obs frame is 1060 bytes", len(gw.encode_obs(o)) == 1060)
-    obs_frame = gw.encode_obs(o, ts=7.25)
+    rng = np.random.default_rng(3)
+    obs, priv = rng.normal(size=wire.OBS_N), rng.normal(size=wire.PRIV_N)
     act = (0.001, -0.002, 0.003, 0.01, -0.02, 0.03)
-    f = wire.encode_frame(obs_frame, 12, 34, wire.FS_INTERVENTION, wire.TR_NONE, -0.125, act)
-    fo, tag, ts = wire.decode_frame(f)
-    check("Frame is 1126 bytes, type 11, Obs timestamp kept", len(f) == 1126 and wire.msg_type(f) == wire.MSG_FRAME and ts == 7.25)
-    check("Frame Obs part == decode_obs", all(np.allclose(fo[k], d[k]) for k in d))
+    f = wire.encode_frame(obs, priv, 12, 34, wire.FS_INTERVENTION, wire.TR_NONE, -0.125, act, ts=7.25)
+    fo, fp, tag, ts = wire.decode_frame(f)
+    check(f"Frame is {wire.FRAME_BYTES} bytes, type 12, timestamp kept",
+          len(f) == wire.FRAME_BYTES and wire.msg_type(f) == wire.MSG_FRAME == 12 and ts == 7.25)
+    check("Frame obs / priv vectors round-trip", np.array_equal(fo["vector"], obs) and np.array_equal(fp["vector"], priv))
+    check("obs names tile the vector in order",
+          np.array_equal(np.concatenate([np.atleast_1d(fo[k]) for k, _, _ in wire.OBS_FIELDS]), obs))
+    check("priv names tile the vector in order",
+          np.array_equal(np.concatenate([np.atleast_1d(fp[k]) for k, _, _ in wire.PRIV_FIELDS]), priv))
+    check("joints interleaved: joint j = obs[3j:3j+3]",
+          np.array_equal(fo["joint_pos"], obs[0:75:3]) and np.array_equal(fo["joint_effort"], obs[2:75:3]))
+    check("obs is 123 = 75 joints + 24 EE + 24 limit", wire.OBS_N == 123)
     check("Frame tag round-trip", tag["episode_id"] == 12 and tag["step"] == 34 and tag["frame_state"] == wire.FS_INTERVENTION
           and tag["reason"] == wire.TR_NONE and tag["reward"] == -0.125 and np.allclose(tag["action"], act))
+    g = wire.decode_gateway_obs(fp["gateway_obs"])
+    check("priv gateway_obs named like decode_obs", set(g) == set(d) and np.array_equal(g["ee_right"], fp["gateway_obs"][75:81]))
     bad = False
     try:
-        wire.encode_frame(f, 0, 0, wire.FS_IDLE)
+        wire.encode_frame(obs[:-1], priv, 0, 0, wire.FS_IDLE)
     except ValueError:
         bad = True
-    check("encode_frame rejects a non-Obs frame", bad)
+    check("encode_frame rejects a wrong-size obs", bad)
+    bad = False
+    try:
+        wire.decode_frame(f[:-8])
+    except ValueError:
+        bad = True
+    check("decode_frame rejects a short frame", bad)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import write_frame_md
+    md = Path(__file__).resolve().parents[1] / "FRAME.md"
+    check("FRAME.md matches wire.py (tools/write_frame_md.py regenerates it)", md.exists() and md.read_text() == write_frame_md.text())
+
+
+def test_observation():
+    from scipy.spatial.transform import Rotation as Rot
+    from ffw_peg_hole_env import observation as ob
+    from ffw_peg_hole_env.geometry import T_from
+    gw = wire.gw
+    rng = np.random.default_rng(5)
+    for _ in range(20):
+        R = Rot.random(random_state=rng)
+        w = R.as_quat()                                           # x y z w
+        ok = np.allclose(ob.rpy(R.as_matrix()), gw.quat_to_rpy(w[3], w[0], w[1], w[2]))
+        if not ok:
+            break
+    check("rpy() == the gateway's quat_to_rpy (Obs ee convention)", ok)
+    R = Rot.from_euler("XYZ", [0.1, -0.2, 0.3]).as_matrix()
+    check("rpy(): R = Rx Ry Rz", np.allclose(ob.rpy(R), [0.1, -0.2, 0.3]))
+    T0 = T_from([0.1, 0.2, 0.3], np.eye(3))
+    T1 = T_from([0.1, 0.2, 0.31], Rot.from_rotvec([0, 0, 0.02]).as_matrix())
+    check("velocity(): finite difference in base_link", np.allclose(ob.velocity(T0, T1, 0.1), [0, 0, 0.1, 0, 0, 0.2]))
+    check("velocity(): zeros without a previous pose", np.array_equal(ob.velocity(None, T1, 0.1), np.zeros(6)))
+    Tf = T_from([1.0, 0.0, 0.0], Rot.from_euler("z", 90, degrees=True).as_matrix())
+    Ts = Tf @ T_from([0.01, -0.02, 0.0], np.eye(3))
+    lo, hi = np.array([-0.05, -0.05, -0.05, -0.1, -0.1, -0.1]), np.array([0.05, 0.0, 0.05, 0.1, 0.1, 0.1])
+    m = ob.limit_margins(Ts, Tf, lo, hi)
+    check("limit_margins: pose in the box frame, (lo, hi) interleaved",
+          np.allclose(m[:6], [0.06, 0.04, 0.03, 0.02, 0.05, 0.05]) and np.allclose(m[6:], 0.1))
+    check("limit_margins: no frame -> NO_LIMIT_DIFF", np.all(ob.limit_margins(Ts, None, lo, hi) == wire.NO_LIMIT_DIFF))
+    prof = ob.load_profiles()
+    check("load_profiles: peg_hole_safe_real_l / _r with their frames",
+          prof.get("l", ("",))[0] == "peg_hole_frame_l" and prof.get("r", ("",))[0] == "peg_hole_frame_r"
+          and all(np.all(prof[a][1] < prof[a][2]) for a in prof))
+    j = ob.joints_interleaved(np.arange(25.0), 100 + np.arange(25.0), 200 + np.arange(25.0))
+    check("joints_interleaved", np.array_equal(j[:6], [0, 100, 200, 1, 101, 201]))
 
 
 def test_standalone_import():
@@ -158,6 +213,7 @@ def test_task():
 if __name__ == "__main__":
     test_wire()
     test_obs_layout()
+    test_observation()
     test_standalone_import()
     test_delta_math()
     test_safety_box()
