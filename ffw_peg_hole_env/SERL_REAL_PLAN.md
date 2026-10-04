@@ -74,11 +74,43 @@ Out of scope now: sim parity, human SpaceMouse intervention.
 
 ## Status
 
-- [x] 0 contract  - [x] 1 logic  - [x] 2 idle server  - [ ] 3 policy + reset
-- [ ] 4 intervention  - [ ] 5 images
+- [x] 0 contract  - [x] 1 logic  - [x] 2 idle server  - [x] 3 policy + reset (code)
+- [x] 4 intervention (code)  - [ ] 5 images
 
 Slice 1 notes: `episode.py` EpisodeMachine + `tests/test_episode.py`. Replayed on
 recordings: gentle manual pushes (`20261004_090934`) 4/4 SUCCESS, no intervention;
 the 35 mm jam session (`20261004_023307`) triggers on every push -- ~30 deep at
 22-24 mm (push-back rising through 6 N, as intended) and ~20 at the entry (3-6 mm,
 5-7 N normal entry bumps). `f_intervene` (6 N) is the knob for the first live run.
+
+## 2026-10-04 live incident and the rules it added
+
+First live run (`recordings/peg_hole_serl/20261004_142240`): the reset put the peg 65 mm
+off the axis, the test client pushed straight down, the peg went 39 mm below the rim
+BESIDE the block (scraping it, left j7 to 453 mA -> j7 stop), and the teach tool's reset
+("realign at the current height", which assumes a peg below the rim is IN the hole)
+then dragged it sideways into the block: the hole arm was pushed 88 mm, j7 pinned at
+1.5 A. No intervention fired: the sim's 41.5 mm block-footprint test called it "clear",
+and the axial push-back does not see side contact.
+
+Added (episode.py, peg_hole_serl_server.py), thresholds from the recordings (measured
+from the last tick the peg was clear; clean pushes: hole sideways p95 2.2 / max 4.2 mm,
+j7 p95 ~200 mA; stalls 300-460 mA):
+- real robot "can touch" = tip within 1 mm of the rim or lower, at any offset;
+- intervention also on: tip below the rim > 3 mm off axis; left j7 change > 300 mA;
+- SAFETY (any mode): hole pushed sideways > 6 mm; plus the live j7 450 mA / hard edge;
+- command clamp: farther than 3 mm off the axis the peg stays 2 mm above ON_TOP;
+- reset: peg straight up the axis to CLEAR first, hole watched (> 6 mm -> stop); any
+  lag trip or pushed hole -> FAULT at once, no retries.
+Replays: the incident would have been caught at 1.11 s (at the rim, 61 mm off axis,
+before any scraping) instead of the 3.08 s j7 stop; gentle pushes still 4/4 SUCCESS; no
+new triggers elsewhere.
+
+Safety setup (`ffw_collision_checker/scripts/peg_hole_safe_setup.py`): lift -0.30 +
+hard lock + per-arm global limit profile from the real geometry ([peg_hole_safe_real_l/r],
+frames peg_hole_frame_l/r). joy_hand clamps SpaceMouse goals only; scripted
+/quest/<arm>/ee_target_pose goals are NOT clamped by it.
+
+Plane scan result (`recordings/peg_hole_teach/20261004_134329/plane_scan.json`): 3/16
+poses under 10 N (all at 9.4-10 N), 170 pushes; the -y half sits at 9.5-11.8 N, the +y
+side at 16-25 N.
