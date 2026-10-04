@@ -6,7 +6,7 @@
 
 Keys (window "peg-hole demo"):
   space  play / pause            + / -   speed x2 / x0.5  (0.125 .. 16x; 1x = real time)
-  . / ,  next / previous frame   n / p   next / previous episode
+  . / ,  next / previous frame   n / p   next / previous episode, at the same time into it (closest frame)
   r      restart episode         q / Esc quit
 The slider scrubs the episode.
 """
@@ -102,13 +102,16 @@ def main():
     cv2.namedWindow(WIN)
     state = {"k": 0, "seek": None}
     cv2.createTrackbar("frame", WIN, 0, 1, lambda v: state.__setitem__("seek", v))
+    carry_t = 0.0                                         # time into the episode kept across n / p
     while True:
         ep = load(files[idx])
         n = len(ep["frames"])
-        state["k"], state["seek"] = 0, None
+        k0 = int(np.argmin(np.abs((ep["ts"] - ep["ts"][0]) - carry_t)))   # the closest frame to carry_t
+        state["k"], state["seek"] = k0, None
         cv2.setTrackbarMax("frame", WIN, n - 1)
-        cv2.setTrackbarPos("frame", WIN, 0)
-        t_play, k_play = time.monotonic(), 0
+        cv2.setTrackbarPos("frame", WIN, k0)
+        state["seek"] = None
+        t_play, k_play = time.monotonic(), state["k"]       # play on from the carried frame
         nxt = None
         while nxt is None:
             if state["seek"] is not None and state["seek"] != state["k"]:
@@ -145,14 +148,16 @@ def main():
                 state["k"], playing = 0, True
             elif key == ord("n") and idx + 1 < len(files):
                 nxt = idx + 1
+                carry_t = ep["ts"][state["k"]] - ep["ts"][0]
             elif key == ord("p") and idx > 0:
                 nxt = idx - 1
+                carry_t = ep["ts"][state["k"]] - ep["ts"][0]
             else:
                 continue
             if key in (ord("."), ord(","), ord("r")):
                 cv2.setTrackbarPos("frame", WIN, state["k"])
             t_play, k_play = time.monotonic(), state["k"]   # re-anchor timing on any change
-        idx, playing = nxt, True
+        idx = nxt                                         # play / pause stays as it was
 
 
 if __name__ == "__main__":
