@@ -132,8 +132,9 @@ def test_terminate_mode():
           and r[-1]["terms"]["fail"] < -0.5 and r[-1]["interventions"] == 0 and r[-1]["mode"] == "reset")
     m = machine("terminate")
     m.start(9, ins(-20), None, None, None, pose(-20))
-    r = run(m, [(-3, 0.0, 30.0), (0.5, 0.0, 30.0)])
-    check("tip below the rim 3 cm off the axis: TERMINATED OFF_AXIS", r[-1]["reason"] == wire.TR_OFF_AXIS)
+    r = run(m, [(-3, 0.0, 30.0), (3.0, 0.0, 30.0), (6.0, 0.0, 30.0)])
+    check("3 cm off the axis: 3 mm under the top goes on, 6 mm under -> TERMINATED OFF_AXIS",
+          r[1]["reason"] == wire.TR_NONE and r[-1]["reason"] == wire.TR_OFF_AXIS)
     m = machine("terminate")
     m.start(10, ins(-20), None, None, None, pose(-20))
     r = run(m, [(-3, 0.0, 0.0), (2, 0.0, 0.0)], blocked=True)
@@ -163,20 +164,25 @@ def test_other_terminations():
 def test_real_robot_rules():
     m = machine()
     m.start(9, ins(-20, 60), None, None, None, pose(-20))
-    r = run(m, [(-10, 0.0, 60.0), (-0.5, 0.0, 60.0), (0.5, 0.0, 60.0)])
-    check("incident case: 60 mm off axis -- free above the rim, machine halts it once the tip goes below",
-          r[0]["mode"] == "policy" and r[1]["mode"] == "policy" and r[2]["mode"] == "pull_out"
-          and r[2]["frame_state"] == wire.FS_POLICY)
+    r = run(m, [(-10, 0.0, 60.0), (-0.5, 0.0, 60.0), (3.0, 0.0, 60.0), (6.0, 0.0, 60.0)])
+    check("incident case: 60 mm off axis -- free above and 3 mm under the top, machine halts it at 6 mm under",
+          r[0]["mode"] == "policy" and r[1]["mode"] == "policy" and r[2]["mode"] == "policy"
+          and r[3]["mode"] == "pull_out" and r[3]["frame_state"] == wire.FS_POLICY)
     m.start(13, ins(-20), None, None, None, pose(-20))
     r = run(m, [(-1, 0.0, 15.0), (0.5, 2.0, 15.0)])
-    check("15 mm off axis at the rim (on the block top, inside the 2 cm zone): free interaction",
+    check("15 mm off axis at the rim (on the block top, inside the 2.5 cm zone): free interaction",
           all(x["mode"] == "policy" for x in r))
     m.start(14, ins(-20), None, None, None, pose(-20))
     r = run(m, [(5, 0.0, 2.5), (10, 0.0, 2.0)])
     check("2.5 mm off axis in the hole: no zone trigger", all(x["frame_state"] == wire.FS_POLICY for x in r))
     m.start(15, ins(-20), None, None, None, pose(-20))
-    r = run(m, [(-1, 0.0, 25.0), (0.5, 0.0, 25.0)])
-    check("25 mm off axis going below the rim: machine steps in", r[-1]["mode"] == "pull_out")
+    r = run(m, [(-1, 0.0, 24.0), (4.0, 0.0, 24.0), (8.0, 0.0, 24.0)])
+    check("24 mm off axis (on the rim, inside the 2.5 cm zone), even 8 mm under: no zone trigger",
+          all(x["mode"] == "policy" for x in r))
+    m.start(16, ins(-20), None, None, None, pose(-20))
+    r = run(m, [(-1, 0.0, 30.0), (4.0, 0.0, 30.0), (6.0, 0.0, 30.0)])
+    check("30 mm off axis: 4 mm under the top free, 6 mm under -> machine steps in",
+          r[1]["mode"] == "policy" and r[-1]["mode"] == "pull_out")
     m.start(10, ins(-20), None, None, None, pose(-20))
     m.force[0] = 0.0
     r1 = m.tick(DT, ins(5), None, None, None, pose(5), dj7=250.0)

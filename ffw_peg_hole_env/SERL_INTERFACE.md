@@ -70,7 +70,7 @@ Always receive with `recv_multipart()` and decode with `wire.decode_frame_parts(
 | 2 | JAM | push-back > 10 N | yes | retry |
 | 3 | RIM | > 8 N for 2 ticks within 2 mm of the rim | yes | retry |
 | 10 | BIND | push-back > 7 N for 2 ticks (or the hole arm loaded > 300 mA) | yes | retry |
-| 9 | OFF_AXIS | tip below the rim > 2 cm off the axis (heading down beside the block) | yes | retry |
+| 9 | OFF_AXIS | peg face > 5 mm below the block top, > 2.5 cm off the axis (heading down beside the block) | yes | retry |
 | 4 | BLOCKED | the command descends, the peg does not | yes | retry |
 | 5 | TIMEOUT | 20 s | no | new pair |
 | 6 | SAFETY | gear guard, hole pushed > 6 mm, hard edge (25 N), left j7 | yes | new pair |
@@ -98,7 +98,7 @@ ignored.
   `R_new = R_delta · R`, R_delta from intrinsic X-Y-Z angles (the obs rpy convention);
 - clipped per axis to **6.67 mm / 2° per tick** — that is action ±1. A normalized policy
   action `a ∈ [-1, 1]^6` is sent as `a * (0.00667, 0.00667, 0.00667, 0.0349, 0.0349, 0.0349)`;
-- then clamped to a box around the hole and, farther than 2 cm from the hole axis, kept 5 mm
+- then clamped to a box around the hole and, farther than 2.5 cm from the hole axis, kept 5 mm
   above the rim (the `clamped` flag in priv says when);
 - **lockstep**: a POLICY tick waits up to 40 ms for the client's reply to the previous frame and
   applies it in that tick, so frame k+1's `tag.action` is exactly the action chosen from frame k.

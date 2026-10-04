@@ -102,13 +102,13 @@ by motion state (gravity current turns into fake ~10 N forces).
    then the teach tool's reset (random reach-checked hole pose, peg start). A lag trip, a
    pushed hole or a gear-guard trip → FAULT, arms held, no retries.
 2. **POLICY:** each delta is applied, clamped to a box around the hole, and — farther than
-   2 cm from the calibrated axis — kept 5 mm above the rim.
+   2.5 cm from the calibrated axis — kept 5 mm above the rim.
 3. **INTERVENTION** (the machine, not a human): pull the peg straight up the axis until its
    tip is 5 mm clear, trace back to the last policy pose near the hole top (or the peg
    aligned on the calibrated axis), then the policy continues, same episode. Max 3 per
    episode. Triggers, only while the peg can touch the hole (tip within 1 mm of the rim
    or lower):
-   - tip below the rim more than **2 cm** off the calibrated axis (heading down beside the block);
+   - peg face more than 5 mm below the block top, more than **2.5 cm** off the calibrated axis (heading down beside the block);
    - push-back > **7 N for 2 ticks** (was 6 N on one tick: it stopped normal chamfer entries);
    - blocked progress (command descends, peg does not);
    - left j7 current change > **300 mA** since the peg was last clear.
@@ -119,7 +119,7 @@ by motion state (gravity current turns into fake ~10 N forces).
    - INTERVENTIONS / BLOCKED — a 4th trigger;
    - TIMEOUT — 20 s.
 
-**Interaction zone:** within 2 cm of the axis the peg may touch the block top, chamfer and
+**Interaction zone:** within 2.5 cm of the axis (2026-10-05; was 2 cm) the peg may touch the block top, chamfer and
 rim freely (inside the block footprint it cannot get beside the block); the force rules and
 the gear guard limit that contact.
 

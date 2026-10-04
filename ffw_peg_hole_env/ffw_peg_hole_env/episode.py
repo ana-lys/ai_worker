@@ -64,7 +64,10 @@ class EpisodeConfig:
     f_intervene: float = 7.0            # N push-back for f_hold ticks -> machine steps in (fail: 10 N, rim 8 N x 2)
     f_hold: int = 2                     # 2026-10-04 demos: 6 N on one tick stopped 13/13 tries mid-chamfer (normal
                                         # entries read 6-8 N; model verify median peak 7.4 N); 7 N x 2: 0/13, 0/19 clean
-    zone_radius: float = 0.02           # m: free interaction within this of the axis; outside + below the rim -> machine
+    zone_radius: float = 0.025          # m: free interaction within this of the axis (the block top / rim: 26 mm
+                                        #    outer half-width; user 2026-10-05: acting on the rim is fine)
+    off_axis_depth: float = 0.005       # m: outside the zone, the peg face this far below the block top = heading
+                                        #    down BESIDE the block (user 2026-10-05: not as soon as it dips under)
     j7_intervene: float = 300.0         # mA left j7 change since last clear -> machine steps in
     hole_shift_max: float = 0.006       # m hole pushed sideways since last clear -> SAFETY
     touch_clear: float = 0.001          # m: tip above the rim by more than this = cannot touch (real robot)
@@ -113,7 +116,7 @@ class EpisodeMachine:
         if not self.can_touch(ins):
             return False
         return (self.f_ticks >= c.f_hold or blocked or dj7 > c.j7_intervene
-                or (ins["depth"] > 0.0 and ins["lateral"] > c.zone_radius))
+                or (ins["depth"] > c.off_axis_depth and ins["lateral"] > c.zone_radius))
 
     def tick(self, dt, ins, q, amps, lift, T_peg, blocked=False, safety=False, arrived=False,
              hole_shift=0.0, dj7=0.0):
@@ -146,7 +149,8 @@ class EpisodeMachine:
                 self.mode, penalty = "pull_out", True
             else:                                               # terminate mode, or the expert failing
                 reason = (wire.TR_BLOCKED if blocked else
-                          wire.TR_OFF_AXIS if ins["depth"] > 0.0 and ins["lateral"] > c.zone_radius else wire.TR_BIND)
+                          wire.TR_OFF_AXIS if ins["depth"] > c.off_axis_depth and ins["lateral"] > c.zone_radius
+                          else wire.TR_BIND)
         elif driving == "pull_out" and -ins["depth"] >= c.clear:
             self.mode = "expert"
         if terms["fail"] != 0.0 and reason not in (wire.TR_JAM, wire.TR_RIM):

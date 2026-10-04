@@ -68,7 +68,7 @@ BOX_ACROSS, BOX_UP, BOX_TILT = 0.06, 0.06, np.radians(10.0)
 # above ON_TOP, so it can never head down beside the hole block (2026-10-04 incident); inside
 # it the peg may touch the block top / chamfer / rim (the force rules and the gear guard limit
 # that). episode.EpisodeMachine halts + intervenes if it gets below the rim outside anyway.
-ZONE, FLOOR = 0.02, 0.005                              # FLOOR covers the arm's ~0.2 s lag (2.4 mm overshoot seen live)
+ZONE, FLOOR = 0.025, 0.005                              # FLOOR covers the arm's ~0.2 s lag (2.4 mm overshoot seen live)
 RETRACT_SPEED = 0.03                                    # m/s pulling the peg out of the bore (insertion: 0.01)
 GOOD_CLEAR = 0.003                                      # m: a "good state" has the tip at least this far above the rim
 QUICK_SETTLE = 0.1                                      # s pause after an intermediate reset move (teach: 0.3)
@@ -212,6 +212,7 @@ class SerlServer:
         self.next_pair = None                             # (hole EE, peg start rel) for the next reset only
         self.expert = None                                # the machine intervention's Expert, this episode
         self.seat = None                                  # (offset, force, depth): seat_hole() in every reset
+        self.nudge = None                                 # (front, half, force, depth, speed): nudge_hole() first
         # episode starts: EnvCmd RESET params[0] (wire.RESET_*); retries from the last good state
         self.reset_mode, self.auto_reset, self.max_retries = wire.RESET_AUTO, False, 3
         self.good_rel = None                              # last good state: commanded IK EE pose in the hole tool frame
@@ -448,7 +449,7 @@ class SerlServer:
         T_tf = arm.goal if arm.anchor is None else self.io.ee("left") @ np.linalg.inv(arm.anchor) @ arm.goal
         return T_tf @ arm.map
 
-    def command_site(self, T_site):
+    def command_site(self, T_site, zone_floor=True):
         """Send a commanded IK EE pose, clamped to the box around the hole (base-fixed goal)."""
         arm = self.t.st.arms["right"]
         T_peg = T_site @ np.linalg.inv(arm.map) @ pht.PEG_TOOL
@@ -460,7 +461,7 @@ class SerlServer:
         T_peg, hit = box.clamp(T_peg)
         self.clamped = bool(np.any(hit))
         p = np.linalg.inv(H) @ np.r_[T_peg[:3, 3], 1.0]                   # x = height on the axis
-        if np.hypot(p[1] - self.axis_c[0], p[2] - self.axis_c[1]) > ZONE and p[0] < pht.TOP + FLOOR:
+        if zone_floor and np.hypot(p[1] - self.axis_c[0], p[2] - self.axis_c[1]) > ZONE and p[0] < pht.TOP + FLOOR:
             # outside the interaction zone: stay above the rim
             self.clamped = True
             p[0] = pht.TOP + FLOOR
@@ -583,6 +584,8 @@ class SerlServer:
         RESET frames; the gear guard and the hole watch (> 6 mm sideways -> FAULT) stay on."""
         off_y, f_max, depth = self.seat
         t, arm = self.t, self.t.st.arms["right"]
+        if self.nudge is not None:
+            self.nudge_hole()
         OFF = phs.T_from([0.0, self.offset_mm[0] / 1000.0 + off_y, self.offset_mm[1] / 1000.0], np.eye(3))
         T, _ = t.peg_target(pht.TOP + 0.005, OFF)
         self.quick_move(T, t.a.move_speed, "hover")              # straight to 5 mm above the block top (both ends
@@ -615,11 +618,13 @@ class SerlServer:
             # the press slows down above it (live: "9.4 N" 0.3 mm above the top, nothing pressed)
             if ins["depth"] >= 0.0 and f > f_max:
                 break
+        d_seat = ins["depth"]
         t.held(0.15)
         moved = self.sideways(h0)
         T, _ = t.peg_target(max(s_cmd, pht.TOP) + 0.005, OFF)
         self.quick_move(T, t.a.move_speed, "retract")            # 5 mm straight up off the block; go_start() next
-        print(f"  seat: pressed {f:.1f} N at {(pht.TOP - s_cmd) * 1000:+.1f} mm, {off_y * 1000:.0f} mm beside the "
+        print(f"  seat: pressed {f:.1f} N at {(pht.TOP - s_cmd) * 1000:+.1f} mm commanded / {d_seat * 1000:+.1f} mm measured, "
+              f"{off_y * 1000:.0f} mm beside the "
               f"hole; hole moved {moved * 1000:.2f} mm")
         t.phase("idle")
         return True
@@ -630,6 +635,82 @@ class SerlServer:
         t.phase(phase)
         t.st.move("right", T, speed, None, anchor=self.io.ee("left"))
         t.st.settle(QUICK_SETTLE, t.a.reach_lag, t.a.settle_timeout)
+
+    def hole_lateral(self, y_h, z_h):
+        """Peg-tool offset that puts the peg tool point at (y_h, z_h) [m] across the CALIBRATED hole
+        axis, in the hole tool frame (peg_target's offset is in the ROLL-rotated peg frame)."""
+        R = Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix()
+        p = R.T @ np.r_[0.0, self.axis_c[0] + y_h, self.axis_c[1] + z_h]
+        return phs.T_from([0.0, p[1], p[2]], np.eye(3))
+
+    def wait_hole_still(self, timeout=2.0):
+        hist, t_end = [], time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            self.t.st.tick(None)
+            hist = (hist + [(time.monotonic(), self.hole_now()[0])])[-30:]
+            if hist[-1][0] - hist[0][0] >= 0.25 and \
+                    np.linalg.norm(hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0]) < 0.0002:
+                return
+
+    def nudge_hole(self):
+        """Before the down-press: land on the block's FRONT wall (the edge toward the robot body) at its
+        RIGHT end, press down firmly, slide along the wall to its LEFT end holding that height, lift.
+        Friction drags the block one consistent way, taking up the sideways play the down-press
+        alone leaves (user, 2026-10-05). Block (MJCF): 52 mm square, 5 mm wall around a 32 mm hole;
+        peg 31 mm square, so its centre 21 mm in front of the axis rests on the front wall, and
+        +-10 mm along it runs the peg's edge over the whole 52 mm. self.nudge = (front [m], half
+        length [m], press force [N], depth cap [m], slide speed [m/s])."""
+        front, half, f_max, depth, v_slide = self.nudge
+        t, arm = self.t, self.t.st.arms["right"]
+        H = self.io.ee("left") @ pht.HOLE_TOOL
+        # robot directions in the hole's lateral (y, z) plane: front = toward the robot (base -x), left = base +y
+        to_h = lambda v: (lambda w: w / np.linalg.norm(w))(np.array([H[:3, 1] @ v, H[:3, 2] @ v]))  # noqa: E731
+        f_dir, l_dir = to_h(np.array([-1.0, 0.0, 0.0])), to_h(np.array([0.0, 1.0, 0.0]))
+        l_dir = l_dir - (l_dir @ f_dir) * f_dir                   # orthogonal to front in the plane
+        l_dir /= np.linalg.norm(l_dir)
+        at = lambda u: front * f_dir + u * l_dir                  # noqa: E731  u = -half (right) .. +half (left)
+        y0, z0 = at(-half)
+        self.quick_move(t.peg_target(pht.TOP + 0.005, self.hole_lateral(y0, z0))[0], t.a.move_speed, "hover")
+        self.wait_hole_still()
+        h0 = self.hole_now()
+        rw = self.em.reward
+        rw.reset()
+        s_cmd, f, d_contact = pht.TOP + 0.005, 0.0, None
+        t.phase("push")
+        while s_cmd > pht.TOP - depth:                            # press down on the front-right corner
+            s_cmd -= 0.5 * t.a.speed / HZ
+            self.command_site(t.peg_target(s_cmd, self.hole_lateral(y0, z0))[0] @ arm.map, zone_floor=False)
+            t_end = time.monotonic() + 1.0 / HZ
+            while time.monotonic() < t_end - phs.CTRL_DT / 2:
+                t.st.tick(None)
+            ins, q, amps, lift, _, _ = self.measure()
+            f = rw.push_back_force(ins, q, amps, lift)
+            if f > 3.0 and d_contact is None:
+                d_contact = ins["depth"]
+            if ins["depth"] >= 0.0 and f > f_max:
+                break
+        f_press, d_press, n = f, ins["depth"], int(np.ceil(2 * half / (v_slide / HZ)))
+        f_min = f_mx = f
+        for k in range(1, n + 1):                                 # slide to the front-left corner, same height
+            y, z = at(-half + 2 * half * k / n)
+            self.command_site(t.peg_target(s_cmd, self.hole_lateral(y, z))[0] @ arm.map, zone_floor=False)
+            t_end = time.monotonic() + 1.0 / HZ
+            while time.monotonic() < t_end - phs.CTRL_DT / 2:
+                t.st.tick(None)
+            ins, q, amps, lift, _, _ = self.measure()
+            f = rw.push_back_force(ins, q, amps, lift)
+            f_min, f_mx = min(f_min, f), max(f_mx, f)
+        moved = self.hole_now()[0] - h0[0]
+        side = moved - (moved @ h0[1]) * h0[1]
+        t.held(0.15)
+        self.quick_move(t.peg_target(max(s_cmd, pht.TOP) + 0.005, self.hole_lateral(*at(half)))[0],
+                        t.a.move_speed, "retract")
+        print(f"  nudge: pressed {f_press:.1f} N at {(pht.TOP - s_cmd) * 1000:+.1f} mm commanded / {d_press * 1000:+.1f} mm "
+              f"measured below the top, contact (>3 N) at {'-' if d_contact is None else f'{d_contact * 1000:+.1f} mm'}, "
+              f"front-right corner (lateral {np.hypot(y0, z0) * 1000:.0f} mm); slid "
+              f"{2 * half * 1000:.0f} mm left (push-back {f_min:.1f}..{f_mx:.1f} N); hole moved {np.linalg.norm(side) * 1000:.2f} mm "
+              f"sideways, {np.dot(side, H[:3, :3] @ np.r_[0, l_dir[0], l_dir[1]]) * 1000:+.2f} mm toward the left")
+        t.phase("idle")
 
     def start_pair(self):
         """None = the teach tool's random reset (peg start +- --xy across, tilted). With
@@ -802,10 +883,18 @@ def add_seat_args(ap):
                     help="m beside the hole axis (peg tool +y) where the reset presses on the block top")
     ap.add_argument("--seat-force", type=float, default=8.0, help="N push-back that ends the press")
     ap.add_argument("--seat-depth", type=float, default=0.004, help="m past the block top the press goes at most")
+    ap.add_argument("--seat-nudge", action="store_true",
+                    help="before the down-press: press on the block's front wall at its right end and slide to the left")
+    ap.add_argument("--nudge-force", type=float, default=6.0, help="N the nudge presses down with")
+    ap.add_argument("--nudge-speed", type=float, default=0.005, help="m/s the nudge slides")
 
 
 def seat_from_args(a):
     return None if a.no_seat else (a.seat_offset, a.seat_force, a.seat_depth)
+
+
+def nudge_from_args(a):
+    return (0.021, 0.010, a.nudge_force, 0.004, a.nudge_speed) if getattr(a, "seat_nudge", False) else None
 
 
 def main():
@@ -848,7 +937,7 @@ def main():
             t.take_right()
             print(f"recording to {t.out}")
         srv = SerlServer(io, a.port_base, t)
-        srv.seat = seat_from_args(a)
+        srv.seat, srv.nudge = seat_from_args(a), nudge_from_args(a)
         srv.auto_reset, srv.max_retries = a.auto_reset, a.max_retries
         if t is not None:
             srv.em.cfg.failure_mode = a.failure_mode
