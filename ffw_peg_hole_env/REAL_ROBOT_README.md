@@ -191,6 +191,10 @@ B. **Frame reorganised for asymmetric actor-critic** — done (type 12, `FRAME.m
      because the gateway's `diff0/diff1` only accept `marker_frame` and read 10.0 here.
    - priv: F_pb estimate + reference, F_peak, reward terms + sum, env flags, hole pose, raw
      131-double gateway Obs, image receive times, anything else the server derives.
+C'. **Re-recorded 2026-10-05** after the block slipped in the left gripper (5.8 mm lower, ~1.8 mm
+   sideways; new eye calibration, `peg_hole_tcp.yaml` lift −0.30: `top_m` 47.6 mm, `push_m` 30 mm,
+   success at push − 1 mm): 100/100 first try in `recordings/peg_hole_demos/expert_v2_20261005`
+   (peak median 1.0 N, max 4.5 N, 10 242 frames). The 10-04 set below is from the old block position.
 C. **Expert demo recorder** — done 2026-10-04: 100/100 demos in
    `recordings/peg_hole_demos/expert/episodes` (first try each, peak median 1.1 N / max 5.6 N,
    10 956 frames, 725 MB; the earlier 21 in `expert_v0_before_seat_20261004`). What it took: the
