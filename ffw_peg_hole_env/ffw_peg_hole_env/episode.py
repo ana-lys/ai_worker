@@ -132,6 +132,11 @@ class EpisodeMachine:
             self.mode = "trace_back"
         elif driving == "trace_back" and arrived:
             self.mode = "policy"
+        if terms["fail"] != 0.0 and reason not in (wire.TR_JAM, wire.TR_RIM):
+            # reward.py's fail rule fired but did not end the episode (the machine was pulling out,
+            # or another rule ended it first): the fail penalty belongs to a terminal jam / rim only
+            terms["fail"] = 0.0
+            reward = float(sum(terms[k] for k in ("success", "shape", "force", "fail")))
         if reason != wire.TR_NONE:
             state, self.mode = wire.FS_TERMINATED, "reset"
             if reason not in (wire.TR_SUCCESS,) and terms["fail"] == 0.0:

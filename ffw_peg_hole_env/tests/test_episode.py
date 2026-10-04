@@ -71,7 +71,9 @@ def test_intervention_cycle():
           r[-1]["frame_state"] == wire.FS_POLICY and r[-1]["mode"] == "pull_out" and r[-1]["interventions"] == 1)
     check("restore pose = the last policy pose near the hole top (tip 3 mm above the rim)",
           np.allclose(m.restore, pose(-3)))
-    r = run(m, [(d, 0.0, 0.0) for d in (6, 2, -2, -6)])
+    r = run(m, [(6, 12.0, 0.0)] + [(d, 0.0, 0.0) for d in (2, -2, -6)])     # 12 N while pulling out (2026-10-04 live)
+    check("12 N during the machine's pull-out: no fail penalty, episode goes on",
+          r[0]["terms"]["fail"] == 0.0 and r[0]["frame_state"] == wire.FS_INTERVENTION and r[0]["reward"] > -0.1)
     check("pulling out: INTERVENTION frames, trace_back once the tip is 5 mm clear",
           all(x["frame_state"] == wire.FS_INTERVENTION for x in r) and r[-1]["mode"] == "trace_back"
           and [x["mode"] for x in r[:-1]] == ["pull_out"] * 3)

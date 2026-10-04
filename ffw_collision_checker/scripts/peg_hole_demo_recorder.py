@@ -262,7 +262,7 @@ class Recorder:
                 srv.retract()
                 OFF = phs.T_from([0.0, off[0] / 1000.0, off[1] / 1000.0], np.eye(3))
                 T, _ = t.peg_target(pht.TOP + a.hover, OFF)
-                t.move_right(T, a.speed, "align_hover")
+                t.move_right(T, a.speed, "hover")
                 rel_tool = phs.T_from([pht.TOP, 0.0, 0.0], Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix())
                 R_al = (self.io_left() @ pht.HOLE_TOOL @ rel_tool)[:3, :3]
                 t.manual_trans = R_al @ np.array([a.hover, off[0] / 1000.0, off[1] / 1000.0])
@@ -271,6 +271,7 @@ class Recorder:
                       f"z {off[1]:+.2f} mm), Enter in the teach window = record; s = skip pose; q = quit")
                 self.key()
                 srv.watch = srv.hole_now()
+                t.phase("manual")
                 try:
                     while True:
                         t.manual_tick()
@@ -281,6 +282,7 @@ class Recorder:
                             return kk
                 finally:
                     srv.watch, t.state = None, "idle"
+                    t.phase("idle")
                 o = t.taught_offset()
                 y, z = o[1, 3] * 1000.0, o[2, 3] * 1000.0
                 self.add_to_pool(k, pose, y, z)
