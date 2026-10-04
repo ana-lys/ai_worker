@@ -36,7 +36,8 @@ New messages:
                        X-Y-Z angles (= the Obs rpy convention R = Rx Ry Rz).
                        grip is carried but not acted on (the peg stays gripped).
   EnvCmd (8)           controller -> server, CONTROL. cmd (uint8), seed (int64),
-                       episode_id (uint32), 8 float64 params (reserved).
+                       episode_id (uint32), 8 float64 params; RESET params[0] = the
+                       start mode (RESET_AUTO / RESET_RANDOM / RESET_RETRY).
   EnvStatus (9)        server -> controller, STATUS. state, backend, reset_ok,
                        success, terminated, truncated (uint8 each); episode_id,
                        step, deltas_received (uint32 each); reward, depth,
@@ -95,19 +96,26 @@ MSG_CONTROL_DELTA = 6
 MSG_ENV_CMD = 8
 MSG_ENV_STATUS = 9
 MSG_IMAGES = 10
-MSG_FRAME = 13                                    # 12 = the same with NaN for "n/a" (decoded + upgraded below); 11 retired
+MSG_FRAME = 14                                    # 13 = no retry fields, 12 = NaN for "n/a" (both decoded + upgraded); 11 retired
 
 # EnvCmd.cmd
 RESET, PAUSE, RESUME, ABORT, PING = 1, 2, 3, 4, 5
 CMD_NAMES = {RESET: "RESET", PAUSE: "PAUSE", RESUME: "RESUME", ABORT: "ABORT", PING: "PING"}
+# EnvCmd RESET params[0]: which start the next episode gets
+RESET_AUTO, RESET_RANDOM, RESET_RETRY = 0, 1, 2
+RESET_MODE_NAMES = ["AUTO", "RANDOM", "RETRY"]
 # EnvStatus.state
 IDLE, RESETTING, READY, RUNNING, PAUSED, DONE, FAULT = range(7)
 STATE_NAMES = ["IDLE", "RESETTING", "READY", "RUNNING", "PAUSED", "DONE", "FAULT"]
 # Frame.frame_state / Frame.reason
 FS_IDLE, FS_POLICY, FS_INTERVENTION, FS_TERMINATED, FS_RESET, FS_FAULT = range(6)
 FS_NAMES = ["IDLE", "POLICY", "INTERVENTION", "TERMINATED", "RESET", "FAULT"]
-TR_NONE, TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT, TR_SAFETY, TR_INTERVENTIONS, TR_ABORT, TR_OFF_AXIS = range(10)
-TR_NAMES = ["NONE", "SUCCESS", "JAM", "RIM", "BLOCKED", "TIMEOUT", "SAFETY", "INTERVENTIONS", "ABORT", "OFF_AXIS"]
+TR_NONE, TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT, TR_SAFETY, TR_INTERVENTIONS, TR_ABORT, TR_OFF_AXIS, \
+    TR_BIND = range(11)
+TR_NAMES = ["NONE", "SUCCESS", "JAM", "RIM", "BLOCKED", "TIMEOUT", "SAFETY", "INTERVENTIONS", "ABORT", "OFF_AXIS",
+            "BIND"]
+# failures a RESET_AUTO retries from the last good state (local mistakes; SAFETY / TIMEOUT / ABORT get a new pair)
+TR_RETRY = (TR_JAM, TR_RIM, TR_BLOCKED, TR_INTERVENTIONS, TR_OFF_AXIS, TR_BIND)
 # EnvStatus.backend
 BACKEND_SIM, BACKEND_REAL = 0, 1
 
@@ -179,7 +187,10 @@ PRIV_FIELDS = (
     # env flags / episode state
     ("mode", 1, "machine mode driving the NEXT tick: 0 idle, 1 policy, 2 pull_out, 3 trace_back, "
                 "4 reset, 5 fault"),
-    ("interventions", 1, "machine interventions so far this episode"),
+    ("interventions", 1, "machine interventions so far this episode (--failure-mode intervene only)"),
+    ("reset_kind", 1, "how this episode started: 0 a new random pair, 1 a retry from the parent's good state"),
+    ("retry_count", 1, "retries of this hole / peg pair so far (0 = a new pair)"),
+    ("parent_episode", 1, "the episode this one retries (0 = none)"),
     ("t_episode", 1, "s since the episode started"),
     ("can_touch", 1, "1 = the peg can touch the hole (tip within 1 mm of the rim or lower)"),
     ("in_zone", 1, "1 = within the 2 cm interaction zone of the calibrated axis"),
@@ -216,11 +227,17 @@ def _offsets(fields):
 OBS_SLICES, PRIV_SLICES = _offsets(OBS_FIELDS), _offsets(PRIV_FIELDS)
 NO_NAN_CAP = 10.0                                 # delta_age / image_age when there is none
 
-# Frame type 12 (2026-10-04 demos): the same obs; priv without the *_valid / image_ok flags, image_t
-# (receive time) instead of image_age, and NaN for "not available". decode_frame() reads it and
-# returns the type-13 layout, so recorded demos stay usable.
+# Older Frames decode too, upgraded to this layout (the 2026-10-04 demos are type 12):
+#   13: priv without reset_kind / retry_count / parent_episode (-> 0: every episode a new pair)
+#   12: also without the *_valid / image_ok flags, image_t (receive time) instead of image_age, and
+#       NaN for "not available"
+_V13_ADDED = ("reset_kind", "retry_count", "parent_episode")
+PRIV_FIELDS_V13 = tuple(f for f in PRIV_FIELDS if f[0] not in _V13_ADDED)
+PRIV_SLICES_V13 = _offsets(PRIV_FIELDS_V13)
+_PRIV_V13 = struct.Struct("<%dd" % sum(n for _, n, _ in PRIV_FIELDS_V13))
+FRAME_BYTES_V13 = _HEADER.size + _OBS_V.size + _PRIV_V13.size + _TAG.size
 _V12_ADDED = ("force_ref_valid", "policy_delta_valid", "image_age", "image_ok")
-_v12 = [f for f in PRIV_FIELDS if f[0] not in _V12_ADDED]
+_v12 = [f for f in PRIV_FIELDS_V13 if f[0] not in _V12_ADDED]
 _g = [f[0] for f in _v12].index("gateway_obs")
 PRIV_FIELDS_V12 = tuple(_v12[:_g] + [("image_t", 2, "")] + _v12[_g:])
 PRIV_SLICES_V12 = _offsets(PRIV_FIELDS_V12)
@@ -228,18 +245,25 @@ _PRIV_V12 = struct.Struct("<%dd" % sum(n for _, n, _ in PRIV_FIELDS_V12))
 FRAME_BYTES_V12 = _HEADER.size + _OBS_V.size + _PRIV_V12.size + _TAG.size
 
 
+def _upgrade_v13(p13):
+    """Type-13 priv vector -> this layout (the retry fields 0)."""
+    import numpy as np
+    old = {k: p13[a:b] for k, (a, b) in PRIV_SLICES_V13.items()}
+    return np.concatenate([np.atleast_1d(old[name]) if name in old else np.zeros(n) for name, n, _ in PRIV_FIELDS])
+
+
 def _upgrade_v12(p12, ts):
-    """Type-12 priv vector -> type-13 priv vector (flags derived from where 12 had NaN)."""
+    """Type-12 priv vector -> this layout (flags derived from where 12 had NaN)."""
     import numpy as np
     old = {k: p12[a:b] for k, (a, b) in PRIV_SLICES_V12.items()}
-    new = {name: np.nan_to_num(old[name], nan=0.0) for name, _, _ in PRIV_FIELDS if name in old}
+    new = {name: np.nan_to_num(old[name], nan=0.0) for name, _, _ in PRIV_FIELDS_V13 if name in old}
     new["force_ref_valid"] = np.array([float(not np.isnan(old["force_ref"][0]))])
     new["policy_delta_valid"] = np.array([float(not np.isnan(old["policy_delta"][0]))])
     new["delta_age"] = np.nan_to_num(np.minimum(old["delta_age"], NO_NAN_CAP), nan=NO_NAN_CAP)
     ok = ~np.isnan(old["image_t"])
     new["image_ok"] = ok.astype(float)
     new["image_age"] = np.where(ok, np.minimum(ts - np.nan_to_num(old["image_t"]), NO_NAN_CAP), NO_NAN_CAP)
-    return np.concatenate([np.atleast_1d(new[name]).astype(float) for name, _, _ in PRIV_FIELDS])
+    return _upgrade_v13(np.concatenate([np.atleast_1d(new[name]).astype(float) for name, _, _ in PRIV_FIELDS_V13]))
 
 if gw is not None:                                # the copy above must match the gateway exactly
     assert gw._HEADER.format == _HEADER.format
@@ -354,6 +378,10 @@ def decode_frame(data):
         o = np.array(_OBS_V.unpack_from(data, _HEADER.size))
         p = _upgrade_v12(np.array(_PRIV_V12.unpack_from(data, _HEADER.size + _OBS_V.size)), ts)
         v = _TAG.unpack_from(data, _HEADER.size + _OBS_V.size + _PRIV_V12.size)
+    elif t == 13 and len(data) == FRAME_BYTES_V13:
+        o = np.array(_OBS_V.unpack_from(data, _HEADER.size))
+        p = _upgrade_v13(np.array(_PRIV_V13.unpack_from(data, _HEADER.size + _OBS_V.size)))
+        v = _TAG.unpack_from(data, _HEADER.size + _OBS_V.size + _PRIV_V13.size)
     else:
         if len(data) != FRAME_BYTES:
             raise ValueError(f"type {MSG_FRAME}: expected {FRAME_BYTES} bytes, got {len(data)}")

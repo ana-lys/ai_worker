@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ffw_peg_hole_env import wire  # noqa: E402
-from ffw_peg_hole_env.episode import EpisodeMachine  # noqa: E402
+from ffw_peg_hole_env.episode import EpisodeConfig, EpisodeMachine  # noqa: E402
 from ffw_peg_hole_env.geometry import T_from  # noqa: E402
 
 failures = []
@@ -24,8 +24,8 @@ def check(name, cond):
         failures.append(name)
 
 
-def machine():
-    m = EpisodeMachine()
+def machine(failure_mode="intervene"):
+    m = EpisodeMachine(EpisodeConfig(failure_mode=failure_mode))
     m.force = [0.0]                                   # scripted push-back for the next tick
     m.reward.push_back_force = lambda ins, q, amps, lift: m.force[0]
     return m
@@ -118,6 +118,25 @@ def test_rim_band():
           r[-1]["frame_state"] == wire.FS_POLICY and r[-1]["mode"] == "pull_out")
 
 
+def test_terminate_mode():
+    """--failure-mode terminate (the default): a trigger ends the episode, priced like a failure."""
+    check("default failure mode is terminate", EpisodeConfig().failure_mode == "terminate")
+    m = machine("terminate")
+    m.start(8, ins(-20), None, None, None, pose(-20))
+    r = run(m, [(-3, 0.0, 0.0), (5, 7.5, 0.0), (6, 7.5, 0.0)])
+    check("binding 7.5 N x2: TERMINATED BIND with a fail penalty, no intervention",
+          r[-1]["frame_state"] == wire.FS_TERMINATED and r[-1]["reason"] == wire.TR_BIND
+          and r[-1]["terms"]["fail"] < -0.5 and r[-1]["interventions"] == 0 and r[-1]["mode"] == "reset")
+    m = machine("terminate")
+    m.start(9, ins(-20), None, None, None, pose(-20))
+    r = run(m, [(-3, 0.0, 30.0), (0.5, 0.0, 30.0)])
+    check("tip below the rim 3 cm off the axis: TERMINATED OFF_AXIS", r[-1]["reason"] == wire.TR_OFF_AXIS)
+    m = machine("terminate")
+    m.start(10, ins(-20), None, None, None, pose(-20))
+    r = run(m, [(-3, 0.0, 0.0), (2, 0.0, 0.0)], blocked=True)
+    check("blocked progress: TERMINATED BLOCKED", r[-1]["reason"] == wire.TR_BLOCKED)
+
+
 def test_other_terminations():
     m = machine()
     m.start(4, ins(-20), None, None, None, pose(-20))
@@ -185,6 +204,7 @@ if __name__ == "__main__":
     test_intervention_cycle()
     test_intervention_limit()
     test_rim_band()
+    test_terminate_mode()
     test_other_terminations()
     test_real_robot_rules()
     test_machine_deltas()

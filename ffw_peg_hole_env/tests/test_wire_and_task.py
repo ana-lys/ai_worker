@@ -78,8 +78,8 @@ def test_obs_layout():
     act = (0.001, -0.002, 0.003, 0.01, -0.02, 0.03)
     f = wire.encode_frame(obs, priv, 12, 34, wire.FS_INTERVENTION, wire.TR_NONE, -0.125, act, ts=7.25)
     fo, fp, tag, ts = wire.decode_frame(f)
-    check(f"Frame is {wire.FRAME_BYTES} bytes, type 13, timestamp kept",
-          len(f) == wire.FRAME_BYTES and wire.msg_type(f) == wire.MSG_FRAME == 13 and ts == 7.25)
+    check(f"Frame is {wire.FRAME_BYTES} bytes, type 14, timestamp kept",
+          len(f) == wire.FRAME_BYTES and wire.msg_type(f) == wire.MSG_FRAME == 14 and ts == 7.25)
     check("Frame obs / priv vectors round-trip", np.array_equal(fo["vector"], obs) and np.array_equal(fp["vector"], priv))
     check("obs names tile the vector in order",
           np.array_equal(np.concatenate([np.atleast_1d(fo[k]) for k, _, _ in wire.OBS_FIELDS]), obs))
@@ -109,7 +109,17 @@ def test_obs_layout():
     check("multipart [Frame, right, left]: frame + images round-trip, empty part = None",
           np.array_equal(po["vector"], obs) and np.array_equal(pim["right"], imgs["right"]) and pim["left"] is None)
     check("decode_frame_parts takes a bare Frame too", wire.decode_frame_parts(f)[4] == {"right": None, "left": None})
-    # type 12 (NaN for n/a; the recorded demos) decodes, upgraded to the type-13 layout without NaN
+    from struct import pack as _st_pack
+    # type 13 (no retry fields) decodes, upgraded: retry fields 0
+    p13 = rng.normal(size=sum(n for _, n, _ in wire.PRIV_FIELDS_V13))
+    f13 = (wire._HEADER.pack(13, 5.0) + _st_pack("<%dd" % wire.OBS_N, *obs) + _st_pack("<%dd" % len(p13), *p13)
+           + wire._TAG.pack(3, 4, wire.FS_POLICY, 0, 0.5, *act))
+    _, q13, _, _ = wire.decode_frame(f13)
+    s13 = wire.PRIV_SLICES_V13
+    check("type-13 frame decodes, upgraded: retry fields 0, the rest unchanged",
+          len(f13) == wire.FRAME_BYTES_V13 and q13["reset_kind"] == 0.0 and q13["parent_episode"] == 0.0
+          and q13["depth"] == p13[s13["depth"][0]] and np.array_equal(q13["gateway_obs"], p13[slice(*s13["gateway_obs"])]))
+    # type 12 (NaN for n/a; the recorded demos) decodes, upgraded to this layout without NaN
     import struct as _st
     p12 = rng.normal(size=sum(n for _, n, _ in wire.PRIV_FIELDS_V12))
     sl = wire.PRIV_SLICES_V12

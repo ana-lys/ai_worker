@@ -64,6 +64,10 @@ class EpisodeConfig:
     touch_clear: float = 0.001          # m: tip above the rim by more than this = cannot touch (real robot)
     footprint: float = None             # m peg-centre block half-width for the sim shortcut; None = real robot
     max_interventions: int = 3
+    # "terminate" (default): a trigger ENDS the episode with the fail penalty -- reason BIND (push-back
+    # / left j7), OFF_AXIS (below the rim outside the zone) or BLOCKED; the server then retries from
+    # the last good state. "intervene": the machine pulls out, traces back, same episode (the old way).
+    failure_mode: str = "terminate"
     clear: float = 0.005                # m: pull out until the tip is this far above the rim
     top_lo: float = 0.002               # m: "near the hole top" = tip top_lo..top_hi above the rim,
     top_hi: float = 0.015               #    within lateral_top of the axis (the restore pose)
@@ -127,7 +131,10 @@ class EpisodeMachine:
         elif self.t >= c.timeout_s - 1e-6:                     # summed dt drifts below the exact value
             reason = wire.TR_TIMEOUT
         elif driving == "policy" and self._trigger(ins, f_pb, blocked, dj7):
-            if self.interventions >= c.max_interventions:
+            if c.failure_mode == "terminate":
+                reason = (wire.TR_BLOCKED if blocked else
+                          wire.TR_OFF_AXIS if ins["depth"] > 0.0 and ins["lateral"] > c.zone_radius else wire.TR_BIND)
+            elif self.interventions >= c.max_interventions:
                 reason = wire.TR_BLOCKED if blocked else wire.TR_INTERVENTIONS
             else:
                 self.interventions += 1

@@ -68,6 +68,7 @@ BOX_ACROSS, BOX_UP, BOX_TILT = 0.06, 0.06, np.radians(10.0)
 # that). episode.EpisodeMachine halts + intervenes if it gets below the rim outside anyway.
 ZONE, FLOOR = 0.02, 0.005                              # FLOOR covers the arm's ~0.2 s lag (2.4 mm overshoot seen live)
 RETRACT_SPEED = 0.03                                    # m/s pulling the peg out of the bore (insertion: 0.01)
+GOOD_CLEAR = 0.003                                      # m: a "good state" has the tip at least this far above the rim
 QUICK_SETTLE = 0.1                                      # s pause after an intermediate reset move (teach: 0.3)
 HOLE_SHIFT_MAX = 0.006                                  # m: hole pushed sideways -> stop (resets too)
 # Gear guard, every control tick in every phase (episode, intervention, retract, reset):
@@ -140,6 +141,11 @@ class SerlServer:
         print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
         self.next_pair = None                             # (hole EE, peg start rel) for the next reset only
         self.seat = None                                  # (offset, force, depth): seat_hole() in every reset
+        # episode starts: EnvCmd RESET params[0] (wire.RESET_*); retries from the last good state
+        self.reset_mode, self.auto_reset, self.max_retries = wire.RESET_AUTO, False, 3
+        self.good_rel = None                              # last good state: commanded IK EE pose in the hole tool frame
+        self.last_end = None                              # (reason, episode_id) of the last episode
+        self.reset_kind, self.retry_count, self.parent_episode = 0, 0, 0
         self.cams, self.last_images = None, None          # images.WristCameras (--images): newest crops per tick
         # Frame state: obs limit boxes, EE velocity memory, the episode's priv values
         self.profiles = observation.load_profiles()
@@ -185,6 +191,9 @@ class SerlServer:
             return
         if cmd == wire.RESET:
             self.running, self.paused = True, False
+            m = int(round(c["params"][0])) if c["params"] else wire.RESET_AUTO
+            self.reset_mode = m if m in (wire.RESET_AUTO, wire.RESET_RANDOM, wire.RESET_RETRY) else wire.RESET_AUTO
+            print(f"  reset mode {wire.RESET_MODE_NAMES[self.reset_mode]}")
             if c["episode_id"]:
                 self.episode_id = c["episode_id"] - 1             # the next episode gets this id
         elif cmd == wire.PAUSE:
@@ -291,6 +300,8 @@ class SerlServer:
             "clamped": float(self.clamped),
             "mode": wire.MODE_CODES[self.em.mode],
             "interventions": self.em.interventions, "t_episode": self.em.t,
+            "reset_kind": float(self.reset_kind), "retry_count": float(self.retry_count),
+            "parent_episode": float(self.parent_episode),
             "can_touch": float(self.em.can_touch(ins)), "in_zone": float(ins["lateral"] <= ZONE),
             "success": float(reason == wire.TR_SUCCESS),
             "failed": float(reason in (wire.TR_JAM, wire.TR_RIM)),
@@ -392,10 +403,13 @@ class SerlServer:
         """RESET frames while the teach tool resets; -> True when the next episode starts."""
         self.state, self.reason, self.reward, self.action = wire.FS_RESET, wire.TR_NONE, 0.0, np.zeros(6)
         self.info, self.T_cmd = {}, None
+        retry = self.retry_wanted()
         try:
             self.retract()
             self.j7_ref, self.j7_since = float(self.io.effort[6]), None        # peg clear: unloaded reference
-            if self.seat is None:
+            if retry:
+                ok = self.retry_start()
+            elif self.seat is None:
                 ok = self.t.hw_reset(self.start_pair())
             else:
                 # the hole moves with the peg riding above it (no trip to the peg start and back): seat
@@ -417,6 +431,10 @@ class SerlServer:
             self.state = wire.FS_IDLE
             return False
         self.t.take_right()
+        if retry:
+            self.reset_kind, self.retry_count, self.parent_episode = 1, self.retry_count + 1, self.last_end[1]
+        else:
+            self.reset_kind, self.retry_count, self.parent_episode = 0, 0, 0
         self.episode_id += 1
         self.step = 0
         self.T_cmd = self.command_site(self.site_cmd())
@@ -429,10 +447,55 @@ class SerlServer:
         self.t0 = time.monotonic()
         self.state, self.action = wire.FS_POLICY, np.zeros(6)
         self.raw_delta = None
+        self.good_rel = np.linalg.inv(self.io.ee("left") @ pht.HOLE_TOOL) @ self.T_cmd   # step 0 is always clear
         self.info = self.episode_info(ins, s_cmd)
         self.publish()                                        # step 0: the observation after the reset
-        print(f"episode {self.episode_id}: start, peg depth {ins['depth'] * 1000:+.1f} mm")
+        print(f"episode {self.episode_id}: start ({'retry %d of episode %d' % (self.retry_count, self.parent_episode) if retry else 'new pair'}), "
+              f"peg depth {ins['depth'] * 1000:+.1f} mm")
         return True
+
+    def retry_wanted(self):
+        """Does this reset retry the last episode's pair from its good state? (wire.RESET_* mode)"""
+        if self.next_pair is not None or self.last_end is None or self.good_rel is None:
+            return False                                  # an explicit pair (recorder), or nothing to retry
+        reason = self.last_end[0]
+        if reason in (wire.TR_SAFETY, wire.TR_ABORT):     # hole pose not trusted / stopped by hand
+            return False
+        if self.reset_mode == wire.RESET_RETRY:
+            return True
+        return (self.reset_mode == wire.RESET_AUTO and reason in wire.TR_RETRY
+                and self.retry_count < self.max_retries)
+
+    def retry_start(self):
+        """Same hole (re-seated: the failure may have unseated it), peg back to the last good state:
+        the last policy pose with the tip >= GOOD_CLEAR above the rim, kept relative to the hole."""
+        t = self.t
+        if self.seat is not None and not self.seat_hole():
+            return False
+        arm = t.st.arms["right"]
+        H = self.io.ee("left") @ pht.HOLE_TOOL
+        T_tf = H @ self.good_rel @ np.linalg.inv(arm.map)              # IK site goal -> TF EE goal
+        above = T_tf.copy()
+        above[:3, 3] += 0.01 * H[:3, 0]
+        self.quick_move(above, t.a.move_speed, "hover")               # both ends above the rim: the line is too
+        t.move_right(T_tf, t.a.speed, "to_top")
+        t.phase("idle")
+        return True
+
+    def after_episode(self):
+        """After TERMINATED: unless --auto-reset, pull the peg straight out NOW (it may be loaded against
+        the hole), then hold IDLE until the client's next EnvCmd RESET."""
+        self.last_end = (self.reason, self.episode_id)
+        if self.auto_reset or self.paused:
+            return
+        self.state = wire.FS_RESET
+        try:
+            self.retract()
+            self.state = wire.FS_IDLE
+        except (phr.LagTrip, HoleMoved, GuardTrip) as e:
+            print(f"pull-out after the episode stopped: {e}: FAULT")
+            self.watch, self.state = None, wire.FS_FAULT
+        self.running = False
 
     def seat_hole(self):
         """Seat the hole block in the left gripper before the episode: press the peg down on the block
@@ -571,6 +634,8 @@ class SerlServer:
             tripped = str(e)
             print(f"  step {self.step + 1}: SAFETY stop: {e}")
         ins, q, amps, lift, s_real, s_cmd = self.measure()
+        if mode == "policy" and ins["depth"] <= -GOOD_CLEAR:            # the last good state: outside the hole
+            self.good_rel = np.linalg.inv(self.io.ee("left") @ pht.HOLE_TOOL) @ self.T_cmd
         now = time.monotonic() - self.t0
         blocked = self.block.update(now, s_real, s_cmd) is not None
         safety = tripped is not None or self.edge.update(now, s_real, self.io.raw_js) == "edge_hard" or \
@@ -603,6 +668,7 @@ class SerlServer:
                 if self.reset() and not self.paused:           # PAUSE during the reset: stay IDLE
                     while self.episode_tick():
                         self.poll_commands()
+                    self.after_episode()
                     self.state = wire.FS_IDLE if self.paused else self.state
                     self.t.take_right()
                 t_next = time.monotonic()
@@ -622,6 +688,15 @@ class SerlServer:
                 t_next = time.monotonic()
 
 
+def add_episode_args(ap):
+    ap.add_argument("--failure-mode", choices=("terminate", "intervene"), default="terminate",
+                    help="terminate: a binding / off-axis / blocked trigger ends the episode (fail penalty) and the "
+                         "next RESET retries from the last good state; intervene: machine pull-out, same episode")
+    ap.add_argument("--auto-reset", action="store_true",
+                    help="reset by itself after every episode (default: pull out, then wait for EnvCmd RESET)")
+    ap.add_argument("--max-retries", type=int, default=3, help="RESET AUTO retries of one pair before a new one")
+
+
 def add_seat_args(ap):
     ap.add_argument("--no-seat", action="store_true", help="skip seating the hole block in each reset")
     ap.add_argument("--seat-offset", type=float, default=0.012,
@@ -637,6 +712,7 @@ def seat_from_args(a):
 def main():
     ap = pht.build_parser(__doc__, default_out=str(HERE / "recordings" / "peg_hole_serl"))
     add_seat_args(ap)
+    add_episode_args(ap)
     ap.add_argument("--port-base", type=int, default=7601)
     ap.add_argument("--duration", type=float, default=None, help="s, then quit (tests)")
     ap.add_argument("--images", action="store_true", help="decode the wrist D405s (priv image_t; ROI crops)")
@@ -674,6 +750,9 @@ def main():
             print(f"recording to {t.out}")
         srv = SerlServer(io, a.port_base, t)
         srv.seat = seat_from_args(a)
+        srv.auto_reset, srv.max_retries = a.auto_reset, a.max_retries
+        if t is not None:
+            srv.em.cfg.failure_mode = a.failure_mode
         if a.images:
             srv.cams = images.WristCameras()
         srv.running = bool(a.autostart and t is not None)

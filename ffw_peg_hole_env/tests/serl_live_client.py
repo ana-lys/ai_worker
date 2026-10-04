@@ -28,6 +28,8 @@ def main():
     ap.add_argument("--policy", choices=["hold", "down"], default="hold")
     ap.add_argument("--speed", type=float, default=0.0015, help="m per tick for --policy down")
     ap.add_argument("--episodes", type=int, default=2)
+    ap.add_argument("--reset-mode", choices=wire.RESET_MODE_NAMES, default="AUTO",
+                    help="EnvCmd RESET params[0]: AUTO retries a failed pair from its good state")
     ap.add_argument("--timeout", type=float, default=300.0, help="s for the whole test")
     a = ap.parse_args()
     ctx = zmq.Context()
@@ -37,7 +39,10 @@ def main():
     pub = ctx.socket(zmq.PUB)
     pub.connect(f"tcp://{a.host}:{a.port_base + wire.PORT_CONTROL}")
     time.sleep(0.5)                                           # PUB/SUB join
-    pub.send(wire.encode_env_cmd(wire.RESET, seed=1, episode_id=1))
+    mode = wire.RESET_MODE_NAMES.index(a.reset_mode)
+    reset = lambda: pub.send(wire.encode_env_cmd(wire.RESET, params=(float(mode),) + (0.0,) * 7))  # noqa: E731
+    reset()                                                   # every episode starts with a RESET (gym reset())
+    want_reset = False
     delta = np.zeros(6) if a.policy == "hold" else np.array([0.0, 0.0, -a.speed, 0.0, 0.0, 0.0])
     t0, done, last = time.time(), [], None
     runs = collections.Counter()
@@ -51,6 +56,9 @@ def main():
         if key != last:                                       # log state changes, not every frame
             print(f"[{time.time() - t0:6.1f} s] episode {tag['episode_id']} step {tag['step']:3d}: {wire.FS_NAMES[st]}"
                   + (f" {wire.TR_NAMES[tag['reason']]}" if st == wire.FS_TERMINATED else "")
+                  + (f"  ({'retry %d of episode %d' % (priv['retry_count'], priv['parent_episode']) if priv['reset_kind'] else 'new pair'},"
+                     f" depth {priv['depth'] * 1000:+.1f} mm lateral {priv['lateral'] * 1000:.1f} mm)"
+                     if st == wire.FS_POLICY and tag['step'] == 0 else "")
                   + (f"  action {np.round(np.array(tag['action'][:3]) * 1000, 2)} mm" if st == wire.FS_INTERVENTION else ""))
             last = key
         if st in (wire.FS_POLICY, wire.FS_INTERVENTION, wire.FS_TERMINATED):
@@ -59,9 +67,13 @@ def main():
         runs[wire.FS_NAMES[st]] += 1
         if st == wire.FS_POLICY:
             pub.send(wire.encode_delta((*delta, 0.0), (0.0,) * 7))
-        if st == wire.FS_TERMINATED:
+        if st == wire.FS_TERMINATED and (not done or done[-1][0] != tag["episode_id"]):
             done.append((tag["episode_id"], wire.TR_NAMES[tag["reason"]], dict(ep["states"]), ep["reward"]))
             ep = {"states": collections.Counter(), "reward": 0.0}
+            want_reset = len(done) < a.episodes
+        if st == wire.FS_IDLE and want_reset:                 # the server pulled out and waits: next episode
+            reset()
+            want_reset = False
         if st == wire.FS_FAULT:
             print("server FAULT")
             break
