@@ -138,3 +138,14 @@ ends the episode at once (TERMINATED, reason TR_OFF_AXIS = 9, fail ~ -1), in any
 the rim off axis still triggers the machine intervention. Checks: the 40 model-verify pushes stay
 <= 1.32 mm (median 0.24) from the calibrated axis below the rim (from the uncorrected axis up to
 4.38 mm -- would all have been stopped); the incident stops at 1.14 s, 0.8 mm below the rim.
+
+Interaction zone (user, 2026-10-04, replaces the 3 mm OFF_AXIS stop and the 3 mm near-rim rule):
+within 2 cm of the calibrated axis the peg and hole interact freely (inside the block footprint,
+~+-4 cm for the peg centre, the peg can only land on the block top / chamfer / rim; force rules
+and the gear guard limit that). Outside 2 cm the command is held 5 mm above the rim, and if the
+tip still gets below the rim the machine halts it and intervenes (pull out, trace back).
+TR_OFF_AXIS (9) stays reserved, no longer sent. Live tests (`recordings/peg_hole_serl/20261004_16*`):
+random starts -> held above the rim, TIMEOUT, no contact; near-axis starts with a straight-down
+(base -z) test client -> stopped at the rim (the hole axis is ~5 deg off vertical, so -z drifts
+~1.7 mm across it over 20 mm). Fixed live: trace-back arrival at its fallback target; floor 2 -> 5 mm
+(arm lag overshoot 2.4 mm); PAUSE during a reset no longer starts an episode; --start-xy test option.

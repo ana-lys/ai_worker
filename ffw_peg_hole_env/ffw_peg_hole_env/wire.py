@@ -55,8 +55,8 @@ New messages:
                        frame_state: FS_IDLE, FS_POLICY, FS_INTERVENTION,
                        FS_TERMINATED, FS_RESET, FS_FAULT. reason (on TERMINATED):
                        TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT,
-                       TR_SAFETY, TR_INTERVENTIONS, TR_ABORT, TR_OFF_AXIS (the tip
-                       went below the rim outside the hole). Store POLICY and
+                       TR_SAFETY, TR_INTERVENTIONS, TR_ABORT (TR_OFF_AXIS = 9 is
+                       reserved, no longer sent: off-axis is a machine intervention). Store POLICY and
                        INTERVENTION frames, TERMINATED ends the episode, skip
                        RESET / IDLE / FAULT.
 

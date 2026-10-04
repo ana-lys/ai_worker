@@ -14,10 +14,11 @@ With --allow-motion (slices 3-4): episodes, all automatic after the first EnvCmd
                    or a pushed hole -> FAULT at once (no retries)
   POLICY frames    each ControlCmdDelta (right arm, base_link, applied to the commanded
                    IK EE pose = the pose Obs.ee reports, clipped 6.67 mm / 2 deg per
-                   axis, clamped to a box around the hole and to "below the rim only on the
-                   axis"); no delta for 0.2 s = hold
+                   axis, clamped to a box around the hole and, farther than 2 cm from the
+                   calibrated axis, to above the rim); no delta for 0.2 s = hold
   INTERVENTION     the machine: pull the peg out along the hole axis, trace back to the
-                   last policy pose near the hole top, then the policy again
+                   last policy pose near the hole top, then the policy again (triggers: the tip
+                   below the rim > 2 cm off the axis, push-back > 6 N, blocked, left j7)
   TERMINATED       episode.EpisodeMachine (reward.py rules, blocked, timeout) or a
                    live stop (hard edge force, left j7 hard current); then RESET again
 EnvCmd PAUSE: finish nothing new after the current episode (IDLE); RESUME: go on;
@@ -59,10 +60,11 @@ WATCHDOG_S = 0.2
 # workspace box for the peg tool point, hole tool frame (x = insertion axis up, from the
 # hole tool origin): along x TOP - push - 3 mm .. TOP + 6 cm, across +-6 cm; tilt +-10 deg
 BOX_ACROSS, BOX_UP, BOX_TILT = 0.06, 0.06, np.radians(10.0)
-# below the rim only on the axis: farther than ON_AXIS across it, the peg tool point
-# stays FLOOR above ON_TOP (2026-10-04: a peg that went down beside the block scraped it,
-# and the reset then dragged it sideways into the block, pushing the hole 88 mm)
-ON_AXIS, FLOOR = 0.003, 0.002
+# interaction zone: farther than ZONE from the calibrated axis the peg tool point stays FLOOR
+# above ON_TOP, so it can never head down beside the hole block (2026-10-04 incident); inside
+# it the peg may touch the block top / chamfer / rim (the force rules and the gear guard limit
+# that). episode.EpisodeMachine halts + intervenes if it gets below the rim outside anyway.
+ZONE, FLOOR = 0.02, 0.005                              # FLOOR covers the arm's ~0.2 s lag (2.4 mm overshoot seen live)
 HOLE_SHIFT_MAX = 0.006                                  # m: hole pushed sideways -> stop (resets too)
 # Gear guard, every control tick in every phase (episode, intervention, retract, reset):
 # left j7 current change from its unloaded reference > J7_HARD at once, or > J7_SUSTAIN for
@@ -251,8 +253,8 @@ class SerlServer:
                         [pht.TOP + BOX_UP, BOX_ACROSS, BOX_ACROSS], [BOX_TILT] * 3, R_ref)
         T_peg, _ = box.clamp(T_peg)
         p = np.linalg.inv(H) @ np.r_[T_peg[:3, 3], 1.0]                   # x = height on the axis
-        if np.hypot(p[1] - self.axis_c[0], p[2] - self.axis_c[1]) > ON_AXIS and p[0] < pht.TOP + FLOOR:
-            # beside the (calibrated) hole: stay above the rim
+        if np.hypot(p[1] - self.axis_c[0], p[2] - self.axis_c[1]) > ZONE and p[0] < pht.TOP + FLOOR:
+            # outside the interaction zone: stay above the rim
             p[0] = pht.TOP + FLOOR
             T_peg = T_peg.copy()
             T_peg[:3, 3] = (H @ p)[:3]
@@ -266,13 +268,16 @@ class SerlServer:
         try:
             self.retract()
             self.j7_ref, self.j7_since = float(self.io.effort[6]), None        # peg clear: unloaded reference
-            ok = self.t.hw_reset()
+            ok = self.t.hw_reset(self.start_pair())
         except (phr.LagTrip, HoleMoved, GuardTrip) as e:
             print(f"reset stopped: {e}")
             ok = False
         if not ok:
             self.watch, self.state, self.running = None, wire.FS_FAULT, False
             print("reset failed: FAULT, holding (check the robot, then EnvCmd RESET)")
+            return False
+        if self.paused:                                       # PAUSE arrived during the reset
+            self.state = wire.FS_IDLE
             return False
         self.t.take_right()
         self.episode_id += 1
@@ -289,6 +294,24 @@ class SerlServer:
         self.publish()                                        # step 0: the observation after the reset
         print(f"episode {self.episode_id}: start, peg depth {ins['depth'] * 1000:+.1f} mm")
         return True
+
+    def start_pair(self):
+        """None = the teach tool's random reset (peg start +- --xy across, tilted). With
+        --start-xy (tests): a random hole, the peg 2 cm above the rim on the CALIBRATED axis
+        +- start_xy across it, aligned -- straight down then goes in."""
+        xy = getattr(self.t.a, "start_xy", None)
+        if xy is None:
+            return None
+        rng = self.t.rng
+        for _ in range(20):
+            hole_ee, _ = self.t.sample()
+            roll = Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix()
+            off = self.offset_mm / 1000.0 + rng.uniform(-xy, xy, 2)
+            peg_rel = (pht.HOLE_TOOL @ phs.T_from([pht.TOP + 0.02, 0, 0], roll) @ phs.T_from([0.0, *off], np.eye(3))
+                       @ np.linalg.inv(pht.PEG_TOOL))
+            if self.t.check_sample(hole_ee, peg_rel)[0]:
+                return hole_ee, peg_rel
+        return None
 
     def retract(self):
         """Peg straight up the hole axis (keeping its offset) until its tool point is CLEAR
@@ -309,6 +332,14 @@ class SerlServer:
         finally:
             self.watch, self.retract_floor = None, None
 
+    def trace_target(self):
+        """Where the machine's trace-back goes: the last policy pose near the hole top, or (none
+        yet) the peg aligned on the calibrated axis just above the rim."""
+        if self.em.restore is not None:
+            return self.em.restore
+        off = phs.T_from([0.0, *(self.offset_mm / 1000.0)], np.eye(3))
+        return self.t.peg_target(pht.TOP + self.em.cfg.clear, off)[0] @ self.t.st.arms["right"].map
+
     def episode_tick(self):
         """One 15 Hz frame of an episode: act (policy or machine), let the robot move for the
         rest of the period, measure, tag, publish. -> False once TERMINATED."""
@@ -321,9 +352,7 @@ class SerlServer:
         elif mode == "pull_out":
             d = self.em.pull_out_delta((self.io.ee("left") @ pht.HOLE_TOOL)[:3, 0])
         else:                                                 # trace_back
-            target = self.em.restore if self.em.restore is not None else \
-                self.t.peg_target(pht.TOP + self.em.cfg.clear, phs.T_from([0.0, *(self.offset_mm / 1000.0)], np.eye(3)))[0] \
-                @ self.t.st.arms["right"].map
+            target = self.trace_target()
             d = self.em.toward_delta(self.T_cmd, target)
         self.T_cmd = self.command_site(apply_delta(self.T_cmd, d))
         self.action = d
@@ -339,8 +368,8 @@ class SerlServer:
         blocked = self.block.update(now, s_real, s_cmd) is not None
         safety = tripped is not None or self.edge.update(now, s_real, self.io.raw_js) == "edge_hard" or \
             abs(self.io.effort[6] - self.e0[6]) > self.t.a.hard_j7 or self.abort
-        arrived = mode == "trace_back" and self.em.restore is not None and \
-            all(e < tol for e, tol in zip(pose_error(self.T_cmd, self.em.restore), (0.001, np.radians(1.0))))
+        arrived = mode == "trace_back" and \
+            all(e < tol for e, tol in zip(pose_error(self.T_cmd, self.trace_target()), (0.001, np.radians(1.0))))
         r = self.em.tick(period, ins, q, amps, lift, self.T_cmd, blocked=blocked, safety=safety, arrived=arrived,
                          hole_shift=self.sideways(self.hole_ref), dj7=abs(float(self.io.effort[6]) - self.j7_ref))
         if self.abort and r["frame_state"] == wire.FS_TERMINATED:
@@ -362,7 +391,7 @@ class SerlServer:
         while duration is None or time.monotonic() - t0 < duration:
             self.poll_commands()
             if self.t is not None and self.running and not self.paused:
-                if self.reset():
+                if self.reset() and not self.paused:           # PAUSE during the reset: stay IDLE
                     while self.episode_tick():
                         self.poll_commands()
                     self.state = wire.FS_IDLE if self.paused else self.state
@@ -388,6 +417,8 @@ def main():
     ap = pht.build_parser(__doc__, default_out=str(HERE / "recordings" / "peg_hole_serl"))
     ap.add_argument("--port-base", type=int, default=7601)
     ap.add_argument("--duration", type=float, default=None, help="s, then quit (tests)")
+    ap.add_argument("--start-xy", type=float, default=None,
+                    help="m (tests): start the peg aligned 2 cm above the rim within +- this of the calibrated axis")
     a = ap.parse_args()
     pht.apply_setup(a)
     rclpy.init(signal_handler_options=rclpy.signals.SignalHandlerOptions.NO)
