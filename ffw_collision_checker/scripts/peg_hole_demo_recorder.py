@@ -61,7 +61,7 @@ HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "config"
 POOL_FILE = CONFIG / "peg_hole_offset_pool.json"
 MODEL_FILE = srvmod.OFFSET_MODEL
-ALIGN_INIT = HERE / "recordings" / "peg_hole_align" / "20261004_152716" / "align.json"
+ALIGN_INIT = HERE / "recordings" / "peg_hole_align" / "20261005_005434" / "align.json"   # was 20261004_152716 (block moved)
 DIMS = ("hole_y", "hole_z", "hole_height", "hole_tilt_y", "hole_tilt_z",
         "peg_s", "peg_y", "peg_z", "peg_tilt_x", "peg_tilt_y", "peg_tilt_z")
 KEEP = (wire.FS_POLICY, wire.FS_INTERVENTION, wire.FS_TERMINATED)
@@ -183,6 +183,8 @@ class Recorder:
                 raise SystemExit(f"{self.index_file}: plan {k} = {p[k]}, args say {arg}; use the same args or "
                                  f"another --demo-dir")
         self.U = plan_poses(a, max(512, 4 * p["n"]))
+        self.t.a.target = self.index["plan"]["n"]       # the teach window's "episodes recorded: n / target"
+        self.t.episodes = self.t.successes = self.n_done()
         self.pool = load_pool()
         self.model = json.loads(MODEL_FILE.read_text()) if MODEL_FILE.exists() else fit(self.pool)
 
@@ -378,6 +380,7 @@ class Recorder:
                 if good:
                     rec["status"] = "done"
                     self.save_index()
+                    self.t.episodes = self.t.successes = self.n_done()
                     break
                 self.save_index()
                 if a.no_manual and self.fails_since_calibration(rec) > a.auto_retries:
