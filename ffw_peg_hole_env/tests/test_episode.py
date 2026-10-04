@@ -120,6 +120,28 @@ def test_other_terminations():
     check("push-back while clear of the hole (free air): no trigger", r[-1]["mode"] == "policy")
 
 
+def test_real_robot_rules():
+    m = machine()
+    m.start(9, ins(-20, 60), None, None, None, pose(-20))
+    r = run(m, [(-10, 0.0, 60.0), (-2, 0.0, 60.0), (2, 0.0, 60.0)])
+    check("incident case: peg 60 mm off axis going below the rim -> machine steps in at the rim",
+          r[-1]["mode"] == "pull_out" and r[-2]["mode"] == "policy" and r[-1]["step"] == 3)
+    m.start(10, ins(-20), None, None, None, pose(-20))
+    m.force[0] = 0.0
+    r1 = m.tick(DT, ins(5), None, None, None, pose(5), dj7=250.0)
+    r2 = m.tick(DT, ins(6), None, None, None, pose(6), dj7=350.0)
+    check("left j7 +250 mA in the hole: no trigger; +350 mA: machine steps in",
+          r1["mode"] == "policy" and r2["mode"] == "pull_out")
+    m.start(11, ins(-20), None, None, None, pose(-20))
+    r = m.tick(DT, ins(5), None, None, None, pose(5), hole_shift=0.007)
+    check("hole pushed 7 mm sideways: TERMINATED SAFETY", r["frame_state"] == wire.FS_TERMINATED and r["reason"] == wire.TR_SAFETY)
+    m.start(12, ins(-20), None, None, None, pose(-20))
+    run(m, [(-3, 0.0, 0.0), (5, 7.0, 0.0)])                   # -> pull_out
+    r = m.tick(DT, ins(3), None, None, None, pose(3), hole_shift=0.007)
+    check("hole pushed during the machine's pull-out: TERMINATED SAFETY too",
+          r["frame_state"] == wire.FS_TERMINATED and r["reason"] == wire.TR_SAFETY)
+
+
 def test_machine_deltas():
     m = machine()
     d = m.pull_out_delta(np.array([0.0, 0.0, 1.0]))
@@ -134,6 +156,7 @@ if __name__ == "__main__":
     test_intervention_cycle()
     test_intervention_limit()
     test_other_terminations()
+    test_real_robot_rules()
     test_machine_deltas()
     print("\nall passed" if not failures else f"\n{len(failures)} failed: {failures}")
     sys.exit(1 if failures else 0)

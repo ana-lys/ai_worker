@@ -20,7 +20,21 @@ Frame states (wire.FS_*):
 
 Intervention triggers (only while the peg can touch the hole): push-back above
 f_intervene (below reward.f_hard, so the machine steps in before the jam fail),
-blocked progress, or more than lateral_max off the axis within rim_band of the rim.
+blocked progress, more than lateral_max off the axis within rim_band of the rim, the
+tip below the rim more than lateral_hole off the axis (beside the hole, not in it),
+or the left j7 current changed more than j7_intervene since the peg was last clear.
+
+Safety (TERMINATED SAFETY, any mode): the hole pushed sideways more than
+hole_shift_max since the peg was last clear, or a live stop of the robot.
+
+"Can touch the hole" on the real robot = the tip within touch_clear above the rim or
+lower, at ANY offset: the peg's side rubs the block / the left gripper when it goes
+down beside it (2026-10-04 incident), so the sim's block-footprint shortcut is off
+(footprint=None).
+
+Thresholds from the 2026-10-04 recordings, measured from the last tick the peg was
+clear: clean pushes moved the hole sideways p95 2.2 / max 4.2 mm and changed left j7
+p95 ~200 mA; stalls 300-460 mA; the incident's reset pushed the hole 88 mm.
 """
 from dataclasses import dataclass
 
@@ -37,6 +51,11 @@ class EpisodeConfig:
     f_intervene: float = 6.0            # N push-back -> machine steps in (fail is at reward f_hard = 10 N)
     lateral_max: float = 0.003          # m off the axis within rim_band of the rim -> machine steps in
     rim_band: float = 0.006             # m
+    lateral_hole: float = 0.003         # m: tip below the rim farther than this off the axis = beside the hole
+    j7_intervene: float = 300.0         # mA left j7 change since last clear -> machine steps in
+    hole_shift_max: float = 0.006       # m hole pushed sideways since last clear -> SAFETY
+    touch_clear: float = 0.001          # m: tip above the rim by more than this = cannot touch (real robot)
+    footprint: float = None             # m peg-centre block half-width for the sim shortcut; None = real robot
     max_interventions: int = 3
     clear: float = 0.005                # m: pull out until the tip is this far above the rim
     top_lo: float = 0.002               # m: "near the hole top" = tip top_lo..top_hi above the rim,
@@ -49,7 +68,8 @@ class EpisodeConfig:
 class EpisodeMachine:
     def __init__(self, cfg=None, reward_cfg=None, success_depth=0.034):
         self.cfg = cfg or EpisodeConfig()
-        self.reward = PegHoleReward(reward_cfg or RewardConfig(), success_depth)
+        self.reward = PegHoleReward(reward_cfg or RewardConfig(), success_depth,
+                                    block_halfwidth=self.cfg.footprint if self.cfg.footprint is not None else np.inf)
         self.episode_id, self.step, self.mode = 0, 0, "idle"
 
     def start(self, episode_id, ins, q, amps, lift, T_peg):
@@ -65,14 +85,22 @@ class EpisodeMachine:
         if c.top_lo <= -ins["depth"] <= c.top_hi and ins["lateral"] <= c.lateral_top:
             self.restore = T_peg.copy()
 
-    def _trigger(self, ins, f_pb, blocked):
-        c = self.cfg
-        if self.reward.clear_of_hole(ins):
-            return False
-        return f_pb > c.f_intervene or blocked or (ins["depth"] <= c.rim_band and ins["lateral"] > c.lateral_max)
+    def can_touch(self, ins):
+        return ins["depth"] >= -self.cfg.touch_clear and not self.reward.clear_of_hole(ins)
 
-    def tick(self, dt, ins, q, amps, lift, T_peg, blocked=False, safety=False, arrived=False):
-        """One frame, after the robot moved. -> dict(frame_state, reason, reward, mode, terms)."""
+    def _trigger(self, ins, f_pb, blocked, dj7):
+        c = self.cfg
+        if not self.can_touch(ins):
+            return False
+        return (f_pb > c.f_intervene or blocked or dj7 > c.j7_intervene
+                or (ins["depth"] <= c.rim_band and ins["lateral"] > c.lateral_max)
+                or (ins["depth"] > 0.0 and ins["lateral"] > c.lateral_hole))
+
+    def tick(self, dt, ins, q, amps, lift, T_peg, blocked=False, safety=False, arrived=False,
+             hole_shift=0.0, dj7=0.0):
+        """One frame, after the robot moved. hole_shift [m] = the hole's sideways move and
+        dj7 [mA] = |left j7 current change|, both since the peg was last clear (the server
+        keeps that reference). -> dict(frame_state, reason, reward, mode, terms)."""
         c = self.cfg
         self.step += 1
         self.t += dt
@@ -83,7 +111,7 @@ class EpisodeMachine:
         reason = wire.TR_NONE
         if driving == "policy":
             self._remember(ins, T_peg)
-        if safety:
+        if safety or hole_shift > c.hole_shift_max:
             reason = wire.TR_SAFETY
         elif success:
             reason = wire.TR_SUCCESS
@@ -91,7 +119,7 @@ class EpisodeMachine:
             reason = wire.TR_RIM if terms["rim_strike"] else wire.TR_JAM
         elif self.t >= c.timeout_s - 1e-6:                     # summed dt drifts below the exact value
             reason = wire.TR_TIMEOUT
-        elif driving == "policy" and self._trigger(ins, f_pb, blocked):
+        elif driving == "policy" and self._trigger(ins, f_pb, blocked, dj7):
             if self.interventions >= c.max_interventions:
                 reason = wire.TR_BLOCKED if blocked else wire.TR_INTERVENTIONS
             else:
