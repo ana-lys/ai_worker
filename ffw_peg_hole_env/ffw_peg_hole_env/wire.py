@@ -55,7 +55,8 @@ New messages:
                        frame_state: FS_IDLE, FS_POLICY, FS_INTERVENTION,
                        FS_TERMINATED, FS_RESET, FS_FAULT. reason (on TERMINATED):
                        TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT,
-                       TR_SAFETY, TR_INTERVENTIONS, TR_ABORT. Store POLICY and
+                       TR_SAFETY, TR_INTERVENTIONS, TR_ABORT, TR_OFF_AXIS (the tip
+                       went below the rim outside the hole). Store POLICY and
                        INTERVENTION frames, TERMINATED ends the episode, skip
                        RESET / IDLE / FAULT.
 
@@ -92,8 +93,8 @@ STATE_NAMES = ["IDLE", "RESETTING", "READY", "RUNNING", "PAUSED", "DONE", "FAULT
 # Frame.frame_state / Frame.reason
 FS_IDLE, FS_POLICY, FS_INTERVENTION, FS_TERMINATED, FS_RESET, FS_FAULT = range(6)
 FS_NAMES = ["IDLE", "POLICY", "INTERVENTION", "TERMINATED", "RESET", "FAULT"]
-TR_NONE, TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT, TR_SAFETY, TR_INTERVENTIONS, TR_ABORT = range(9)
-TR_NAMES = ["NONE", "SUCCESS", "JAM", "RIM", "BLOCKED", "TIMEOUT", "SAFETY", "INTERVENTIONS", "ABORT"]
+TR_NONE, TR_SUCCESS, TR_JAM, TR_RIM, TR_BLOCKED, TR_TIMEOUT, TR_SAFETY, TR_INTERVENTIONS, TR_ABORT, TR_OFF_AXIS = range(10)
+TR_NAMES = ["NONE", "SUCCESS", "JAM", "RIM", "BLOCKED", "TIMEOUT", "SAFETY", "INTERVENTIONS", "ABORT", "OFF_AXIS"]
 # EnvStatus.backend
 BACKEND_SIM, BACKEND_REAL = 0, 1
 

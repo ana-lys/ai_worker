@@ -15,14 +15,16 @@ Frame states (wire.FS_*):
                 pose the peg had near the hole top); the policy resumes after it,
                 same episode; at most max_interventions per episode
   TERMINATED    last frame (reason wire.TR_*): success / jam / rim (reward.py rules),
-                blocked, timeout, safety (a live stop of the robot), interventions
-                (one more was needed than allowed)
+                off_axis (the tip went below the rim more than lateral_hole off the
+                axis: outside the hole -- stopped at once, in any mode), blocked,
+                timeout, safety (a live stop of the robot), interventions (one more
+                was needed than allowed)
 
 Intervention triggers (only while the peg can touch the hole): push-back above
 f_intervene (below reward.f_hard, so the machine steps in before the jam fail),
-blocked progress, more than lateral_max off the axis within rim_band of the rim, the
-tip below the rim more than lateral_hole off the axis (beside the hole, not in it),
-or the left j7 current changed more than j7_intervene since the peg was last clear.
+blocked progress, more than lateral_max off the axis within rim_band of the rim
+(approaching it off axis), or the left j7 current changed more than j7_intervene since
+the peg was last clear.
 
 Safety (TERMINATED SAFETY, any mode): the hole pushed sideways more than
 hole_shift_max since the peg was last clear, or a live stop of the robot.
@@ -93,8 +95,7 @@ class EpisodeMachine:
         if not self.can_touch(ins):
             return False
         return (f_pb > c.f_intervene or blocked or dj7 > c.j7_intervene
-                or (ins["depth"] <= c.rim_band and ins["lateral"] > c.lateral_max)
-                or (ins["depth"] > 0.0 and ins["lateral"] > c.lateral_hole))
+                or (ins["depth"] <= c.rim_band and ins["lateral"] > c.lateral_max))
 
     def tick(self, dt, ins, q, amps, lift, T_peg, blocked=False, safety=False, arrived=False,
              hole_shift=0.0, dj7=0.0):
@@ -115,6 +116,8 @@ class EpisodeMachine:
             reason = wire.TR_SAFETY
         elif success:
             reason = wire.TR_SUCCESS
+        elif ins["depth"] > 0.0 and ins["lateral"] > c.lateral_hole:    # below the rim, outside the hole
+            reason = wire.TR_OFF_AXIS
         elif failed and driving == "policy":                    # the machine pulling out may read force too
             reason = wire.TR_RIM if terms["rim_strike"] else wire.TR_JAM
         elif self.t >= c.timeout_s - 1e-6:                     # summed dt drifts below the exact value

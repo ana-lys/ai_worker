@@ -132,3 +132,9 @@ the peg into the block). Gear guard in the server, every control tick while anyt
 (episode, intervention, retract, reset): left j7 change from its unloaded reference > 450 mA at once,
 or > 300 mA for 0.35 s -> SAFETY / FAULT; during a retract only a rising load trips. Replays: the
 incident trips at 14.01 s (before the drag started ~14.4 s); 0/205 clean pushes trip.
+
+OFF_AXIS stop (user, 2026-10-04): the tip below the rim more than 3 mm from the calibrated axis
+ends the episode at once (TERMINATED, reason TR_OFF_AXIS = 9, fail ~ -1), in any mode; approaching
+the rim off axis still triggers the machine intervention. Checks: the 40 model-verify pushes stay
+<= 1.32 mm (median 0.24) from the calibrated axis below the rim (from the uncorrected axis up to
+4.38 mm -- would all have been stopped); the incident stops at 1.14 s, 0.8 mm below the rim.
