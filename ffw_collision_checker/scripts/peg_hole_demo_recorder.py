@@ -19,14 +19,15 @@ settle, then straight down the axis at --insert-speed. A demo counts only if it 
 SUCCESS with no machine intervention (--allow-interventions to keep those too).
 
 Any other ending -> manual calibration at that pose: the peg goes up the axis, then to
---hover above the rim at the model's offset, orientation held aligned to the live axis;
+--manual-hover (1.5 mm, as the align GUI) above the rim at the model's offset, orientation held aligned to the live axis;
 you correct it with the right SpaceMouse (translation) and press Enter in the teach window.
 That alignment goes into the offset pool (config/peg_hole_offset_pool.json; one entry per
 demo pose, a re-calibration replaces it), the model is refit and saved, and the same pose
 is retaken. Keys in the teach window: Enter = record alignment, s = skip this pose,
 q = quit after this step, space = stop now.
 
-Resumable: <demo-dir>/index.json keeps the plan and every pose's status; a rerun continues.
+Resumable: <demo-dir>/index.json keeps the plan and every pose's status; a rerun continues
+(a pose whose last try failed resumes with its manual calibration).
 Output: <demo-dir>/episodes/pose_KKK.npz (the counted demos), failed/pose_KKK_tryN.npz
 (the rest), each: frames (N, wire.FRAME_BYTES) uint8 raw Frames (wire.decode_frame),
 img_right / img_left (N, 128, 128, 3) RGB uint8, img_ok (N, 2), meta (JSON string).
@@ -253,19 +254,25 @@ class Recorder:
                "time": datetime.now().isoformat(timespec="seconds")}
         return res
 
-    def manual(self, k, pose, off):
-        """Manual calibration at this pose -> 'enter' (recorded + refit) / 's' / 'q'."""
+    def manual(self, k, pose, off, move_hole=False):
+        """Manual calibration at this pose -> 'enter' (recorded + refit) / 's' / 'q'. move_hole: put
+        the hole at the pose first (resumed run: the arms may have moved since)."""
         srv, t, a = self.srv, self.t, self.a
         srv.state = wire.FS_IDLE
         while True:
             try:
                 srv.retract()
+                if move_hole:
+                    if not t.hw_reset(pose["pair"]):
+                        raise phr.LagTrip("right", float("nan"))
+                    srv.retract()
+                    move_hole = False
                 OFF = phs.T_from([0.0, off[0] / 1000.0, off[1] / 1000.0], np.eye(3))
-                T, _ = t.peg_target(pht.TOP + a.hover, OFF)
+                T, _ = t.peg_target(pht.TOP + a.manual_hover, OFF)
                 t.move_right(T, a.speed, "hover")
                 rel_tool = phs.T_from([pht.TOP, 0.0, 0.0], Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix())
                 R_al = (self.io_left() @ pht.HOLE_TOOL @ rel_tool)[:3, :3]
-                t.manual_trans = R_al @ np.array([a.hover, off[0] / 1000.0, off[1] / 1000.0])
+                t.manual_trans = R_al @ np.array([a.manual_hover, off[0] / 1000.0, off[1] / 1000.0])
                 t.state = "manual"
                 print(f"  MANUAL: align the peg by eye with the right SpaceMouse (model said y {off[0]:+.2f} "
                       f"z {off[1]:+.2f} mm), Enter in the teach window = record; s = skip pose; q = quit")
@@ -332,7 +339,19 @@ class Recorder:
                 print(f"pose {k}: unreachable ({why}), next")
                 k += 1
                 continue
+            last = rec["attempts"][-1] if rec["attempts"] else None
+            need_manual = last is not None and last.get("reason") not in (None, "FAULT")
             while True:
+                if need_manual:                               # resumed after a failed try: calibrate first
+                    need_manual = False
+                    print(f"\npose {k}: last try {last['reason']} -- manual calibration first")
+                    kk = self.manual(k, pose, predict(self.model, pose, a.offset), move_hole=True)
+                    if kk == "s":
+                        rec["status"] = "skipped"
+                        self.save_index()
+                        break
+                    if kk == "q":
+                        raise Quit()
                 attempt = len(rec["attempts"]) + 1
                 off = predict(self.model, pose, a.offset)
                 print(f"\npose {k} ({self.n_done()}/{n} done) try {attempt}: hole y {pose['grid_m'][0] * 100:+.1f} "
@@ -394,6 +413,8 @@ def main():
     ap.add_argument("--height", type=float, nargs=2, default=[-0.02, 0.0], help="m, hole along its axis")
     ap.add_argument("--tilt-range", type=float, default=3.0, help="deg, hole tilt about each cross axis")
     ap.add_argument("--hover", type=float, default=0.005, help="m above the rim the expert aligns at")
+    ap.add_argument("--manual-hover", type=float, default=0.0015,
+                    help="m above the rim for the manual calibration (the align GUI's 1.5 mm)")
     ap.add_argument("--hover-speed", type=float, default=0.03, help="m/s to the hover pose")
     ap.add_argument("--insert-speed", type=float, default=None, help="m/s down the axis (default --speed)")
     ap.add_argument("--settle-ticks", type=int, default=5, help="ticks on the hover pose before inserting")
