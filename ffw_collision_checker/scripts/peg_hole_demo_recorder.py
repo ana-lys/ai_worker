@@ -18,7 +18,8 @@ Expert: the peg-tool offset from the fitted model (config/peg_hole_offset_model.
 settle, then straight down the axis at --insert-speed. A demo counts only if it ends
 SUCCESS with no machine intervention (--allow-interventions to keep those too).
 
-Any other ending -> manual calibration at that pose: the peg goes up the axis, then to
+Any other ending -> the expert retries the pose --auto-retries times (1), then manual
+calibration at that pose: the peg goes up the axis, then to
 --manual-hover (1.5 mm, as the align GUI) above the rim at the model's offset, orientation held aligned to the live axis;
 you correct it with the right SpaceMouse (translation) and press Enter in the teach window.
 That alignment goes into the offset pool (config/peg_hole_offset_pool.json; one entry per
@@ -311,6 +312,16 @@ class Recorder:
     def io_left(self):
         return self.srv.io.ee("left")
 
+    @staticmethod
+    def fails_since_calibration(rec):
+        """Failed expert tries of a pose since its last manual calibration (FAULTs don't count)."""
+        n = 0
+        for e in reversed(rec["attempts"]):
+            if "calibrated_mm" in e:
+                break
+            n += e.get("reason") not in (None, "FAULT")
+        return n
+
     def add_to_pool(self, k, pose, y, z):
         eid = f"demo:{self.dir.name}:{k}"
         e = {"id": eid, "grid_m": pose["grid_m"], "hole_height_m": pose["hole_height_m"],
@@ -339,12 +350,11 @@ class Recorder:
                 print(f"pose {k}: unreachable ({why}), next")
                 k += 1
                 continue
-            last = rec["attempts"][-1] if rec["attempts"] else None
-            need_manual = last is not None and last.get("reason") not in (None, "FAULT")
+            need_manual = self.fails_since_calibration(rec) > a.auto_retries
             while True:
-                if need_manual:                               # resumed after a failed try: calibrate first
+                if need_manual:                               # resumed with the retries used up: calibrate first
                     need_manual = False
-                    print(f"\npose {k}: last try {last['reason']} -- manual calibration first")
+                    print(f"\npose {k}: {self.fails_since_calibration(rec)} failed tries -- manual calibration first")
                     kk = self.manual(k, pose, predict(self.model, pose, a.offset), move_hole=True)
                     if kk == "s":
                         rec["status"] = "skipped"
@@ -352,7 +362,10 @@ class Recorder:
                         break
                     if kk == "q":
                         raise Quit()
-                attempt = len(rec["attempts"]) + 1
+                    rec["attempts"].append({"calibrated_mm": [self.pool["entries"][-1]["y_mm"],
+                                                              self.pool["entries"][-1]["z_mm"]]})
+                    self.save_index()
+                attempt = sum("calibrated_mm" not in e for e in rec["attempts"]) + 1
                 off = predict(self.model, pose, a.offset)
                 print(f"\npose {k} ({self.n_done()}/{n} done) try {attempt}: hole y {pose['grid_m'][0] * 100:+.1f} "
                       f"z {pose['grid_m'][1] * 100:+.1f} cm, height {pose['hole_height_m'] * 1000:+.1f} mm, tilt "
@@ -389,6 +402,12 @@ class Recorder:
                     self.save_index()
                     break
                 self.save_index()
+                if self.fails_since_calibration(rec) <= a.auto_retries:
+                    print(f"  retrying automatically ({self.fails_since_calibration(rec)} of "
+                          f"{a.auto_retries + 1} tries before manual calibration)")
+                    if self.key() == "q":
+                        raise Quit()
+                    continue
                 kk = self.manual(k, pose, off)
                 if kk == "s":
                     rec["status"] = "skipped"
@@ -396,6 +415,9 @@ class Recorder:
                     break
                 if kk == "q":
                     raise Quit()
+                rec["attempts"].append({"calibrated_mm": [self.pool["entries"][-1]["y_mm"],
+                                                          self.pool["entries"][-1]["z_mm"]]})
+                self.save_index()
                 if self.key() == "q":
                     raise Quit()
             if self.key() == "q":
@@ -413,6 +435,8 @@ def main():
     ap.add_argument("--height", type=float, nargs=2, default=[-0.02, 0.0], help="m, hole along its axis")
     ap.add_argument("--tilt-range", type=float, default=3.0, help="deg, hole tilt about each cross axis")
     ap.add_argument("--hover", type=float, default=0.005, help="m above the rim the expert aligns at")
+    ap.add_argument("--auto-retries", type=int, default=1,
+                    help="expert retries of a failed pose before asking for manual calibration")
     ap.add_argument("--manual-hover", type=float, default=0.0015,
                     help="m above the rim for the manual calibration (the align GUI's 1.5 mm)")
     ap.add_argument("--hover-speed", type=float, default=0.03, help="m/s to the hover pose")
