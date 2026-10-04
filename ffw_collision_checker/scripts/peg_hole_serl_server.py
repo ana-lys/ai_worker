@@ -35,6 +35,7 @@ import json
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +49,7 @@ sys.path.insert(0, str(HERE.parents[1] / "ffw_peg_hole_env"))
 sys.path.insert(0, str(HERE.parents[1] / "ffw_zmqinterface"))
 from ffw_peg_hole_env import effort, images, observation, wire  # noqa: E402
 from ffw_peg_hole_env.episode import EpisodeMachine  # noqa: E402
-from ffw_peg_hole_env.geometry import SafetyBox, apply_delta, clip_delta, pose_error  # noqa: E402
+from ffw_peg_hole_env.geometry import SafetyBox, apply_delta, clip_delta, delta_between, pose_error  # noqa: E402
 from ffw_zmqinterface import gateway_node as gwn, protocol as gw  # noqa: E402
 import peg_hole_random as phr  # noqa: E402
 import peg_hole_stroke as phs  # noqa: E402
@@ -79,6 +80,74 @@ HOLE_SHIFT_MAX = 0.006                                  # m: hole pushed sideway
 # ~0.05 s into the drag). During a retract only a RISE of the load trips (unloading is fine).
 J7_HARD, J7_SUSTAIN, J7_HOLD, J7_RISE = 450.0, 300.0, 0.35, 150.0
 OFFSET_MODEL = HERE.parent / "config" / "peg_hole_offset_model.json"
+
+
+# The scripted expert's settings (peg_hole_demo_recorder.py exposes them as options; the 100 demos
+# used these values). Also the machine intervention in --failure-mode intervene.
+EXPERT_CFG = types.SimpleNamespace(hover=0.005, hover_speed=0.03, insert_speed=0.01, settle_ticks=5,
+                                   align_tol=0.0004, hole_still=0.0002, align_gain=0.15, align_timeout=3.0)
+
+
+class Expert:
+    """Over the (offset) hole axis at hover; wait there until the hole has stopped moving and the
+    MEASURED peg is on the calibrated axis (closing the loop on the arm's tracking error, which
+    left ~1 mm at the rim open-loop); then straight down the axis, keeping that correction.
+    2026-10-04 demos: open-loop first tries reached the rim with the hole still settling
+    (0.6 mm/s, retries 0.08) and the peg +-1 mm off its command -- most second tries worked."""
+
+    def __init__(self, srv, a, off_mm):
+        """a: EXPERT_CFG-like (hover, hover_speed, insert_speed, settle_ticks, align_tol, hole_still,
+        align_gain, align_timeout); off_mm: the peg-tool (y, z) offset to insert at."""
+        self.srv, self.a = srv, a
+        self.off_mm = np.asarray(off_mm, float)
+        c, s_ = np.cos(np.radians(pht.ROLL)), np.sin(np.radians(pht.ROLL))
+        self.R2 = np.array([[c, -s_], [s_, c]])              # peg-tool (y, z) -> hole-tool (y, z)
+        self.corr = np.zeros(2)                             # hole-tool frame correction [m]
+        self.phase, self.settled, self.n_int, self.k_align = "approach", 0, srv.em.interventions, 0
+        self.s = pht.TOP + a.hover
+        self.hole_hist = []
+
+    def target(self, s):
+        t = self.srv.t
+        off = self.off_mm / 1000.0 - self.R2.T @ self.corr  # command shifted against the measured error
+        return t.peg_target(s, phs.T_from([0.0, *off], np.eye(3)))[0] @ t.st.arms["right"].map
+
+    def measured(self):
+        """(peg lateral error from the calibrated axis in the hole-tool frame (y, z) [m], hole speed [m/s])."""
+        srv = self.srv
+        H = srv.io.ee("left") @ pht.HOLE_TOOL
+        P = np.linalg.inv(H) @ srv.io.ee("right") @ pht.PEG_TOOL
+        self.hole_hist = (self.hole_hist + [H[:3, 3].copy()])[-6:]
+        v = np.linalg.norm(self.hole_hist[-1] - self.hole_hist[0]) * HZ / (len(self.hole_hist) - 1) \
+            if len(self.hole_hist) > 1 else np.inf
+        return P[1:3, 3] - srv.axis_c, v
+
+    def delta(self):
+        srv, a = self.srv, self.a
+        e, v_hole = self.measured()
+        if srv.em.interventions != self.n_int:               # the machine stepped in: start over from hover
+            self.n_int, self.phase, self.settled, self.s = srv.em.interventions, "approach", 0, pht.TOP + a.hover
+        if self.phase in ("approach", "align"):
+            tgt = self.target(pht.TOP + a.hover)
+            if self.phase == "approach":
+                err = pose_error(srv.T_cmd, tgt)
+                self.settled = self.settled + 1 if err[0] < 2e-4 and err[1] < np.radians(0.2) else 0
+                if self.settled >= a.settle_ticks:
+                    self.phase, self.settled, self.k_align = "align", 0, 0
+            else:
+                self.k_align += 1
+                self.corr = np.clip(self.corr + a.align_gain * e, -0.003, 0.003)
+                ok = np.linalg.norm(e) < a.align_tol and v_hole < a.hole_still
+                self.settled = self.settled + 1 if ok else 0
+                if self.settled >= a.settle_ticks or self.k_align >= a.align_timeout * HZ:
+                    print(f"    aligned: peg {np.linalg.norm(e) * 1000:.2f} mm off the axis, hole "
+                          f"{v_hole * 1000:.2f} mm/s, correction {np.round(self.corr * 1000, 2)} mm, "
+                          f"{self.k_align / HZ:.1f} s{' (timeout)' if self.settled < a.settle_ticks else ''}")
+                    self.phase = "insert"
+            return clip_delta(delta_between(srv.T_cmd, tgt), a.hover_speed / HZ, MAX_ROT)
+        self.s = max(self.s - a.insert_speed / HZ, pht.TOP - srv.t.a.push - 0.002)
+        return clip_delta(delta_between(srv.T_cmd, self.target(self.s)), MAX_TRANS, MAX_ROT)
+
 
 
 class HoleMoved(Exception):
@@ -141,6 +210,7 @@ class SerlServer:
         self.set_offset(o)
         print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
         self.next_pair = None                             # (hole EE, peg start rel) for the next reset only
+        self.expert = None                                # the machine intervention's Expert, this episode
         self.seat = None                                  # (offset, force, depth): seat_hole() in every reset
         # episode starts: EnvCmd RESET params[0] (wire.RESET_*); retries from the last good state
         self.reset_mode, self.auto_reset, self.max_retries = wire.RESET_AUTO, False, 3
@@ -403,7 +473,7 @@ class SerlServer:
     def reset(self):
         """RESET frames while the teach tool resets; -> True when the next episode starts."""
         self.state, self.reason, self.reward, self.action = wire.FS_RESET, wire.TR_NONE, 0.0, np.zeros(6)
-        self.info, self.T_cmd = {}, None
+        self.info, self.T_cmd, self.expert = {}, None, None
         retry = self.retry_wanted()
         try:
             self.retract()
@@ -640,6 +710,12 @@ class SerlServer:
             self.delta = None
         elif mode == "pull_out":
             d = self.em.pull_out_delta((self.io.ee("left") @ pht.HOLE_TOOL)[:3, 0])
+            self.raw_delta = None
+        elif mode == "expert":                                 # SERL machine intervention: the expert to the goal
+            if self.expert is None:
+                self.expert = Expert(self, EXPERT_CFG, self.offset_mm)
+                print(f"  step {self.step}: the expert takes over")
+            d = self.expert.delta()
             self.raw_delta = None
         else:                                                 # trace_back
             target = self.trace_target()

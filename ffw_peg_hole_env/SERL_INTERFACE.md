@@ -57,7 +57,7 @@ Always receive with `recv_multipart()` and decode with `wire.decode_frame_parts(
 |---|---|---|---|
 | 0 | IDLE | no episode (waiting for RESET, or PAUSEd) | no |
 | 1 | POLICY | the client's delta drove this tick | yes |
-| 2 | INTERVENTION | only with `--failure-mode intervene`: the machine drove it (pull out, trace back), same episode | yes, `is_intervention=False` (machine, not expert) |
+| 2 | INTERVENTION | only with `--failure-mode intervene`: the machine drove it — pulled the peg out of the bad state, then the scripted expert to the goal; same episode, the policy does not get control back | yes, **`is_intervention=True`** (expert data: also into the offline / demo buffer) |
 | 3 | TERMINATED | last frame of the episode; `reason` says why | yes, done |
 | 4 | RESET | between episodes: the pull-out after TERMINATED, and the reset after `EnvCmd RESET` | no |
 | 5 | FAULT | the reset failed — robot holds; needs a person, then `EnvCmd RESET` | no |
@@ -75,7 +75,7 @@ Always receive with `recv_multipart()` and decode with `wire.decode_frame_parts(
 | 5 | TIMEOUT | 20 s | no | new pair |
 | 6 | SAFETY | gear guard, hole pushed > 6 mm, hard edge (25 N), left j7 | yes | new pair |
 | 8 | ABORT | `EnvCmd ABORT` | yes | new pair |
-| 7 | INTERVENTIONS | a 4th machine intervention (`--failure-mode intervene` only) | yes | retry |
+| 7 | INTERVENTIONS | retired (not sent) | | |
 
 Map TIMEOUT to **truncated** (not terminated): the time ran out, the state is not bad, keep
 bootstrapping. Every other reason is a true terminal.
@@ -144,8 +144,16 @@ A transition is `(obs of frame k-1, tag.action of frame k, tag.reward of frame k
 frame k, done = frame k is TERMINATED and reason != TIMEOUT, truncated = reason == TIMEOUT)`.
 A failure therefore ends its episode with the negative reward; the retry is a NEW episode
 (`reset_kind` 1, `parent_episode` = the failed one) that starts at the good state and can end
-with the success reward. `--failure-mode intervene` (server) restores the old in-episode
-machine intervention instead (INTERVENTION frames, no terminal on binding).
+with the success reward.
+
+`--failure-mode intervene` (server) is a **SERL intervention** instead: on a trigger the policy's
+last frame gets the fail penalty (the bad state), then the machine takes over for the rest of the
+episode — pulls the peg straight out (`priv.mode` 2), then the scripted expert (the one that
+recorded the 100 demos) aligns over the axis and inserts (`priv.mode` 6) — INTERVENTION frames
+whose `tag.action` is the expert's applied delta; the episode ends SUCCESS (or the expert's own
+failure reason) and gets 10 s extra before TIMEOUT. Store INTERVENTION transitions with
+`is_intervention=True`, exactly like a human (SpaceMouse) intervention on the client side.
+`terminate` (+ retry) teaches "don't go there"; `intervene` also shows how to get out and finish.
 
 A new-pair reset (about 10 s, not recorded): hole arm moved to a new random pose (±4 cm across,
 0…−2 cm along, ±3° tilt), the hole block seated in the gripper by an 8 N press beside the hole,

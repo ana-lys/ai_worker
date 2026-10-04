@@ -185,8 +185,8 @@ PRIV_FIELDS = (
     ("delta_age", 1, "s since the newest policy delta arrived, capped at 10 (10 = none yet)"),
     ("clamped", 1, "1 = the server's box / above-rim clamp changed the command this tick"),
     # env flags / episode state
-    ("mode", 1, "machine mode driving the NEXT tick: 0 idle, 1 policy, 2 pull_out, 3 trace_back, "
-                "4 reset, 5 fault"),
+    ("mode", 1, "who drives the NEXT tick: 0 idle, 1 policy, 2 pull_out (machine), 4 reset, 5 fault, "
+                "6 expert (machine intervention to the goal); 3 trace_back retired"),
     ("interventions", 1, "machine interventions so far this episode (--failure-mode intervene only)"),
     ("reset_kind", 1, "how this episode started: 0 a new random pair, 1 a retry from the parent's good state"),
     ("retry_count", 1, "retries of this hole / peg pair so far (0 = a new pair)"),
@@ -213,7 +213,7 @@ PRIV_N = sum(n for _, n, _ in PRIV_FIELDS)
 _OBS_V = struct.Struct("<%dd" % OBS_N)
 _PRIV_V = struct.Struct("<%dd" % PRIV_N)
 FRAME_BYTES = _HEADER.size + _OBS_V.size + _PRIV_V.size + _TAG.size
-MODE_CODES = {"idle": 0, "policy": 1, "pull_out": 2, "trace_back": 3, "reset": 4, "fault": 5}
+MODE_CODES = {"idle": 0, "policy": 1, "pull_out": 2, "trace_back": 3, "reset": 4, "fault": 5, "expert": 6}
 
 
 def _offsets(fields):

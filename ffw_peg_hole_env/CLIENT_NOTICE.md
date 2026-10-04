@@ -43,8 +43,12 @@ with the negative fail reward**, and the retry is a **new** episode that can end
 | SAFETY 6, ABORT 8 | negative | terminated | new pair |
 | TIMEOUT 5 | none | **truncated** (keep bootstrapping) | new pair |
 
-INTERVENTION frames (2) only appear if the server runs `--failure-mode intervene`; if you ever
-see them, store them with `is_intervention=False` (machine, not expert).
+INTERVENTION frames (2) only appear if the server runs `--failure-mode intervene`, which is a
+**SERL intervention**: the policy's last frame (the bad state) gets the fail penalty, then the
+machine pulls out and the scripted expert drives to the goal in the same episode (the policy
+does not get control back), ending SUCCESS. Store INTERVENTION transitions with
+**`is_intervention=True`** (expert data — also into the offline buffer), like a human
+intervention. `priv.mode`: 2 = the machine pulling out, 6 = the expert.
 
 ## 4. Reply to every POLICY frame immediately — lockstep
 
@@ -62,8 +66,8 @@ terminated = TERMINATED and reason != TIMEOUT, truncated = reason == TIMEOUT)`.
 `tests/test_server_local.py` runs the real server against a fake robot with a ZMQ client on
 localhost: RESET AUTO → BIND (−0.95) → pull-out → IDLE → RESET AUTO → retry from the good state
 (tip 4 mm above the rim, where the failure left it) → SUCCESS (+1.50) → new pair; the 3-retry cap;
-RESET RANDOM; every frame type 14 and finite; 84/84 actions paired with the right frame. Not yet
-run on the robot.
+RESET RANDOM; --failure-mode intervene (penalty −0.95, the machine pulls out, the expert inserts,
+SUCCESS in the same episode); every frame type 14 and finite; every action paired with the right frame.
 
 ## Server flags (robot side, for reference)
 

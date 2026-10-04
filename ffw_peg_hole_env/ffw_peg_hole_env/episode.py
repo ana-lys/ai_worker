@@ -4,19 +4,25 @@ No ROS here. The server measures, calls tick() once per 15 Hz frame after the ro
 moved, publishes the returned tag, and does what `mode` says next:
 
   "policy"     apply the policy's delta
-  "pull_out"   machine: move the peg up the hole axis (pull_out_delta)
-  "trace_back" machine: move the peg to self.restore (toward_delta), then report
-               arrived=True on the tick it gets there
+  "pull_out"   machine: move the peg up the hole axis (pull_out_delta) -- intervene mode
+  "expert"     machine: the scripted expert drives from here to the goal -- intervene mode
   "reset"      episode over: run the reset, then start() the next one
+
+Failure modes (cfg.failure_mode), what a trigger (see below) does:
+  "terminate"  the episode ENDS: TERMINATED BIND / OFF_AXIS / BLOCKED with the fail penalty;
+               the server's next reset can retry from the last good state
+  "intervene"  a SERL intervention: the policy's frame gets the fail penalty, then the machine
+               takes over for the rest of the episode -- pulls the peg straight out
+               (pull_out), then the expert aligns and inserts (expert) -- INTERVENTION
+               frames, expert data; the episode ends SUCCESS (or the expert's own failure),
+               with intervene_time extra on the timeout. The policy does not get control back.
 
 Frame states (wire.FS_*):
   POLICY        the policy drove this tick
-  INTERVENTION  the machine drove it (pull out along the axis, then back to the last
-                pose the peg had near the hole top); the policy resumes after it,
-                same episode; at most max_interventions per episode
+  INTERVENTION  the machine drove it (pull out, then the expert to the goal)
   TERMINATED    last frame (reason wire.TR_*): success / jam / rim (reward.py rules),
-                blocked, timeout, safety (a live stop of the robot), interventions
-                (one more was needed than allowed)
+                bind / off-axis / blocked (terminate mode, or the expert failing), timeout,
+                safety (a live stop of the robot)
 
 Interaction zone (user, 2026-10-04): within zone_radius of the (calibrated) hole axis
 the peg and the hole may interact freely -- inside the hole block's footprint (~+-4 cm
@@ -68,6 +74,9 @@ class EpisodeConfig:
     # / left j7), OFF_AXIS (below the rim outside the zone) or BLOCKED; the server then retries from
     # the last good state. "intervene": the machine pulls out, traces back, same episode (the old way).
     failure_mode: str = "terminate"
+    intervene_time: float = 10.0        # s added to the timeout once the expert has taken over
+    pull_out_step: float = 0.002        # m per tick for the machine's pull-out (2026-10-04: 6.67 mm/tick
+                                        # = 100 mm/s left the arm ~2 cm behind when the next phase began)
     clear: float = 0.005                # m: pull out until the tip is this far above the rim
     top_lo: float = 0.002               # m: "near the hole top" = tip top_lo..top_hi above the rim,
     top_hi: float = 0.015               #    within lateral_top of the axis (the restore pose)
@@ -118,35 +127,35 @@ class EpisodeMachine:
         f_pb = terms["push_back_N"]
         self.f_ticks = self.f_ticks + 1 if f_pb > c.f_intervene and self.can_touch(ins) else 0
         driving = self.mode                                     # who moved the robot this tick
-        state = wire.FS_INTERVENTION if driving in ("pull_out", "trace_back") else wire.FS_POLICY
-        reason = wire.TR_NONE
+        state = wire.FS_INTERVENTION if driving in ("pull_out", "trace_back", "expert") else wire.FS_POLICY
+        reason, penalty = wire.TR_NONE, False
         if driving == "policy":
             self._remember(ins, T_peg)
+        timeout = c.timeout_s + (c.intervene_time if self.interventions else 0.0)
         if safety or hole_shift > c.hole_shift_max:
             reason = wire.TR_SAFETY
         elif success:
             reason = wire.TR_SUCCESS
-        elif failed and driving == "policy":                    # the machine pulling out may read force too
+        elif failed and driving in ("policy", "expert"):        # the machine pulling out may read force too
             reason = wire.TR_RIM if terms["rim_strike"] else wire.TR_JAM
-        elif self.t >= c.timeout_s - 1e-6:                     # summed dt drifts below the exact value
+        elif self.t >= timeout - 1e-6:                         # summed dt drifts below the exact value
             reason = wire.TR_TIMEOUT
-        elif driving == "policy" and self._trigger(ins, f_pb, blocked, dj7):
-            if c.failure_mode == "terminate":
+        elif driving in ("policy", "expert") and self._trigger(ins, f_pb, blocked, dj7):
+            if c.failure_mode == "intervene" and driving == "policy":
+                self.interventions += 1                         # SERL intervention: the machine takes over
+                self.mode, penalty = "pull_out", True
+            else:                                               # terminate mode, or the expert failing
                 reason = (wire.TR_BLOCKED if blocked else
                           wire.TR_OFF_AXIS if ins["depth"] > 0.0 and ins["lateral"] > c.zone_radius else wire.TR_BIND)
-            elif self.interventions >= c.max_interventions:
-                reason = wire.TR_BLOCKED if blocked else wire.TR_INTERVENTIONS
-            else:
-                self.interventions += 1
-                self.mode = "pull_out"
         elif driving == "pull_out" and -ins["depth"] >= c.clear:
-            self.mode = "trace_back"
-        elif driving == "trace_back" and arrived:
-            self.mode = "policy"
+            self.mode = "expert"
         if terms["fail"] != 0.0 and reason not in (wire.TR_JAM, wire.TR_RIM):
             # reward.py's fail rule fired but did not end the episode (the machine was pulling out,
             # or another rule ended it first): the fail penalty belongs to a terminal jam / rim only
             terms["fail"] = 0.0
+            reward = float(sum(terms[k] for k in ("success", "shape", "force", "fail")))
+        if penalty:                                             # the bad state the expert takes over from
+            terms["fail"] = self.reward.cfg.r_fail + self.reward.cfg.r_fail_shallow * self.reward.missing(ins)
             reward = float(sum(terms[k] for k in ("success", "shape", "force", "fail")))
         if reason != wire.TR_NONE:
             state, self.mode = wire.FS_TERMINATED, "reset"
@@ -162,7 +171,7 @@ class EpisodeMachine:
     # --- machine motion (per-tick deltas, capped like the policy's) --------------------------
     def pull_out_delta(self, hole_axis):
         """Straight up the hole axis (unit vector, base_link) by one capped step."""
-        return np.concatenate([np.asarray(hole_axis) * self.cfg.max_trans, np.zeros(3)])
+        return np.concatenate([np.asarray(hole_axis) * self.cfg.pull_out_step, np.zeros(3)])
 
     def toward_delta(self, T_cmd, T_target):
         """One capped step from the commanded pose toward T_target (6-DOF base_link delta)."""

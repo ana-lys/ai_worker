@@ -63,44 +63,47 @@ def test_clean_success():
 
 
 def test_intervention_cycle():
+    """--failure-mode intervene = a SERL intervention: penalty on the bad state, then the machine
+    (pull out, then the expert) drives to the goal; the policy does not get control back."""
     m = machine()
     m.start(2, ins(-20), None, None, None, pose(-20))
     r = run(m, [(d, 2.0, 0.0) for d in (-15, -10, -6, -3, 0, 4)] + [(6, 7.5, 0.0), (7, 2.0, 0.0), (8, 6.5, 0.0), (8.5, 6.5, 0.0)])
     check("one 7.5 N tick, or 6.5 N held: no intervention (normal chamfer entry)", all(x["mode"] == "policy" for x in r))
     r = run(m, [(9, 7.5, 0.0), (10, 7.5, 0.0)])                                     # binds at 10 mm
-    check("binding at 7.5 N for 2 ticks: frame still POLICY (the policy drove it), next mode pull_out",
-          r[-1]["frame_state"] == wire.FS_POLICY and r[-1]["mode"] == "pull_out" and r[-1]["interventions"] == 1)
-    check("restore pose = the last policy pose near the hole top (tip 3 mm above the rim)",
-          np.allclose(m.restore, pose(-3)))
+    check("binding at 7.5 N for 2 ticks: frame POLICY (the policy drove it) with the fail penalty, next pull_out",
+          r[-1]["frame_state"] == wire.FS_POLICY and r[-1]["mode"] == "pull_out" and r[-1]["interventions"] == 1
+          and r[-1]["terms"]["fail"] < -0.4 and r[-1]["reward"] < -0.4)
     r = run(m, [(6, 12.0, 0.0)] + [(d, 0.0, 0.0) for d in (2, -2, -6)])     # 12 N while pulling out (2026-10-04 live)
-    check("12 N during the machine's pull-out: no fail penalty, episode goes on",
+    check("12 N during the machine's pull-out: no further penalty, episode goes on",
           r[0]["terms"]["fail"] == 0.0 and r[0]["frame_state"] == wire.FS_INTERVENTION and r[0]["reward"] > -0.1)
-    check("pulling out: INTERVENTION frames, trace_back once the tip is 5 mm clear",
-          all(x["frame_state"] == wire.FS_INTERVENTION for x in r) and r[-1]["mode"] == "trace_back"
+    check("pulling out: INTERVENTION frames, the expert takes over once the tip is 5 mm clear",
+          all(x["frame_state"] == wire.FS_INTERVENTION for x in r) and r[-1]["mode"] == "expert"
           and [x["mode"] for x in r[:-1]] == ["pull_out"] * 3)
-    r1 = m.tick(DT, ins(-4), None, None, None, pose(-4))
-    r2 = m.tick(DT, ins(-3), None, None, None, pose(-3), arrived=True)
-    check("tracing back: INTERVENTION frames, policy again on arrival",
-          r1["frame_state"] == wire.FS_INTERVENTION and r1["mode"] == "trace_back"
-          and r2["frame_state"] == wire.FS_INTERVENTION and r2["mode"] == "policy")
-    r3 = m.tick(DT, ins(0), None, None, None, pose(0))
-    check("after the intervention: POLICY frames, same episode", r3["frame_state"] == wire.FS_POLICY and m.episode_id == 2)
+    r = run(m, [(d, 1.0, 0.0) for d in (-5, -3, 0, 10, 20, 30)])
+    check("the expert inserting: INTERVENTION frames, mode stays expert", all(x["frame_state"] == wire.FS_INTERVENTION
+          and x["mode"] == "expert" for x in r))
+    r = run(m, [(34.5, 1.0, 0.0)])
+    check("the expert reaches the goal: TERMINATED SUCCESS, the success reward, same episode",
+          r[-1]["frame_state"] == wire.FS_TERMINATED and r[-1]["reason"] == wire.TR_SUCCESS
+          and r[-1]["terms"]["success"] > 0.9 and m.episode_id == 2)
 
 
-def test_intervention_limit():
+def test_intervention_expert_fails():
     m = machine()
     m.start(3, ins(-20), None, None, None, pose(-20))
-    last = None
-    for k in range(4):
-        r = run(m, [(-3, 0.0, 0.0), (5, 7.5, 0.0), (5, 7.5, 0.0)])
-        last = r[-1]
-        if last["mode"] == "reset":
-            break
-        run(m, [(-6, 0.0, 0.0)])                                     # pulled out
-        m.tick(DT, ins(-3), None, None, None, pose(-3), arrived=True)    # traced back
-    check("4th binding with 3 interventions used: TERMINATED INTERVENTIONS, fail priced",
-          k == 3 and last["frame_state"] == wire.FS_TERMINATED and last["reason"] == wire.TR_INTERVENTIONS
-          and last["terms"]["fail"] < -0.5)
+    run(m, [(-3, 0.0, 0.0), (5, 7.5, 0.0), (5, 7.5, 0.0)])                   # trigger -> pull_out
+    run(m, [(d, 0.0, 0.0) for d in (2, -2, -6)])                             # -> expert
+    r = run(m, [(4, 7.5, 0.0), (5, 7.5, 0.0)])
+    check("the expert binding too: TERMINATED BIND with a fail penalty (no second intervention)",
+          r[-1]["frame_state"] == wire.FS_TERMINATED and r[-1]["reason"] == wire.TR_BIND and r[-1]["terms"]["fail"] < -0.4
+          and m.interventions == 1)
+    m = machine()
+    m.start(4, ins(-20), None, None, None, pose(-20))
+    run(m, [(-3, 0.0, 0.0), (5, 7.5, 0.0), (5, 7.5, 0.0)])
+    steps = int(round((m.cfg.timeout_s + 2) / DT))
+    r = run(m, [(-6, 0.0, 0.0)] * steps)
+    check(f"an intervention adds {m.cfg.intervene_time:.0f} s to the timeout (no TIMEOUT at {m.cfg.timeout_s + 2:.0f} s)",
+          all(x["reason"] != wire.TR_TIMEOUT for x in r))
 
 
 def test_rim_band():
@@ -193,7 +196,7 @@ def test_real_robot_rules():
 def test_machine_deltas():
     m = machine()
     d = m.pull_out_delta(np.array([0.0, 0.0, 1.0]))
-    check("pull-out step: 6.67 mm up the axis, no rotation", np.allclose(d, [0, 0, m.cfg.max_trans, 0, 0, 0]))
+    check("pull-out step: 2 mm up the axis, no rotation", np.allclose(d, [0, 0, m.cfg.pull_out_step, 0, 0, 0]))
     A, B = pose(0), T_from([0.5, 0.05, 0.9], np.eye(3))
     d = m.toward_delta(A, B)
     check("trace-back step capped per axis at 6.67 mm", np.isclose(d[1], m.cfg.max_trans) and np.allclose(d[[0, 2, 3, 4, 5]], 0))
@@ -202,7 +205,7 @@ def test_machine_deltas():
 if __name__ == "__main__":
     test_clean_success()
     test_intervention_cycle()
-    test_intervention_limit()
+    test_intervention_expert_fails()
     test_rim_band()
     test_terminate_mode()
     test_other_terminations()

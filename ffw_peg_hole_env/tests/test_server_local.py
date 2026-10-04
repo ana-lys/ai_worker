@@ -14,6 +14,8 @@ way a HIL-SERL client would, and checks the episode protocol:
   4. RESET AUTO after a success -> new pair
   5. fail it 4 times -> 3 retries, then a new pair (the retry cap)
   6. RESET RANDOM after a failure -> new pair
+  7. --failure-mode intervene: the same binding -> the policy's frame gets the fail penalty, the
+     machine pulls out and the expert (the demo recorder's) inserts: INTERVENTION frames, SUCCESS
   every frame: type 14, no NaN; step 0 has action 0.
 
   source /opt/ros/jazzy/setup.bash   # the server imports rclpy / the gateway module
@@ -180,9 +182,12 @@ class Client:
 
     def episode(self, policy):
         """Run one episode -> (TERMINATED tag, its priv, step-0 priv, the IDLE priv after it)."""
-        sent = None
+        sent, self.trace = None, []
         while True:
             obs, priv, tag = self.recv()
+            self.trace.append((tag["frame_state"], tag["reward"], np.array(tag["action"]), priv["mode"]))
+            if tag["frame_state"] == wire.FS_INTERVENTION:
+                sent = None                                   # the machine drives: nothing of ours to pair
             if sent is not None and tag["frame_state"] in (wire.FS_POLICY, wire.FS_TERMINATED):
                 self.pairs += 1
                 self.paired += bool(np.allclose(tag["action"], np.clip(sent, -S.MAX_TRANS, S.MAX_TRANS)[:6], atol=1e-9))
@@ -217,7 +222,7 @@ def main():
     srv = S.SerlServer(io, PORT, t, host="127.0.0.1")
     srv.set_offset([0.0, 0.0])                                          # the fake hole axis is exact
     srv.em.reward.push_back_force = scripted_force(srv)
-    threading.Thread(target=srv.run, kwargs={"duration": 120.0}, daemon=True).start()
+    threading.Thread(target=srv.run, kwargs={"duration": 600.0}, daemon=True).start()
     c = Client()
 
     # 1 -- a new pair, failed by binding
@@ -263,6 +268,23 @@ def main():
     p, _ = c.reset(wire.RESET_RANDOM)
     check("6 RESET RANDOM after a failure: new pair", end["reason"] == wire.TR_BIND and p["reset_kind"] == 0
           and t.new_pairs == 4)
+    # 7 -- a SERL intervention: penalty on the bad state, the machine expert drives to the goal
+    srv.em.cfg.failure_mode = "intervene"                  # read at the trigger: applies to the episode 6 started
+    end, endp, _ = c.episode(down)
+    st = [x[0] for x in c.trace]
+    k_int = st.index(wire.FS_INTERVENTION) if wire.FS_INTERVENTION in st else None
+    check("7 intervene: binding -> INTERVENTION frames (machine), then TERMINATED SUCCESS in the same episode",
+          k_int is not None and end["reason"] == wire.TR_SUCCESS and st[-1] == wire.FS_TERMINATED
+          and all(x == wire.FS_INTERVENTION for x in st[k_int:-1]) and endp["interventions"] == 1)
+    if k_int is not None:
+        r_trig = c.trace[k_int - 1][1]
+        modes = {int(x[3]) for x in c.trace[k_int:-1]}
+        n_int = len(st) - 1 - k_int
+        check(f"7 the policy's last frame (the bad state) carries the fail penalty ({r_trig:+.3f}); the machine's "
+              f"{n_int} frames move it (modes {sorted(modes)} = pull_out, expert)",
+              r_trig < -0.4 and modes <= {wire.MODE_CODES["pull_out"], wire.MODE_CODES["expert"]}
+              and np.mean([np.abs(x[2]).max() > 0 for x in c.trace[k_int:-1]]) > 0.8)
+        check(f"7 the episode ends with the success reward ({end['reward']:+.3f})", end["reward"] > 0.9)
     check(f"every frame type {wire.MSG_FRAME}, finite ({c.frames} frames)", c.bad_frames == 0 and c.frames > 100)
     check(f"lockstep: frame k+1's tag.action is the client's reply to frame k ({c.paired}/{c.pairs})",
           c.pairs > 50 and c.paired == c.pairs)

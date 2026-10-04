@@ -54,9 +54,8 @@ import peg_hole_random as phr
 import peg_hole_serl_server as srvmod
 import peg_hole_stroke as phs
 import peg_hole_teach as pht
-from peg_hole_serl_server import HZ, MAX_ROT, MAX_TRANS, GuardTrip, HoleMoved, SerlServer
+from peg_hole_serl_server import Expert, GuardTrip, HoleMoved, SerlServer
 from ffw_peg_hole_env import images, wire
-from ffw_peg_hole_env.geometry import clip_delta, delta_between, pose_error
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE.parent / "config"
@@ -142,65 +141,6 @@ def pose_from(u, a, t):
 
 
 # --- expert --------------------------------------------------------------------------------------
-class Expert:
-    """Over the (offset) hole axis at hover; wait there until the hole has stopped moving and the
-    MEASURED peg is on the calibrated axis (closing the loop on the arm's tracking error, which
-    left ~1 mm at the rim open-loop); then straight down the axis, keeping that correction.
-    2026-10-04 demos: open-loop first tries reached the rim with the hole still settling
-    (0.6 mm/s, retries 0.08) and the peg +-1 mm off its command -- most second tries worked."""
-
-    def __init__(self, srv, a, off_mm):
-        self.srv, self.a = srv, a
-        self.off_mm = np.asarray(off_mm, float)
-        c, s_ = np.cos(np.radians(pht.ROLL)), np.sin(np.radians(pht.ROLL))
-        self.R2 = np.array([[c, -s_], [s_, c]])              # peg-tool (y, z) -> hole-tool (y, z)
-        self.corr = np.zeros(2)                             # hole-tool frame correction [m]
-        self.phase, self.settled, self.n_int, self.k_align = "approach", 0, 0, 0
-        self.s = pht.TOP + a.hover
-        self.hole_hist = []
-
-    def target(self, s):
-        t = self.srv.t
-        off = self.off_mm / 1000.0 - self.R2.T @ self.corr  # command shifted against the measured error
-        return t.peg_target(s, phs.T_from([0.0, *off], np.eye(3)))[0] @ t.st.arms["right"].map
-
-    def measured(self):
-        """(peg lateral error from the calibrated axis in the hole-tool frame (y, z) [m], hole speed [m/s])."""
-        srv = self.srv
-        H = srv.io.ee("left") @ pht.HOLE_TOOL
-        P = np.linalg.inv(H) @ srv.io.ee("right") @ pht.PEG_TOOL
-        self.hole_hist = (self.hole_hist + [H[:3, 3].copy()])[-6:]
-        v = np.linalg.norm(self.hole_hist[-1] - self.hole_hist[0]) * HZ / (len(self.hole_hist) - 1) \
-            if len(self.hole_hist) > 1 else np.inf
-        return P[1:3, 3] - srv.axis_c, v
-
-    def delta(self):
-        srv, a = self.srv, self.a
-        e, v_hole = self.measured()
-        if srv.em.interventions != self.n_int:               # the machine stepped in: start over from hover
-            self.n_int, self.phase, self.settled, self.s = srv.em.interventions, "approach", 0, pht.TOP + a.hover
-        if self.phase in ("approach", "align"):
-            tgt = self.target(pht.TOP + a.hover)
-            if self.phase == "approach":
-                err = pose_error(srv.T_cmd, tgt)
-                self.settled = self.settled + 1 if err[0] < 2e-4 and err[1] < np.radians(0.2) else 0
-                if self.settled >= a.settle_ticks:
-                    self.phase, self.settled, self.k_align = "align", 0, 0
-            else:
-                self.k_align += 1
-                self.corr = np.clip(self.corr + a.align_gain * e, -0.003, 0.003)
-                ok = np.linalg.norm(e) < a.align_tol and v_hole < a.hole_still
-                self.settled = self.settled + 1 if ok else 0
-                if self.settled >= a.settle_ticks or self.k_align >= a.align_timeout * HZ:
-                    print(f"    aligned: peg {np.linalg.norm(e) * 1000:.2f} mm off the axis, hole "
-                          f"{v_hole * 1000:.2f} mm/s, correction {np.round(self.corr * 1000, 2)} mm, "
-                          f"{self.k_align / HZ:.1f} s{' (timeout)' if self.settled < a.settle_ticks else ''}")
-                    self.phase = "insert"
-            return clip_delta(delta_between(srv.T_cmd, tgt), a.hover_speed / HZ, MAX_ROT)
-        self.s = max(self.s - a.insert_speed / HZ, pht.TOP - srv.t.a.push - 0.002)
-        return clip_delta(delta_between(srv.T_cmd, self.target(self.s)), MAX_TRANS, MAX_ROT)
-
-
 # --- server with frame capture -------------------------------------------------------------------
 class DemoServer(SerlServer):
     def __init__(self, *args, **kw):
