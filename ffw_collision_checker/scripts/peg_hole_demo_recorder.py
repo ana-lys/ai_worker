@@ -14,8 +14,9 @@ about 3 axes -- taken in order; reach-check failures are skipped. Evenly covers 
 at any count (a 6+ dim grid of 100 points can't).
 
 Expert: the peg-tool offset from the fitted model (config/peg_hole_offset_model.json,
---offset model | const), over to the hole axis --hover above the rim at --hover-speed,
-settle, then straight down the axis at --insert-speed. A demo counts only if it ends
+--offset model | const), over to the hole axis --hover above the rim at --hover-speed; wait
+until the hole is still and the MEASURED peg is within --align-tol of the axis (closed loop,
+--align-timeout), then straight down the axis at --insert-speed. A demo counts only if it ends
 SUCCESS with no machine intervention (--allow-interventions to keep those too).
 
 Any other ending -> the expert retries the pose --auto-retries times (1), then manual
@@ -142,28 +143,59 @@ def pose_from(u, a, t):
 
 # --- expert --------------------------------------------------------------------------------------
 class Expert:
-    """Over the (offset) hole axis at hover, settle, then straight down it."""
+    """Over the (offset) hole axis at hover; wait there until the hole has stopped moving and the
+    MEASURED peg is on the calibrated axis (closing the loop on the arm's tracking error, which
+    left ~1 mm at the rim open-loop); then straight down the axis, keeping that correction.
+    2026-10-04 demos: open-loop first tries reached the rim with the hole still settling
+    (0.6 mm/s, retries 0.08) and the peg +-1 mm off its command -- most second tries worked."""
 
     def __init__(self, srv, a, off_mm):
         self.srv, self.a = srv, a
-        self.off = phs.T_from([0.0, off_mm[0] / 1000.0, off_mm[1] / 1000.0], np.eye(3))
-        self.phase, self.settled, self.n_int = "approach", 0, 0
+        self.off_mm = np.asarray(off_mm, float)
+        c, s_ = np.cos(np.radians(pht.ROLL)), np.sin(np.radians(pht.ROLL))
+        self.R2 = np.array([[c, -s_], [s_, c]])              # peg-tool (y, z) -> hole-tool (y, z)
+        self.corr = np.zeros(2)                             # hole-tool frame correction [m]
+        self.phase, self.settled, self.n_int, self.k_align = "approach", 0, 0, 0
         self.s = pht.TOP + a.hover
+        self.hole_hist = []
 
     def target(self, s):
         t = self.srv.t
-        return t.peg_target(s, self.off)[0] @ t.st.arms["right"].map
+        off = self.off_mm / 1000.0 - self.R2.T @ self.corr  # command shifted against the measured error
+        return t.peg_target(s, phs.T_from([0.0, *off], np.eye(3)))[0] @ t.st.arms["right"].map
+
+    def measured(self):
+        """(peg lateral error from the calibrated axis in the hole-tool frame (y, z) [m], hole speed [m/s])."""
+        srv = self.srv
+        H = srv.io.ee("left") @ pht.HOLE_TOOL
+        P = np.linalg.inv(H) @ srv.io.ee("right") @ pht.PEG_TOOL
+        self.hole_hist = (self.hole_hist + [H[:3, 3].copy()])[-6:]
+        v = np.linalg.norm(self.hole_hist[-1] - self.hole_hist[0]) * HZ / (len(self.hole_hist) - 1) \
+            if len(self.hole_hist) > 1 else np.inf
+        return P[1:3, 3] - srv.axis_c, v
 
     def delta(self):
         srv, a = self.srv, self.a
+        e, v_hole = self.measured()
         if srv.em.interventions != self.n_int:               # the machine stepped in: start over from hover
             self.n_int, self.phase, self.settled, self.s = srv.em.interventions, "approach", 0, pht.TOP + a.hover
-        if self.phase == "approach":
+        if self.phase in ("approach", "align"):
             tgt = self.target(pht.TOP + a.hover)
-            e = pose_error(srv.T_cmd, tgt)
-            self.settled = self.settled + 1 if e[0] < 2e-4 and e[1] < np.radians(0.2) else 0
-            if self.settled >= a.settle_ticks:
-                self.phase = "insert"
+            if self.phase == "approach":
+                err = pose_error(srv.T_cmd, tgt)
+                self.settled = self.settled + 1 if err[0] < 2e-4 and err[1] < np.radians(0.2) else 0
+                if self.settled >= a.settle_ticks:
+                    self.phase, self.settled, self.k_align = "align", 0, 0
+            else:
+                self.k_align += 1
+                self.corr = np.clip(self.corr + a.align_gain * e, -0.003, 0.003)
+                ok = np.linalg.norm(e) < a.align_tol and v_hole < a.hole_still
+                self.settled = self.settled + 1 if ok else 0
+                if self.settled >= a.settle_ticks or self.k_align >= a.align_timeout * HZ:
+                    print(f"    aligned: peg {np.linalg.norm(e) * 1000:.2f} mm off the axis, hole "
+                          f"{v_hole * 1000:.2f} mm/s, correction {np.round(self.corr * 1000, 2)} mm, "
+                          f"{self.k_align / HZ:.1f} s{' (timeout)' if self.settled < a.settle_ticks else ''}")
+                    self.phase = "insert"
             return clip_delta(delta_between(srv.T_cmd, tgt), a.hover_speed / HZ, MAX_ROT)
         self.s = max(self.s - a.insert_speed / HZ, pht.TOP - srv.t.a.push - 0.002)
         return clip_delta(delta_between(srv.T_cmd, self.target(self.s)), MAX_TRANS, MAX_ROT)
@@ -446,6 +478,10 @@ def main():
     ap.add_argument("--hover-speed", type=float, default=0.03, help="m/s to the hover pose")
     ap.add_argument("--insert-speed", type=float, default=None, help="m/s down the axis (default --speed)")
     ap.add_argument("--settle-ticks", type=int, default=5, help="ticks on the hover pose before inserting")
+    ap.add_argument("--align-tol", type=float, default=0.0004, help="m: measured peg off the axis to start inserting")
+    ap.add_argument("--hole-still", type=float, default=0.0002, help="m/s: hole speed to start inserting")
+    ap.add_argument("--align-gain", type=float, default=0.15, help="per tick, integral on the measured error (the arm lags ~3 ticks)")
+    ap.add_argument("--align-timeout", type=float, default=3.0, help="s at hover before inserting anyway")
     ap.add_argument("--offset", choices=("model", "const"), default="model")
     ap.add_argument("--allow-interventions", action="store_true", help="count SUCCESS demos with interventions")
     ap.add_argument("--port-base", type=int, default=7611, help="Frames are published here too")
