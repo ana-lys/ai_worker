@@ -74,7 +74,7 @@ Out of scope now: sim parity, human SpaceMouse intervention.
 
 ## Status
 
-- [x] 0 contract  - [x] 1 logic  - [ ] 2 idle server  - [ ] 3 policy + reset
+- [x] 0 contract  - [x] 1 logic  - [x] 2 idle server  - [ ] 3 policy + reset
 - [ ] 4 intervention  - [ ] 5 images
 
 Slice 1 notes: `episode.py` EpisodeMachine + `tests/test_episode.py`. Replayed on
