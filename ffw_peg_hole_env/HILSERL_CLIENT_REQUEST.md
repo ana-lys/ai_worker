@@ -1,3 +1,6 @@
+> **Superseded 2026-10-04 by `SERL_INTERFACE.md`** (real robot, Frame type 12). This file describes the
+> sim server's rev-2 protocol and is kept for history.
+
 # Request to the HIL-SERL side: peg-in-hole client for the FFW server
 
 From: robot workstation (`ai_worker/ffw_peg_hole_env`), 2026-10-02 (rev 2)
