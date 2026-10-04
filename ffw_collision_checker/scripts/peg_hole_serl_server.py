@@ -480,6 +480,13 @@ class SerlServer:
         above[:3, 3] += 0.01 * H[:3, 0]
         self.quick_move(above, t.a.move_speed, "hover")               # both ends above the rim: the line is too
         t.move_right(T_tf, t.a.speed, "to_top")
+        s_real = self.peg_in_hole(self.io.ee("right"))[0]
+        if pht.TOP - s_real > -GOOD_CLEAR:                            # not clear: the episode must start where
+            up = s_real - pht.TOP                                     # the force reference can be taken
+            T_up = T_tf.copy()
+            T_up[:3, 3] += (GOOD_CLEAR + 0.001 - up) * H[:3, 0]
+            print(f"  retry start {up * 1000:+.1f} mm from the rim: lifted to {(GOOD_CLEAR + 0.001) * 1000:.0f} mm above")
+            t.move_right(T_up, t.a.speed, "to_top")
         t.phase("idle")
         return True
 
@@ -648,7 +655,9 @@ class SerlServer:
             tripped = str(e)
             print(f"  step {self.step + 1}: SAFETY stop: {e}")
         ins, q, amps, lift, s_real, s_cmd = self.measure()
-        if mode == "policy" and ins["depth"] <= -GOOD_CLEAR:            # the last good state: outside the hole
+        if mode == "policy" and ins["depth"] <= -GOOD_CLEAR and pht.TOP - s_cmd <= -GOOD_CLEAR:
+            # the last good state: outside the hole -- the measured AND the commanded tip (the stored
+            # pose is the command, ~3 ticks ahead of the arm: live, measured-only gave starts 1.4 mm in)
             self.good_rel = np.linalg.inv(self.io.ee("left") @ pht.HOLE_TOOL) @ self.T_cmd
         now = time.monotonic() - self.t0
         blocked = self.block.update(now, s_real, s_cmd) is not None
