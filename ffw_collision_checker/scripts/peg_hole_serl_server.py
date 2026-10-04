@@ -67,6 +67,7 @@ BOX_ACROSS, BOX_UP, BOX_TILT = 0.06, 0.06, np.radians(10.0)
 # it the peg may touch the block top / chamfer / rim (the force rules and the gear guard limit
 # that). episode.EpisodeMachine halts + intervenes if it gets below the rim outside anyway.
 ZONE, FLOOR = 0.02, 0.005                              # FLOOR covers the arm's ~0.2 s lag (2.4 mm overshoot seen live)
+RETRACT_SPEED = 0.02                                    # m/s pulling the peg out of the bore (insertion: 0.01)
 HOLE_SHIFT_MAX = 0.006                                  # m: hole pushed sideways -> stop (resets too)
 # Gear guard, every control tick in every phase (episode, intervention, retract, reset):
 # left j7 current change from its unloaded reference > J7_HARD at once, or > J7_SUSTAIN for
@@ -415,29 +416,31 @@ class SerlServer:
         off_y, f_max, depth = self.seat
         t, arm = self.t, self.t.st.arms["right"]
         OFF = phs.T_from([0.0, self.offset_mm[0] / 1000.0 + off_y, self.offset_mm[1] / 1000.0], np.eye(3))
-        T, _ = t.peg_target(pht.TOP + t.a.clear, OFF)
-        t.move_right(T, t.a.move_speed, "hover")                 # above the block top, beside the hole
         T, _ = t.peg_target(pht.TOP + 0.005, OFF)
-        t.move_right(T, t.a.speed, "to_top")
-        h0 = self.hole_now()
+        t.move_right(T, t.a.move_speed, "hover")                 # straight to 5 mm above the block top (both ends
+        h0 = self.hole_now()                                     # of the move are above it, so the line is too)
         rw = self.em.reward
         rw.reset()
         s_cmd, f = pht.TOP + 0.005, 0.0
         t.phase("push")
         while s_cmd > pht.TOP - depth:
-            s_cmd -= 0.5 * t.a.speed / HZ                        # half speed: the block is rigid, F rises fast
+            # half --speed all the way: the block is rigid and F rises fast; switching from full speed
+            # 1.5 mm above it hit the block at speed (arm lag ~2 mm) -- 2.2 mm hole shove, unread force
+            s_cmd -= 0.5 * t.a.speed / HZ
             self.command_site(t.peg_target(s_cmd, OFF)[0] @ arm.map)
             t_end = time.monotonic() + 1.0 / HZ
             while time.monotonic() < t_end - phs.CTRL_DT / 2:
                 t.st.tick(None)
             ins, q, amps, lift, _, _ = self.measure()
             f = rw.push_back_force(ins, q, amps, lift)
-            if self.em.can_touch(ins) and f > f_max:          # first tick over: held 2 it overshot 8 -> 10 N
+            # first tick over (held 2 it overshot 8 -> 10 N), and only ON the block: the estimate jumps when
+            # the press slows down above it (live: "9.4 N" 0.3 mm above the top, nothing pressed)
+            if ins["depth"] >= 0.0 and f > f_max:
                 break
-        t.held(0.3)
+        t.held(0.15)
         moved = self.sideways(h0)
-        T, _ = t.peg_target(pht.TOP + t.a.clear, OFF)
-        t.move_right(T, t.a.speed, "retract")                    # straight back up the axis
+        T, _ = t.peg_target(max(s_cmd, pht.TOP) + 0.005, OFF)
+        t.move_right(T, t.a.move_speed, "retract")               # 5 mm straight up off the block; go_start() next
         print(f"  seat: pressed {f:.1f} N at {(pht.TOP - s_cmd) * 1000:+.1f} mm, {off_y * 1000:.0f} mm beside the "
               f"hole; hole moved {moved * 1000:.2f} mm")
         t.phase("idle")
@@ -474,12 +477,17 @@ class SerlServer:
         rise = pht.TOP + self.t.a.clear - (np.linalg.inv(H) @ np.r_[T_peg[:3, 3], 1.0])[0]
         if rise <= 0.0:
             return
-        T_up = T_peg.copy()
-        T_up[:3, 3] += rise * H[:3, 0]
+        # in the bore at RETRACT_SPEED, then (tip 2 mm clear) the rest at the free-move speed: the
+        # whole 54 mm at --speed took 5.9 s of every reset
+        in_bore = min(rise, max(0.0, rise - self.t.a.clear + 0.002))
+        legs = [(in_bore, RETRACT_SPEED), (rise, self.t.a.move_speed)] if in_bore > 0.0 else [(rise, self.t.a.move_speed)]
         self.watch = self.hole_now()
         self.retract_floor = abs(float(self.io.effort[6]) - self.j7_ref)
         try:
-            self.t.move_right(T_up @ np.linalg.inv(pht.PEG_TOOL), self.t.a.speed, "reset_out")
+            for up, speed in legs:
+                T_up = T_peg.copy()
+                T_up[:3, 3] += up * H[:3, 0]
+                self.t.move_right(T_up @ np.linalg.inv(pht.PEG_TOOL), speed, "reset_out")
         finally:
             self.watch, self.retract_floor = None, None
 
