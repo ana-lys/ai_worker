@@ -61,7 +61,20 @@ no reply → hold (`policy_delta_valid` 0).
 Transition: `(obs[k-1], tag[k].action / ACTION_SCALE, tag[k].reward, obs[k],
 terminated = TERMINATED and reason != TIMEOUT, truncated = reason == TIMEOUT)`.
 
-## 5. Verified locally
+## 5. Since the last kit (2026-10-05)
+
+- **Demos re-recorded.** The hole block slipped in the left gripper (5.8 mm lower, ~1.8 mm sideways);
+  the robot side was recalibrated (new offset model, block top 47.6 mm, **push 30 mm, success at
+  29 mm** = push − 1 mm). The 100 demos in this kit (`demos/`) are the new ones: 100/100 first try,
+  peak force median 1.0 N, max 4.5 N. Discard the 2026-10-04 demos from the first kit.
+- **SUCCESS depth** is now push − 1 mm (29 mm on this setup), not a fixed 34 mm.
+- **Interaction zone 2.5 cm** (was 2 cm): the policy may act on the rim / block top that far from
+  the axis; **OFF_AXIS** fires only once the peg face is 5 mm below the block top outside it.
+- **`--failure-mode intervene` is a real SERL intervention:** the machine pulls out and the scripted
+  expert drives to the goal (see section 3). Store those frames `is_intervention=True`.
+- The frame layout did not change (still type 14).
+
+## 6. Verified locally
 
 `tests/test_server_local.py` runs the real server against a fake robot with a ZMQ client on
 localhost: RESET AUTO → BIND (−0.95) → pull-out → IDLE → RESET AUTO → retry from the good state
