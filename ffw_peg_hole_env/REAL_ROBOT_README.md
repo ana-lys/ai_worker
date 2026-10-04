@@ -191,11 +191,13 @@ B. **Frame reorganised for asymmetric actor-critic** — done (type 12, `FRAME.m
      because the gateway's `diff0/diff1` only accept `marker_frame` and read 10.0 here.
    - priv: F_pb estimate + reference, F_peak, reward terms + sum, env flags, hole pose, raw
      131-double gateway Obs, image receive times, anything else the server derives.
-C. **Expert demo recorder** — written (`peg_hole_demo_recorder.py`; pool/fit/Sobol checked offline,
-   not yet run on the robot): 100 start configurations on an evenly spaced grid over the reset
-   space; fitted-offset scripted insertion through the server, saved locally (`Frame`s + both
-   128×128 images per tick). Any non-SUCCESS → align-GUI mode at that pose (you adjust, Enter
-   registers it into the offset pool, refit) → retake. Only SUCCESS counts; resumable.
+C. **Expert demo recorder** — done 2026-10-04: 100/100 demos in
+   `recordings/peg_hole_demos/expert/episodes` (first try each, peak median 1.1 N / max 5.6 N,
+   10 956 frames, 725 MB; the earlier 21 in `expert_v0_before_seat_20261004`). What it took: the
+   reset seats the hole (8 N press on the block top beside the hole, `--seat-*`), the expert closes
+   the loop on the measured peg at hover, the force reference is 3 ticks, intervention 7 N x 2,
+   rim band 2 mm. Sobol starts, fitted offset; on failure one automatic retry, then manual
+   calibration (retaken at your alignment).
    Streaming images to the client during training comes after.
 
 Older items:
