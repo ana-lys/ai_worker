@@ -100,8 +100,11 @@ ignored.
   action `a ∈ [-1, 1]^6` is sent as `a * (0.00667, 0.00667, 0.00667, 0.0349, 0.0349, 0.0349)`;
 - then clamped to a box around the hole and, farther than 2 cm from the hole axis, kept 5 mm
   above the rim (the `clamped` flag in priv says when);
-- the **newest** delta received before a tick is applied (not summed); none for 0.2 s → hold
-  (zero delta);
+- **lockstep**: a POLICY tick waits up to 40 ms for the client's reply to the previous frame and
+  applies it in that tick, so frame k+1's `tag.action` is exactly the action chosen from frame k.
+  Reply to every POLICY frame right away (decode → policy → send within ~40 ms); a later reply is
+  applied a tick late, none → hold (zero delta, `policy_delta_valid` 0). If several arrive, the
+  newest wins (not summed);
 - used on POLICY ticks only (ignored during RESET / INTERVENTION / IDLE).
 
 **EnvCmd (type 8)** — `uint8 cmd, int64 seed, uint32 episode_id, 8 float64 params`:

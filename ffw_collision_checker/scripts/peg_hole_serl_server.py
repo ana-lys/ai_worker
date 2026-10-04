@@ -59,6 +59,7 @@ HZ = 15.0
 RIGHT = [f"arm_r_joint{i}" for i in range(1, 8)]
 MAX_TRANS, MAX_ROT = 0.01 * 2 / 3, np.radians(2.0)     # per tick, per axis: the policy's +-1
 WATCHDOG_S = 0.2
+POLICY_WAIT = 0.04                                      # s a policy tick waits for the client's reply to the last frame
 # workspace box for the peg tool point, hole tool frame (x = insertion axis up, from the
 # hole tool origin): along x TOP - push - 3 mm .. TOP + 6 cm, across +-6 cm; tilt +-10 deg
 BOX_ACROSS, BOX_UP, BOX_TILT = 0.06, 0.06, np.radians(10.0)
@@ -612,6 +613,19 @@ class SerlServer:
         rest of the period, measure, tag, publish. -> False once TERMINATED."""
         period, t_end = 1.0 / HZ, time.monotonic() + 1.0 / HZ
         mode = self.em.mode
+        early_trip = None
+        if mode == "policy" and self.delta is None:
+            # lockstep: the client answers frame k right after it is published, i.e. while this tick
+            # starts -- wait (arms streaming) for that answer so it drives THIS tick and frame k+1's
+            # tag.action is the action chosen from frame k. Without it every action landed a tick late.
+            t_wait = time.monotonic() + POLICY_WAIT
+            try:
+                while self.delta is None and time.monotonic() < t_wait:
+                    self.poll_commands()
+                    if self.delta is None:
+                        self.t.st.tick(None)
+            except (GuardTrip, HoleMoved) as e:
+                early_trip = e
         if mode == "policy":
             stale = self.delta is None or time.monotonic() - self.delta_t > WATCHDOG_S
             d = np.zeros(6) if stale else clip_delta(self.delta, MAX_TRANS, MAX_ROT)
@@ -626,9 +640,9 @@ class SerlServer:
             self.raw_delta = None
         self.T_cmd = self.command_site(apply_delta(self.T_cmd, d))
         self.action = d
-        tripped = None
+        tripped = None if early_trip is None else str(early_trip)
         try:
-            while time.monotonic() < t_end - phs.CTRL_DT / 2:
+            while tripped is None and time.monotonic() < t_end - phs.CTRL_DT / 2:
                 self.t.st.tick(None)
         except (GuardTrip, HoleMoved) as e:                   # gear guard: end the episode at once
             tripped = str(e)
