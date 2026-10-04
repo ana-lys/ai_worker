@@ -21,6 +21,8 @@ Day log with every number behind the decisions: `SERL_REAL_PLAN.md`.
 | `ffw_collision_checker/scripts/peg_hole_safe_setup.py` | lift −0.30 m, lift hard-lock, per-arm EE limit profile from the real geometry |
 | `ffw_collision_checker/scripts/peg_hole_align_gui.py` | eye-alignment GUI over a 25-pose grid (random height + tilt) → the peg offset |
 | `ffw_collision_checker/config/peg_hole_offset_model.json` | calibrated peg offset (constant + position/height/tilt fit) |
+| `ffw_collision_checker/scripts/peg_hole_demo_recorder.py` | 100 expert demos through the server (Sobol starts, fitted offset, manual recalibration on failure) |
+| `ffw_collision_checker/config/peg_hole_offset_pool.json` | eye-alignment pool the offset model is fit on (created on the first recorder run) |
 | `ffw_collision_checker/scripts/peg_hole_roi_gui.py` | wrist-camera ROI picker (both D405 RGB off UDP) → `config/peg_hole_roi.json` |
 | `ffw_peg_hole_env/images.py` | ROI crop + downsample → 128×128 RGB policy image (no ROS) |
 | `ffw_collision_checker/scripts/peg_hole_teach.py` | teach tool (`--plane-scan`, `--plane-verify`, `--model-verify` added; untracked in git) |
@@ -35,6 +37,9 @@ cd ~/robotis_ws/src/ai_worker/ffw_collision_checker/scripts     # ROS sourced, R
 .venv/bin/python peg_hole_serl_server.py --port-base 7601                    # wire check: IDLE frames, no motion
 .venv/bin/python peg_hole_serl_server.py --allow-motion --port-base 7601     # real episodes after EnvCmd RESET
 #   --autostart (no RESET needed)   --start-xy 0.002 (tests: peg starts near the calibrated axis)
+#   --images (decode the wrist D405s: priv image_t; the ffw_stream receiver must not run)
+.venv/bin/python peg_hole_roi_gui.py                    # once: wrist-camera ROIs -> config/peg_hole_roi.json
+.venv/bin/python peg_hole_demo_recorder.py --allow-motion   # expert demos (resumable; Enter/s/q in the teach window)
 
 cd ../../ffw_peg_hole_env
 ../ffw_collision_checker/scripts/.venv/bin/python tests/serl_live_client.py --policy down --episodes 2
@@ -186,7 +191,8 @@ B. **Frame reorganised for asymmetric actor-critic** — done (type 12, `FRAME.m
      because the gateway's `diff0/diff1` only accept `marker_frame` and read 10.0 here.
    - priv: F_pb estimate + reference, F_peak, reward terms + sum, env flags, hole pose, raw
      131-double gateway Obs, image receive times, anything else the server derives.
-C. **Expert demo recorder:** 100 start configurations on an evenly spaced grid over the reset
+C. **Expert demo recorder** — written (`peg_hole_demo_recorder.py`; pool/fit/Sobol checked offline,
+   not yet run on the robot): 100 start configurations on an evenly spaced grid over the reset
    space; fitted-offset scripted insertion through the server, saved locally (`Frame`s + both
    128×128 images per tick). Any non-SUCCESS → align-GUI mode at that pose (you adjust, Enter
    registers it into the offset pool, refit) → retake. Only SUCCESS counts; resumable.

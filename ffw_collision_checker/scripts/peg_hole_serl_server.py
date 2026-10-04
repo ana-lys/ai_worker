@@ -46,7 +46,7 @@ import zmq
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "ffw_peg_hole_env"))
 sys.path.insert(0, str(HERE.parents[1] / "ffw_zmqinterface"))
-from ffw_peg_hole_env import effort, observation, wire  # noqa: E402
+from ffw_peg_hole_env import effort, images, observation, wire  # noqa: E402
 from ffw_peg_hole_env.episode import EpisodeMachine  # noqa: E402
 from ffw_peg_hole_env.geometry import SafetyBox, apply_delta, clip_delta, pose_error  # noqa: E402
 from ffw_zmqinterface import gateway_node as gwn, protocol as gw  # noqa: E402
@@ -134,10 +134,10 @@ class SerlServer:
         self.j7_ref = float(io.effort[6]) if io.effort is not None else 0.0   # unloaded left j7 [mA]
         self.j7_since, self.retract_floor = None, None
         o = json.load(open(OFFSET_MODEL))["const"] if OFFSET_MODEL.exists() else [0.0, 0.0]
-        self.offset_mm = np.array(o, dtype=float)
-        # calibrated hole axis in the hole tool frame: the peg-tool y/z offset rotated by the roll
-        self.axis_c = (Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix() @ np.r_[0.0, o[0], o[1]] / 1000.0)[1:]
+        self.set_offset(o)
         print(f"peg offset {o[0]:+.2f} {o[1]:+.2f} mm (peg tool y/z, {OFFSET_MODEL.name}): on-axis tests use it")
+        self.next_pair = None                             # (hole EE, peg start rel) for the next reset only
+        self.cams, self.last_images = None, None          # images.WristCameras (--images): newest crops per tick
         # Frame state: obs limit boxes, EE velocity memory, the episode's priv values
         self.profiles = observation.load_profiles()
         self.limit_T = {}                                 # arm -> its (static) profile frame, once on TF
@@ -149,6 +149,13 @@ class SerlServer:
             self.em = EpisodeMachine()
             inner = teach.st.on_tick
             teach.st.on_tick = lambda: (inner(), self.background())
+
+    def set_offset(self, mm):
+        """Peg-tool (y, z) offset [mm] the on-axis rules measure from (the calibrated hole axis)."""
+        self.offset_mm = np.array(mm, dtype=float)
+        # calibrated hole axis in the hole tool frame: the peg-tool y/z offset rotated by the roll
+        self.axis_c = (Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix()
+                       @ np.r_[0.0, self.offset_mm] / 1000.0)[1:]
 
     # --- wire ---------------------------------------------------------------------------
     def poll_commands(self):
@@ -188,8 +195,9 @@ class SerlServer:
         vecs = self.frame_vectors()
         if vecs is None:
             return False
-        self.pub.send(wire.encode_frame(*vecs, self.episode_id, self.step, self.state, self.reason,
-                                        self.reward, self.action))
+        self.last_frame = wire.encode_frame(*vecs, self.episode_id, self.step, self.state, self.reason,
+                                            self.reward, self.action)
+        self.pub.send(self.last_frame)
         self.counts["frames"] += 1
         self.last_pub = time.monotonic()
         return True
@@ -233,6 +241,9 @@ class SerlServer:
                  j7_left_change=abs(float(self.io.effort[6]) - self.j7_ref),
                  limit_frame_ok=np.array([frame_ok["right"], frame_ok["left"]], float),
                  mode={wire.FS_IDLE: 0, wire.FS_RESET: 4, wire.FS_FAULT: 5}.get(self.state, np.nan))
+        if self.cams is not None:
+            self.last_images, img_t = self.cams.grab()
+            p["image_t"] = np.array([img_t["right"], img_t["left"]])
         if self.state in (wire.FS_POLICY, wire.FS_INTERVENTION, wire.FS_TERMINATED):
             p.update(self.info)
         priv = np.concatenate([np.atleast_1d(np.asarray(p[name], float)) for name, _, _ in wire.PRIV_FIELDS])
@@ -396,6 +407,9 @@ class SerlServer:
         """None = the teach tool's random reset (peg start +- --xy across, tilted). With
         --start-xy (tests): a random hole, the peg 2 cm above the rim on the CALIBRATED axis
         +- start_xy across it, aligned -- straight down then goes in."""
+        if self.next_pair is not None:
+            pair, self.next_pair = self.next_pair, None
+            return pair
         xy = getattr(self.t.a, "start_xy", None)
         if xy is None:
             return None
@@ -519,6 +533,7 @@ def main():
     ap = pht.build_parser(__doc__, default_out=str(HERE / "recordings" / "peg_hole_serl"))
     ap.add_argument("--port-base", type=int, default=7601)
     ap.add_argument("--duration", type=float, default=None, help="s, then quit (tests)")
+    ap.add_argument("--images", action="store_true", help="decode the wrist D405s (priv image_t; ROI crops)")
     ap.add_argument("--start-xy", type=float, default=None,
                     help="m (tests): start the peg aligned 2 cm above the rim within +- this of the calibrated axis")
     a = ap.parse_args()
@@ -552,6 +567,8 @@ def main():
             t.take_right()
             print(f"recording to {t.out}")
         srv = SerlServer(io, a.port_base, t)
+        if a.images:
+            srv.cams = images.WristCameras()
         srv.running = bool(a.autostart and t is not None)
         print(f"serving at {HZ:.0f} Hz on {a.port_base} (+{wire.PORT_OBS} frames, +{wire.PORT_CONTROL} control); "
               + ("waiting for EnvCmd RESET" if t is not None and not srv.running else

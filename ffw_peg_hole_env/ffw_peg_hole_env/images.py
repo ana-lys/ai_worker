@@ -47,3 +47,35 @@ def load_roi(path=ROI_FILE):
     """The saved ROI file as a dict, or None if it does not exist yet."""
     path = Path(path)
     return json.loads(path.read_text()) if path.exists() else None
+
+
+class WristCameras:
+    """Both wrist D405 RGB feeds decoded off UDP (ffw_il_recorder/gst_decode.py, rotated CCW like
+    the ROS receiver) and cropped with the saved ROIs. The ffw_stream ROS receiver must not run
+    (it would own the ports). grab() -> ({cam: (out, out, 3) RGB uint8 or None}, {cam: recv
+    time.time() or NaN}) with the newest frame of each camera."""
+
+    def __init__(self, roi=None, codec="h264"):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ffw_il_recorder"))
+        from ffw_il_recorder import gst_decode
+        self.roi = roi or load_roi()
+        if self.roi is None:
+            raise FileNotFoundError(f"no ROI file {ROI_FILE}: run peg_hole_roi_gui.py first")
+        self.out = int(self.roi["out"])
+        self.dec = {c: gst_decode.VideoDecoder(c, self.roi[c]["port"], codec=codec, feed="rs",
+                                               rotate=cv2.ROTATE_90_COUNTERCLOCKWISE) for c in CAMS}
+        for d in self.dec.values():
+            d.start()
+
+    def grab(self):
+        imgs, ts = {}, {}
+        for c, d in self.dec.items():
+            frame, t = d.peek()
+            imgs[c] = None if frame is None else crop(frame, self.roi[c], self.out)
+            ts[c] = float("nan") if frame is None else t
+        return imgs, ts
+
+    def stop(self):
+        for d in self.dec.values():
+            d.stop()
