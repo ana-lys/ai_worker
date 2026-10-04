@@ -45,7 +45,7 @@ def main():
     while time.time() - t0 < a.timeout and len(done) < a.episodes:
         if not sub.poll(500):
             continue
-        obs, priv, tag, _ = wire.decode_frame(sub.recv())
+        obs, priv, tag, _, images = wire.decode_frame_parts(sub.recv_multipart())
         st = tag["frame_state"]
         key = (tag["episode_id"], st)
         if key != last:                                       # log state changes, not every frame

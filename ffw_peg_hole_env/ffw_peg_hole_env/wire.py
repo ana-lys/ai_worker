@@ -63,6 +63,10 @@ New messages:
                        TR_SAFETY, TR_INTERVENTIONS, TR_ABORT (TR_OFF_AXIS = 9 is
                        reserved, no longer sent). Store POLICY and INTERVENTION
                        frames, TERMINATED ends the episode, skip RESET / IDLE / FAULT.
+                       With --images the PUB message is multipart [Frame, right RGB,
+                       left RGB] (128x128x3 uint8 raw, the wrist ROIs): receive with
+                       recv_multipart and decode_frame_parts(); an empty image part
+                       = no image this tick.
   (type 11 was the first Frame: the gateway's 131-double Obs + the tag; retired
   2026-10-04, its Obs now travels inside priv as "gateway_obs".)
 
@@ -332,6 +336,34 @@ def decode_frame(data):
     tag = {"episode_id": v[0], "step": v[1], "frame_state": v[2], "reason": v[3],
            "reward": v[4], "action": np.array(v[5:11])}
     return obs, priv, tag, ts
+
+
+IMG = 128                                         # wrist image side (images.py crops to this)
+_IMG_BYTES = IMG * IMG * 3
+
+
+def frame_parts(frame, images):
+    """The PUB message with images: [Frame, right RGB, left RGB] (128x128x3 uint8 raw each; an empty
+    part = no image from that camera this tick, priv image_t is NaN then)."""
+    parts = [frame]
+    for cam in ("right", "left"):
+        im = None if images is None else images.get(cam)
+        parts.append(b"" if im is None else im.tobytes())
+    return parts
+
+
+def decode_frame_parts(parts):
+    """A received PUB message, with or without images (recv_multipart) -> (obs, priv, tag, ts, images),
+    images = {"right": (128, 128, 3) uint8 RGB or None, "left": ...}."""
+    import numpy as np
+    if isinstance(parts, (bytes, bytearray)):
+        parts = [parts]
+    obs, priv, tag, ts = decode_frame(parts[0])
+    images = {"right": None, "left": None}
+    for cam, part in zip(("right", "left"), parts[1:3]):
+        if len(part) == _IMG_BYTES:
+            images[cam] = np.frombuffer(part, np.uint8).reshape(IMG, IMG, 3)
+    return obs, priv, tag, ts, images
 
 
 def layout_markdown():

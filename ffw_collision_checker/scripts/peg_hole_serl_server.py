@@ -200,7 +200,10 @@ class SerlServer:
             return False
         self.last_frame = wire.encode_frame(*vecs, self.episode_id, self.step, self.state, self.reason,
                                             self.reward, self.action)
-        self.pub.send(self.last_frame)
+        if self.cams is None:
+            self.pub.send(self.last_frame)
+        else:                                             # [Frame, right RGB, left RGB]: one message per tick
+            self.pub.send_multipart(wire.frame_parts(self.last_frame, self.last_images))
         self.counts["frames"] += 1
         self.last_pub = time.monotonic()
         return True

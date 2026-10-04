@@ -104,6 +104,11 @@ def test_obs_layout():
     except ValueError:
         bad = True
     check("decode_frame rejects a short frame", bad)
+    imgs = {"right": rng.integers(0, 255, (128, 128, 3), dtype=np.uint8), "left": None}
+    po, pp, pt, pts, pim = wire.decode_frame_parts(wire.frame_parts(f, imgs))
+    check("multipart [Frame, right, left]: frame + images round-trip, empty part = None",
+          np.array_equal(po["vector"], obs) and np.array_equal(pim["right"], imgs["right"]) and pim["left"] is None)
+    check("decode_frame_parts takes a bare Frame too", wire.decode_frame_parts(f)[4] == {"right": None, "left": None})
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
     import write_frame_md
     md = Path(__file__).resolve().parents[1] / "FRAME.md"
