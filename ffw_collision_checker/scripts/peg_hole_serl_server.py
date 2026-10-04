@@ -212,8 +212,7 @@ class SerlServer:
         self.next_pair = None                             # (hole EE, peg start rel) for the next reset only
         self.expert = None                                # the machine intervention's Expert, this episode
         self.seat = None                                  # (offset, force, depth): seat_hole() in every reset
-        self.nudge = None                                 # (front, half, force, depth, speed): nudge_hole() first
-        self.seat_path = None                             # taught waypoints (peg_hole_waypoint_gui.py): replaces the nudge
+        self.seat_path = None                             # taught waypoints (peg_hole_waypoint_gui.py), before the press
         # episode starts: EnvCmd RESET params[0] (wire.RESET_*); retries from the last good state
         self.reset_mode, self.auto_reset, self.max_retries = wire.RESET_AUTO, False, 3
         self.good_rel = None                              # last good state: commanded IK EE pose in the hole tool frame
@@ -583,7 +582,7 @@ class SerlServer:
         self.running = False
 
     def seat_hole(self):
-        """Seat the hole block in the left gripper before the episode: (optionally the nudge first, then)
+        """Seat the hole block in the left gripper before the episode: (optionally a taught path first, then)
         press the peg down on the block beside the hole to self.seat's force, lift it back up.
         2026-10-04 demos: the first contact after a reset moved the hole another 0.7-0.8 mm (retries
         0.05-0.2) -- most first tries failed, their retries went in. RESET frames; a scripted move:
@@ -591,8 +590,6 @@ class SerlServer:
         off_y, f_max, _ = self.seat
         if self.seat_path is not None:
             self.run_path(self.seat_path)
-        elif self.nudge is not None:
-            self.nudge_hole()
         OFF = phs.T_from([0.0, self.offset_mm[0] / 1000.0 + off_y, self.offset_mm[1] / 1000.0], np.eye(3))
         r = self.press(OFF, f_max)
         h0 = r["hole0"]
@@ -667,72 +664,6 @@ class SerlServer:
             if hist[-1][0] - hist[0][0] >= 0.25 and \
                     np.linalg.norm(hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0]) < 0.0002:
                 return
-
-    def nudge_hole(self):
-        """Before the down-press: land on the block's FRONT wall (toward the robot body) at its RIGHT end,
-        press down to the nudge force, slide along the wall to its LEFT end holding that pressed height,
-        lift. Friction drags the block one consistent way, taking up the sideways play the down-press
-        alone leaves (user, 2026-10-05). Block (MJCF): 52 mm square, 5 mm wall around a 32 mm hole;
-        peg 31 mm square, so its centre 21 mm in front of the axis rests on the front wall and +-10 mm
-        along it runs the peg's edge over the whole 52 mm. self.nudge = (front [m], half length [m],
-        press force [N], unused, slide speed [m/s])."""
-        front, half, f_max, _, v_slide = self.nudge
-        t, arm = self.t, self.t.st.arms["right"]
-        H = self.io.ee("left") @ pht.HOLE_TOOL
-        # robot directions in the hole's lateral (y, z) plane: front = toward the robot (base -x), left = base +y
-        to_h = lambda v: (lambda w: w / np.linalg.norm(w))(np.array([H[:3, 1] @ v, H[:3, 2] @ v]))  # noqa: E731
-        f_dir, l_dir = to_h(np.array([-1.0, 0.0, 0.0])), to_h(np.array([0.0, 1.0, 0.0]))
-        l_dir = l_dir - (l_dir @ f_dir) * f_dir                   # orthogonal to front in the plane
-        l_dir /= np.linalg.norm(l_dir)
-        at = lambda u: self.hole_lateral(*(front * f_dir + u * l_dir))   # noqa: E731  u = -half (right) .. +half (left)
-        r = self.press(at(-half), f_max)
-        s_cmd, rw = r["s_cmd"], self.em.reward
-        peg0 = self.peg_lateral()
-        h_start = self.hole_now()
-        n = int(np.ceil(2 * half / (v_slide / HZ)))
-        fs = []
-        t.phase("push")
-        for k in range(1, n + 1):                                 # slide to the front-left end, same pressed height
-            self.command_site(t.peg_target(s_cmd, at(-half + 2 * half * k / n))[0] @ arm.map, policy_limits=False)
-            t_end = time.monotonic() + 1.0 / HZ
-            while time.monotonic() < t_end - phs.CTRL_DT / 2:
-                t.st.tick(None)
-            ins, q, amps, lift, _, _ = self.measure()
-            fs.append(rw.push_back_force(ins, q, amps, lift))
-        t.held(0.15)
-        peg_moved = (self.peg_lateral() - peg0) @ l_dir
-        dh = self.hole_now()[0] - h_start[0]
-        hole_left = dh @ (H[:3, :3] @ np.r_[0.0, l_dir[0], l_dir[1]])
-        self.lift_off(at(half), s_cmd)
-        print(f"  nudge: {self.press_line(r)}, front-right; slid: peg moved {peg_moved * 1000:+.1f} mm left "
-              f"(commanded {2 * half * 1000:.0f}), push-back {min(fs):.1f}..{max(fs):.1f} N; block moved "
-              f"{hole_left * 1000:+.2f} mm left ({np.linalg.norm(dh) * 1000:.2f} mm in all)")
-        t.phase("idle")
-
-    def run_path(self, wps, v_press=0.005):
-        """Replay taught waypoints (peg_hole_waypoint_gui.py) at the LIVE hole: each is the commanded peg
-        tool pose relative to the hole tool frame; "move" waypoints at --move-speed, "press" ones at
-        v_press (in contact; the commanded pose keeps the taught pressing depth). A scripted reset move:
-        no policy limits; the gear guard and the hole watch stay on. Then lifts 5 mm up the axis."""
-        t = self.t
-        H = self.io.ee("left") @ pht.HOLE_TOOL
-        h0, ax = self.hole_now()
-        for w in wps:
-            T = H @ np.array(w["rel_cmd"]) @ np.linalg.inv(pht.PEG_TOOL)       # TF EE goal
-            press = w["kind"] == "press"
-            self.quick_move(T, v_press if press else t.a.move_speed, "push" if press else "hover")
-            if press and w is wps[0]:
-                self.wait_hole_still()
-        dh = self.hole_now()[0] - h0
-        side = dh - (dh @ ax) * ax
-        T_up = self.io.ee("right").copy()
-        T_up[:3, 3] += 0.005 * H[:3, 0]
-        self.quick_move(T_up, t.a.move_speed, "retract")
-        lat = side @ H[:3, :3]                                   # hole frame components of the sideways move
-        print(f"  path: {len(wps)} waypoints ({sum(w['kind'] == 'press' for w in wps)} press); block moved "
-              f"{np.linalg.norm(side) * 1000:.2f} mm sideways (base x {side[0] * 1000:+.2f}, y {side[1] * 1000:+.2f} mm; "
-              f"hole frame y {lat[1] * 1000:+.2f}, z {lat[2] * 1000:+.2f})")
-        t.phase("idle")
 
     def peg_lateral(self):
         """Measured peg tool point across the hole axis, hole tool frame (y, z) [m]."""
@@ -910,12 +841,8 @@ def add_seat_args(ap):
                     help="m beside the hole axis (peg tool +y) where the reset presses on the block top")
     ap.add_argument("--seat-force", type=float, default=8.0, help="N push-back that ends the press")
     ap.add_argument("--seat-depth", type=float, default=0.004, help="m past the block top the press goes at most")
-    ap.add_argument("--seat-nudge", action="store_true",
-                    help="before the down-press: press on the block's front wall at its right end and slide to the left")
-    ap.add_argument("--nudge-force", type=float, default=8.0, help="N the nudge presses down with (then slides)")
     ap.add_argument("--seat-path", default=None,
                     help="waypoints JSON from peg_hole_waypoint_gui.py, replayed at the live hole before the down-press")
-    ap.add_argument("--nudge-speed", type=float, default=0.005, help="m/s the nudge slides")
 
 
 def seat_from_args(a):
@@ -928,10 +855,6 @@ def path_from_args(a):
     wps = json.loads(Path(a.seat_path).read_text())["waypoints"]
     print(f"seat path: {len(wps)} waypoints from {a.seat_path}")
     return wps
-
-
-def nudge_from_args(a):
-    return (0.021, 0.010, a.nudge_force, None, a.nudge_speed) if getattr(a, "seat_nudge", False) else None
 
 
 def main():
@@ -974,7 +897,7 @@ def main():
             t.take_right()
             print(f"recording to {t.out}")
         srv = SerlServer(io, a.port_base, t)
-        srv.seat, srv.nudge, srv.seat_path = seat_from_args(a), nudge_from_args(a), path_from_args(a)
+        srv.seat, srv.seat_path = seat_from_args(a), path_from_args(a)
         srv.auto_reset, srv.max_retries = a.auto_reset, a.max_retries
         if t is not None:
             srv.em.cfg.failure_mode = a.failure_mode

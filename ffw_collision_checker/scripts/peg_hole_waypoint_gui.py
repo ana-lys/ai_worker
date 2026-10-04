@@ -31,6 +31,7 @@ import numpy as np
 import rclpy
 import rclpy.signals
 from rclpy.executors import SingleThreadedExecutor
+from scipy.spatial.transform import Rotation as Rot
 
 import peg_hole_random as phr
 import peg_hole_teach as pht
@@ -44,9 +45,14 @@ def rel_summary(H, rel):
     p = rel[:3, 3]
     lat_base = H[:3, 1] * p[1] + H[:3, 2] * p[2]                      # the across-axis offset, in base_link
     tilt = float(np.degrees(np.arccos(np.clip(rel[0, 0], -1.0, 1.0))))
+    # orientation against the peg aligned on the hole (peg_target's ROLL), as rotations about the hole's
+    # axis (x) and its two cross axes (y, z): 0 0 0 = aligned
+    R_al = Rot.from_euler("x", pht.ROLL, degrees=True).as_matrix()
+    rx, ry, rz = Rot.from_matrix(rel[:3, :3] @ R_al.T).as_euler("xyz", degrees=True)
     return {"above_top_mm": (p[0] - pht.TOP) * 1000, "y_mm": p[1] * 1000, "z_mm": p[2] * 1000,
             "base_x_mm": lat_base[0] * 1000, "base_y_mm": lat_base[1] * 1000,
-            "lateral_mm": float(np.hypot(p[1], p[2]) * 1000), "tilt_deg": tilt}
+            "lateral_mm": float(np.hypot(p[1], p[2]) * 1000), "tilt_deg": tilt,
+            "rot_axis_deg": float(rx), "rot_y_deg": float(ry), "rot_z_deg": float(rz)}
 
 
 class Gui:
@@ -94,6 +100,8 @@ class Gui:
                  f"   tilt {sm['tilt_deg']:4.1f} deg",
                  f"  across the axis in robot directions: base x {sm['base_x_mm']:+6.1f} mm   base y (left +) {sm['base_y_mm']:+6.1f} mm",
                  f"  hole frame: y {sm['y_mm']:+6.1f}  z {sm['z_mm']:+6.1f} mm",
+                 f"orientation vs aligned: about the axis {sm['rot_axis_deg']:+5.1f}   about hole y {sm['rot_y_deg']:+5.1f}   "
+                 f"about hole z {sm['rot_z_deg']:+5.1f} deg",
                  f"press (commanded below measured): {sm['above_top_mm'] - sc['above_top_mm']:+5.1f} mm",
                  f"waypoints: {len(self.wps)}" + ("  [unsaved]" if self.dirty else "") + "   " +
                  "  ".join(f"#{w['i']}{'P' if w['kind'] == 'press' else ''}" for w in self.wps[-8:]),

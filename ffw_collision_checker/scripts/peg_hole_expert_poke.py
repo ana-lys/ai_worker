@@ -108,8 +108,7 @@ def main():
         io.set_hold_side("left", True)
         t.take_right()
         srv = DemoServer(io, a.port_base, t)
-        srv.cams, srv.seat, srv.nudge = cams, srvmod.seat_from_args(a), srvmod.nudge_from_args(a)
-        srv.seat_path = srvmod.path_from_args(a)
+        srv.cams, srv.seat, srv.seat_path = cams, srvmod.seat_from_args(a), srvmod.path_from_args(a)
         srv.reset_mode = wire.RESET_RANDOM
         cmd = "reset"
         while cmd != "quit":
