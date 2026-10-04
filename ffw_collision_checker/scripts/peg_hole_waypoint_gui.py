@@ -102,7 +102,7 @@ class Gui:
                  f"  hole frame: y {sm['y_mm']:+6.1f}  z {sm['z_mm']:+6.1f} mm",
                  f"orientation vs aligned: about the axis {sm['rot_axis_deg']:+5.1f}   about hole y {sm['rot_y_deg']:+5.1f}   "
                  f"about hole z {sm['rot_z_deg']:+5.1f} deg",
-                 f"press (commanded below measured): {sm['above_top_mm'] - sc['above_top_mm']:+5.1f} mm",
+                 f"commanded below measured (arm sag ~3.5 mm + any pressing): {sm['above_top_mm'] - sc['above_top_mm']:+5.1f} mm",
                  f"waypoints: {len(self.wps)}" + ("  [unsaved]" if self.dirty else "") + "   " +
                  "  ".join(f"#{w['i']}{'P' if w['kind'] == 'press' else ''}" for w in self.wps[-8:]),
                  self.msg,
@@ -156,6 +156,7 @@ def main():
                                                         for s in ("left", "right")):
             time.sleep(0.1)
         t = pht.Teach(io, a)
+        t.st.on_tick = lambda: t.rec.sample(t.st)        # no teach window: its key polling at 100 Hz ate our keys
         t.set_tool_model(a.tool_model)
         t.st.arms["left"] = phr.Arm("left", io.ee("left"), io.latest_site("left"))   # the hole holds
         io.set_hold_side("left", True)

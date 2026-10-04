@@ -389,8 +389,8 @@ class SerlServer:
         if self.watch is not None and self.sideways(self.watch) > HOLE_SHIFT_MAX:
             self.watch = None
             raise HoleMoved(f"hole pushed {HOLE_SHIFT_MAX * 1000:.0f}+ mm sideways")
-        if self.t is not None and self.state in (wire.FS_POLICY, wire.FS_INTERVENTION, wire.FS_RESET):
-            self.guard()                                      # only while something is being commanded
+        if self.t is not None and self.state in (wire.FS_POLICY, wire.FS_INTERVENTION):
+            self.guard()                                      # episodes only: resets press on purpose (user 2026-10-05)
         if self.state in (wire.FS_RESET, wire.FS_IDLE, wire.FS_FAULT) and time.monotonic() - self.last_pub >= 1.0 / HZ:
             self.poll_commands()
             self.publish()
@@ -590,6 +590,9 @@ class SerlServer:
         off_y, f_max, _ = self.seat
         if self.seat_path is not None:
             self.run_path(self.seat_path)
+        if f_max is None:                                         # --no-seat-press: the taught path only
+            self.t.phase("idle")
+            return True
         OFF = phs.T_from([0.0, self.offset_mm[0] / 1000.0 + off_y, self.offset_mm[1] / 1000.0], np.eye(3))
         r = self.press(OFF, f_max)
         h0 = r["hole0"]
@@ -656,16 +659,19 @@ class SerlServer:
         p = R.T @ np.r_[0.0, self.axis_c[0] + y_h, self.axis_c[1] + z_h]
         return phs.T_from([0.0, p[1], p[2]], np.eye(3))
 
-    def wait_hole_still(self, timeout=2.0):
+    def wait_hole_still(self, timeout=1.0, v_still=0.0005, window=0.15):
+        """Up to `timeout` s until the hole moves < v_still [m/s] over `window` s (it settles after a move)."""
         hist, t_end = [], time.monotonic() + timeout
         while time.monotonic() < t_end:
             self.t.st.tick(None)
             hist = (hist + [(time.monotonic(), self.hole_now()[0])])[-30:]
-            if hist[-1][0] - hist[0][0] >= 0.25 and \
-                    np.linalg.norm(hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0]) < 0.0002:
+            while len(hist) > 2 and hist[-1][0] - hist[1][0] >= window:
+                hist.pop(0)
+            if hist[-1][0] - hist[0][0] >= window and \
+                    np.linalg.norm(hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0]) < v_still:
                 return
 
-    def run_path(self, wps, v_press=0.005):
+    def run_path(self, wps, v_press=0.015, v_exit=0.03):
         """Replay taught waypoints (peg_hole_waypoint_gui.py) at the LIVE hole: each is the commanded peg
         tool pose relative to the hole tool frame (full pose: a tilted peg replays tilted). "move"
         waypoints at --move-speed, "press" ones -- and any segment that starts or ends below the block
@@ -695,7 +701,7 @@ class SerlServer:
                 self.wait_hole_still()
             elif low(prev) and not low(T):                                  # leaving the hole: straight up first
                 rise = pht.TOP + 0.005 - (Hi @ prev @ pht.PEG_TOOL)[0, 3]
-                self.quick_move(up_axis(prev, rise), v_press, "retract")
+                self.quick_move(up_axis(prev, rise), v_exit, "retract")
                 slow = False
             self.quick_move(T, v_press if slow else t.a.move_speed, "push" if slow else "hover")
             prev = T
@@ -884,12 +890,15 @@ def add_seat_args(ap):
                     help="m beside the hole axis (peg tool +y) where the reset presses on the block top")
     ap.add_argument("--seat-force", type=float, default=8.0, help="N push-back that ends the press")
     ap.add_argument("--seat-depth", type=float, default=0.004, help="m past the block top the press goes at most")
+    ap.add_argument("--no-seat-press", action="store_true", help="skip the 8 N down-press (the --seat-path only)")
     ap.add_argument("--seat-path", default=None,
                     help="waypoints JSON from peg_hole_waypoint_gui.py, replayed at the live hole before the down-press")
 
 
 def seat_from_args(a):
-    return None if a.no_seat else (a.seat_offset, a.seat_force, a.seat_depth)
+    if a.no_seat:
+        return None
+    return (a.seat_offset, None if getattr(a, "no_seat_press", False) else a.seat_force, a.seat_depth)
 
 
 def path_from_args(a):
