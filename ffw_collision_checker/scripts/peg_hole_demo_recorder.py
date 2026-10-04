@@ -478,7 +478,7 @@ def main():
         t.take_right()
         srv = DemoServer(io, a.port_base, t)
         srv.cams = cams
-        srv.seat, srv.nudge = srvmod.seat_from_args(a), srvmod.nudge_from_args(a)
+        srv.seat, srv.nudge, srv.seat_path = srvmod.seat_from_args(a), srvmod.nudge_from_args(a), srvmod.path_from_args(a)
         print(f"teach recording to {t.out}; demos to {a.demo_dir}; frames also on port {a.port_base}")
         Recorder(srv, a).run()
     except (KeyboardInterrupt, Quit, pht.Abort) as e:
