@@ -247,7 +247,9 @@ class Recorder:
         self.model = json.loads(MODEL_FILE.read_text()) if MODEL_FILE.exists() else fit(self.pool)
 
     def n_done(self):
-        return sum(1 for v in self.index["poses"].values() if v["status"] == "done")
+        """Demos counted toward --n; with --no-manual every tried pose counts (done or failed)."""
+        ok = ("done", "failed") if self.a.no_manual else ("done",)
+        return sum(1 for v in self.index["poses"].values() if v["status"] in ok)
 
     def save_index(self):
         self.index_file.write_text(json.dumps(self.index, indent=1) + "\n")
@@ -371,7 +373,7 @@ class Recorder:
         k = 0
         while self.n_done() < n and k < len(self.U):
             rec = self.index["poses"].get(str(k))
-            if rec is not None and rec["status"] in ("done", "unreachable", "skipped"):
+            if rec is not None and rec["status"] in ("done", "unreachable", "skipped", "failed"):
                 k += 1
                 continue
             pose = pose_from(self.U[k], a, self.t)
@@ -438,6 +440,10 @@ class Recorder:
                     self.save_index()
                     break
                 self.save_index()
+                if a.no_manual and self.fails_since_calibration(rec) > a.auto_retries:
+                    rec["status"] = "failed"                  # test mode: record it and move on
+                    self.save_index()
+                    break
                 if self.fails_since_calibration(rec) <= a.auto_retries:
                     print(f"  retrying automatically ({self.fails_since_calibration(rec)} of "
                           f"{a.auto_retries + 1} tries before manual calibration)")
@@ -471,6 +477,8 @@ def main():
     ap.add_argument("--height", type=float, nargs=2, default=[-0.02, 0.0], help="m, hole along its axis")
     ap.add_argument("--tilt-range", type=float, default=3.0, help="deg, hole tilt about each cross axis")
     ap.add_argument("--hover", type=float, default=0.005, help="m above the rim the expert aligns at")
+    ap.add_argument("--no-manual", action="store_true",
+                    help="test mode: a pose whose tries all fail is marked failed, never calibrated; --n counts tried poses")
     ap.add_argument("--auto-retries", type=int, default=1,
                     help="expert retries of a failed pose before asking for manual calibration")
     ap.add_argument("--manual-hover", type=float, default=0.0015,
