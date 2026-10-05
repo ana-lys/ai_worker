@@ -89,6 +89,7 @@ def main():
     ap.add_argument("--timestep", type=float, default=0.004)
     ap.add_argument("--travel-speed", type=float, default=0.05, help="m/s (sim time) between grid points")
     ap.add_argument("--teleport", action="store_true", help="jump between grid points instead of moving")
+    ap.add_argument("--no-pause", action="store_true", help="run every episode without waiting for Enter")
     a = ap.parse_args()
 
     b = MujocoBackend(hz=15.0, view=True, timestep=a.timestep, cameras=False, lift=a.lift)
@@ -141,6 +142,10 @@ def main():
             pe = 0.0
         solver.reset()
         b.viewer.sync()
+        if not a.no_pause:                                               # stop before every insertion
+            k = input(f"  {i + 1:3d}/{len(grid)} at the start -- Enter: insert, q: quit ").strip().lower()
+            if k == "q" or not b.viewer.is_running():
+                break
         res = None
         while b.viewer.is_running():
             t0 = time.perf_counter()
