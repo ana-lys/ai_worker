@@ -92,6 +92,8 @@ def main():
     a = ap.parse_args()
 
     b = MujocoBackend(hz=15.0, view=True, timestep=a.timestep, cameras=False, lift=a.lift)
+    with b.viewer.lock():
+        b.viewer.opt.sitegroup[:] = 0                                    # hide every site (all 6 groups)
     task = PegHoleTask(b, PegHoleConfig())
     solver = InsertionSolver(task)
     c = task.cfg
