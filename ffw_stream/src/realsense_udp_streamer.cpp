@@ -119,7 +119,12 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
   pipe << "appsrc name=src is-live=true format=3 do-timestamp=false block=false "
        << "caps=\"" << caps.str() << "\" ! "
        << "videoconvert ! "
-       << "video/x-raw,format=I420 ! ";
+       // MJPEG/JFIF is full-range YCbCr. Without colorimetry=1:4:0:0 the HD
+       // default (limited 16-235) went into jpegenc and every decoder read it
+       // back as full range: black 0 -> 15, white 255 -> 234, so no true
+       // black anywhere. H264 signals its range in the VUI and is unaffected.
+       << (mjpeg ? "video/x-raw,format=I420,colorimetry=1:4:0:0 ! "
+                 : "video/x-raw,format=I420 ! ");
   if (mjpeg) {
     // Intra-only frames → no GOP/reorder delay, instant decode, per-frame loss recovery
     pipe << "jpegenc quality=90 ! "
