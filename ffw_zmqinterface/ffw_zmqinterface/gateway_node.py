@@ -224,7 +224,7 @@ _GRIP_JOINT = {0: "gripper_r_joint1", 1: "gripper_l_joint1"}
 # Model-specific, not wire contract. Left-closed is 1.2 on the wire but the
 # left URDF caps at 1.1 and the controller clamps, so settled-closed may read
 # ~0.92 -- adjust here if live feedback disagrees.
-_GRIP_OPEN = {0: 0.175, 1: 0.0}
+_GRIP_OPEN = {0: 0.0, 1: 0.0}
 _GRIP_CLOSED = {0: 1.2, 1: 1.2}
 
 

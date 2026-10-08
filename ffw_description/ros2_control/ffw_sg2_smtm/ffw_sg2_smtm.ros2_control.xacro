@@ -329,15 +329,13 @@
       </gpio>
       <!-- XH540-V270-R right gripper at ID 130 (replaces the XM430-W350).
            Raw window: Min Position Limit 2000 = CLOSED, Max 3072 = OPEN.
-           The teleop stack's joint convention is the opposite direction and
-           a different span (ffw_ik_solver_teleop kGripperRMin 0.175 = open,
-           kGripperRMax 1.2 = closed; gateway _GRIP_OPEN/_GRIP_CLOSED), so the
-           [unit info] override maps it linearly with a NEGATIVE multiplier:
-             q = raw * m + off,  m = -1.025/1070,  off = 0.175 - 3071*m
-           0.175 rad -> raw 3071 (open), 1.2 rad -> raw 2001 (closed): one
-           tick inside each limit, because the driver truncates (q-off)/m and
-           1.2 would otherwise land on 1999, outside the limit.
-           Position is therefore NOT physical radians for this joint. -->
+           Not physical radians: like the RH-P12-RN-A side it reports an
+           arbitrary 0 (open) .. 1.2 (closed) so teleop treats both grippers
+           alike. [unit info] maps it with a NEGATIVE multiplier:
+             q = raw * m + off,  m = -1.2/1070,  off = -3071*m
+           0 -> raw 3071 (open), 1.2 -> raw 2001 (closed): one tick inside
+           each limit, because the driver truncates (q-off)/m and 1.2 would
+           otherwise land on 1999, outside the limit. -->
       <gpio name="dxl130">
         <param name="type">dxl</param>
         <param name="ID">130</param>
@@ -355,7 +353,7 @@
         <param name="Homing Offset">0</param>
         <param name="Max Position Limit">3072</param>
         <param name="Min Position Limit">2000</param>
-        <param name="[unit info]">Goal Position, -0.0009579439252336447, rad, signed, 3.116845794392523; Present Position, -0.0009579439252336447, rad, signed, 3.116845794392523</param>
+        <param name="[unit info]">Goal Position, -0.0011214953271028037, rad, signed, 3.4441121495327103; Present Position, -0.0011214953271028037, rad, signed, 3.4441121495327103</param>
       </gpio>
       <!-- LEFT ARM -->
       <gpio name="dxl31">

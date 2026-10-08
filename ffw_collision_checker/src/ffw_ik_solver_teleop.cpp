@@ -2273,7 +2273,7 @@ private:
   // and the §11 quest-trigger absolute mapping.
   static constexpr double kGripperLMin = 0.0;
   static constexpr double kGripperLMax = 1.2;
-  static constexpr double kGripperRMin = 0.175;
+  static constexpr double kGripperRMin = 0.0;
   static constexpr double kGripperRMax = 1.2;
 
   double gripper_l_pos_ = 1.1;
