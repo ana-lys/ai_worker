@@ -347,11 +347,39 @@ class BoardPoseDetector {
     }
     if (!ok) return;
 
+    // Fit-quality reseed: a warm-started ITERATIVE solve can settle into a
+    // wrong local minimum that is still finite, in front and jump-free; it
+    // then becomes the next seed and sticks (2026-10-09: 15.8 px / 11 cm off
+    // in z for minutes while a cold SQPNP of the same corners fit at 0.58 px).
+    // If the warm fit is poor, also solve cold and keep the better fit; a
+    // better cold fit is accepted even if it looks like a jump.
+    auto reproj_of = [&](const cv::Mat &r, const cv::Mat &t) {
+      std::vector<cv::Point2f> pr;
+      cv::projectPoints(obj_pts, r, t, K, D, pr);
+      double e = 0.0;
+      for (size_t i = 0; i < pr.size(); ++i) e += cv::norm(pr[i] - img_pts[i]);
+      return e / pr.size();
+    };
+    constexpr double kReseedPx = 2.0;
+    bool force_accept = false;
+    if (pnp_seeded_) {
+      double e_warm = reproj_of(trial_r, trial_t);
+      if (e_warm > kReseedPx) {
+        cv::Mat cold_r, cold_t;
+        if (cv::solvePnP(obj_pts, img_pts, K, D, cold_r, cold_t, false, cv::SOLVEPNP_SQPNP) &&
+            sane(cold_r, cold_t) && reproj_of(cold_r, cold_t) < 0.5 * e_warm) {
+          trial_r = cold_r;
+          trial_t = cold_t;
+          force_accept = true;
+        }
+      }
+    }
+
     constexpr double kMaxJumpDistM = 0.05;     // per ~200 ms pass
     constexpr double kMaxJumpAngleRad = 0.26;  // ~15 deg
     constexpr int kMaxConsecutiveRejects = 3;  // sustained = real motion -> reseed
     bool accept = true;
-    if (pnp_seeded_) {
+    if (pnp_seeded_ && !force_accept) {
       double dt = cv::norm(trial_t - pnp_tvec_);
       double da = Eigen::AngleAxisd(rvecToR(trial_r) * rvecToR(pnp_rvec_).transpose()).angle();
       if (dt > kMaxJumpDistM || std::abs(da) > kMaxJumpAngleRad) {
