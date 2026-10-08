@@ -711,6 +711,7 @@ def capture(a):
                 # head can't follow this base/lift step: undo it, keep head
                 nxt, n_lift, goal = cur.copy(), lift, head0
             # move everything at once
+            t_mv = time.monotonic()
             dh = float(np.max(np.abs(goal - head0)))
             hh = send_traj(node.head_ac, ['head_joint1', 'head_joint2'], list(goal),
                            max(a.head_min_s, dh / a.head_vmax), wait=False)
@@ -721,8 +722,10 @@ def capture(a):
                          tol_m=a.walk_tol_m, tol_deg=a.walk_tol_deg)
             wait_traj(hh)
             wait_traj(hl)
+            t_cap = time.monotonic()
             cur, lift = nxt, n_lift
             good, stab, why = capture_sample()
+            t_done = time.monotonic()
             if good is None:
                 # likely drifted out of the margin: re-centre from a fresh pose, retry once
                 d = latest_pose(wait_still(use_base))
@@ -752,7 +755,8 @@ def capture(a):
             c, _, _ = board_px(pose)
             log(f'  walk {step}: sample {n_ok}  base ({vis[0]:+.3f},{vis[1]:+.3f},'
                 f'{math.degrees(vis[2]):+.1f}deg; odom yaw {math.degrees(cur[2]):+.1f}) '
-                f'lift {lift:+.3f}  centre ({c[0]:.0f},{c[1]:.0f})'
+                f'lift {lift:+.3f}  centre ({c[0]:.0f},{c[1]:.0f})  '
+                f'move {t_cap - t_mv:.2f}s capture {t_done - t_cap:.2f}s'
                 f'  reproj {good[-1]["reproj_px"]:.2f}px  [{time.monotonic() - t_last:.1f}s]')
             t_last = time.monotonic()
 
