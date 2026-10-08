@@ -281,13 +281,22 @@ def capture(a):
         pt.positions = [float(p) for p in positions]
         pt.time_from_start = Duration(sec=int(duration), nanosec=int((duration % 1) * 1e9))
         g.trajectory.points = [pt]
-        fut = ac.send_goal_async(g)
-        t0 = time.monotonic()
-        while not fut.done():
-            if time.monotonic() - t0 > 5:
-                raise RuntimeError('goal not accepted')
-            time.sleep(0.01)
-        gh = fut.result()
+        # rclpy race: with the executor spinning on another thread the goal
+        # response can arrive before the client registers the request ("Ignoring
+        # unexpected goal response") and the future never completes. Resending
+        # the same target is harmless, so retry.
+        gh = None
+        for attempt in range(4):
+            fut = ac.send_goal_async(g)
+            t0 = time.monotonic()
+            while not fut.done() and time.monotonic() - t0 < 3.0:
+                time.sleep(0.01)
+            if fut.done():
+                gh = fut.result()
+                break
+            log(f'goal response lost for {joints} -- resending ({attempt + 1}/3)')
+        if gh is None:
+            raise RuntimeError(f'goal not accepted for {joints}')
         if not gh.accepted:
             raise RuntimeError(f'goal rejected for {joints}')
         res = gh.get_result_async()
@@ -498,6 +507,10 @@ def capture(a):
     else:
         d, r = a.base_xy, math.radians(a.base_yaw_deg)
         placements = [(0, 0, 0), (d, 0, 0), (-d, 0, 0), (0, d, 0), (0, -d, 0), (0, 0, r), (0, 0, -r)]
+    group_ids = list(range(len(placements)))
+    if a.placements and not a.no_base:
+        group_ids = [int(x) for x in a.placements.split(',')]
+        placements = [placements[k] for k in group_ids]
 
     log('waiting for topics ...')
     t0 = time.monotonic()
@@ -560,11 +573,11 @@ def capture(a):
     start_lift = s0['js'].get('lift_joint')
     n_ok = 0
     try:
-        for g, (dx, dy, dyaw) in enumerate(placements):
+        for g, (dx, dy, dyaw) in zip(group_ids, placements):
             if use_base:
                 log(f'base -> placement {g}: dx {dx:+.2f} dy {dy:+.2f} dyaw {math.degrees(dyaw):+.1f}')
                 drive_to(start_odom, dx, dy, dyaw)
-            for li, z in enumerate(lifts if g % 2 == 0 else lifts[::-1]):
+            for li, z in enumerate(lifts if group_ids.index(g) % 2 == 0 else lifts[::-1]):
                 log(f'lift -> {z:+.3f}')
                 move_lift(z)
                 d = latest_pose(wait_still(use_base))
@@ -616,17 +629,23 @@ def capture(a):
 
 
 # ══════════════════════════════════════════════════════════════════════ SOLVE
-def solve(path, args):
+def solve(paths, args):
     from scipy.optimize import least_squares
 
+    # Several capture files may be combined: a placement's board pose is only
+    # shared within one file (each run starts from its own start pose), so the
+    # group key is (file, placement).
     header, samples = None, []
-    with open(os.path.expanduser(path)) as fh:
-        for line in fh:
-            r = json.loads(line)
-            if r['type'] == 'header' and header is None:
-                header = r
-            elif r['type'] == 'sample' and r.get('base_to_calib'):
-                samples.append(r)
+    for fi, path in enumerate(paths):
+        with open(os.path.expanduser(path)) as fh:
+            for line in fh:
+                r = json.loads(line)
+                if r['type'] == 'header' and header is None:
+                    header = r
+                elif r['type'] == 'sample' and r.get('base_to_calib'):
+                    r['group'] = f'{fi}:{r["group"]}'
+                    samples.append(r)
+    path = ', '.join(paths)
     if not samples:
         sys.exit('no samples with base_to_calib in ' + path)
     ci = header['camera_info']
@@ -738,13 +757,17 @@ def solve(path, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--solve', metavar='JSONL', help='solve a capture file instead of capturing')
+    ap.add_argument('--solve', metavar='JSONL', nargs='+',
+                    help='solve one or more capture files instead of capturing')
     ap.add_argument('--ns', default='/d435', help='detector namespace (/d435 or /oakd)')
     ap.add_argument('--out', default=f'~/head_cam_calib_{time.strftime("%Y%m%d_%H%M%S")}.jsonl')
     ap.add_argument('--plan-only', action='store_true')
     ap.add_argument('--yes', action='store_true', help='do not wait for Enter')
     ap.add_argument('--no-base', action='store_true')
     ap.add_argument('--base-xy', type=float, default=0.20, help='+-x and +-y placement [m]')
+    ap.add_argument('--placements', default='',
+                    help='subset of placement indices to run, e.g. "2,3,4,5,6" '
+                         '(0 start, 1 +x, 2 -x, 3 +y, 4 -y, 5 +yaw, 6 -yaw)')
     ap.add_argument('--base-yaw-deg', type=float, default=10.0)
     ap.add_argument('--base-vmax', type=float, default=0.05)
     ap.add_argument('--base-wmax', type=float, default=0.10)
