@@ -23,6 +23,10 @@
 #   - Uses ffw_sg2_smtm URDF/ros2_control tree
 #
 
+import os
+import importlib.util
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import IncludeLaunchDescription
@@ -39,6 +43,29 @@ from launch.substitutions import LaunchConfiguration
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+
+def _detect_head_camera_label():
+    """'OAK-D' / 'D435' / 'ZED' / None -- the same USB detection that
+    ffw_stream's unified_stream_launch.py uses for rgb_source:=auto."""
+    path = os.path.join(get_package_share_directory('ffw_stream'), 'launch',
+                        'unified_stream_launch.py')
+    spec = importlib.util.spec_from_file_location('ffw_unified_stream_launch', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._detect_head_camera()[0]
+
+
+# Nominal D435 mount relative to camera_calibration_link (an OPTICAL frame:
+# x right, y down, z forward, at the old ZED-M centre). The D435 RGB lens is
+# centred there and the camera is pitched 15 deg nose-down (about +y in the
+# body/ENU frame) = -15 deg about the optical x axis, which swings +z
+# (forward) toward +y (down). It is also shifted slightly in body x/z by an
+# unmeasured amount -- translation left at 0 until the AprilTag head-sweep
+# calibration (ffw_depthai/scripts/sweep_and_solve_camera_calibration.py or
+# ffw_collision_checker/scripts/camera_calib_padfit.py) is re-run for it.
+D435_HEAD_CAM_TF = ['--x', '0.0', '--y', '0.0', '--z', '0.0',
+                    '--roll', '-0.261799', '--pitch', '0.0', '--yaw', '0.0']
 
 
 def generate_launch_description():
@@ -395,13 +422,21 @@ def generate_launch_description():
     # outlier removal) -- re-run
     # ffw_depthai/scripts/sweep_and_solve_camera_calibration.py to redo it if
     # the board or camera mount ever changes.
+    # head_camera_frame mount follows the head camera actually on USB: the
+    # OAK-D keeps its calibrated residual above; a D435 gets its nominal mount.
+    head_cam_label = _detect_head_camera_label()
+    if head_cam_label == 'D435':
+        head_cam_tf_args = D435_HEAD_CAM_TF
+    else:
+        head_cam_tf_args = ['--x', '-0.006335', '--y', '-0.007832', '--z', '0.016026',
+                            '--roll', '0.013260', '--pitch', '-0.001668', '--yaw', '0.006747']
+    print(f'[bringup] head camera on USB: {head_cam_label} -> head_camera_frame '
+          f'{" ".join(head_cam_tf_args)}')
     oakd_cam_static_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         arguments=['--frame-id', 'camera_calibration_link',
-                   '--child-frame-id', 'head_camera_frame',
-                   '--x', '-0.006335', '--y', '-0.007832', '--z', '0.016026',
-                   '--roll', '0.013260', '--pitch', '-0.001668', '--yaw', '0.006747'],
+                   '--child-frame-id', 'head_camera_frame'] + head_cam_tf_args,
         output='screen',
         condition=IfCondition(launch_cameras),
     )
