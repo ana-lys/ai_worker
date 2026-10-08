@@ -916,27 +916,36 @@ def solve(paths, args):
         b = samples[i]['base_to_calib']
         A_base[i] = (planar_T(o['x'], o['y'], o['yaw']), T_from(quat_to_R(*b['q']), b['t']))
 
+    # Vectorised: every sample's camera pose in one batched op, every corner
+    # projected at once (was a Python loop over samples).
+    A_stack = np.array(A)
+    walk_arr = np.array(walk_idx, dtype=int)
+    if walk_idx:
+        Od_st = np.array([A_base[i][0] for i in walk_idx])
+        Abc_st = np.array([A_base[i][1] for i in walk_idx])
+    g_of_sample = np.array([gidx[s['group']] for s in samples])
+    Xh = np.hstack([Xb, np.ones((len(Xb), 1))])
+
+    def planar_batch(c):
+        cy, sy = np.cos(c[:, 2]), np.sin(c[:, 2])
+        T = np.zeros((len(c), 4, 4))
+        T[:, 0, 0], T[:, 0, 1], T[:, 1, 0], T[:, 1, 1] = cy, -sy, sy, cy
+        T[:, 0, 3], T[:, 1, 3] = c[:, 0], c[:, 1]
+        T[:, 2, 2] = T[:, 3, 3] = 1.0
+        return T
+
     def residual_core(x, wc=None):
         M = T_from(rotvec_to_R(x[3:6]), x[0:3])
-        Tb = [T_from(rotvec_to_R(x[6 + 6 * k + 3:6 + 6 * k + 6]), x[6 + 6 * k:6 + 6 * k + 3])
-              for k in range(len(groups))]
-        out = np.empty((len(obs), 2))
-        for i, sel in enumerate(idx_of):
-            if sel.size == 0:
-                continue
-            if wc is not None and i in walk_pos:
-                c = wc[3 * walk_pos[i]:3 * walk_pos[i] + 3]
-                Odom, Abc = A_base[i]
-                Ai = Odom @ planar_T(c[0], c[1], c[2]) @ Abc
-            else:
-                Ai = A[i]
-            T_cam_base = np.linalg.inv(Ai @ M)
-            g = gi[sel][0]
-            T = T_cam_base @ Tb[g]
-            P = (T[:3, :3] @ Xb[sel].T).T + T[:3, 3]
-            uv = (K @ (P / P[:, 2:3]).T).T[:, :2]
-            out[sel] = uv - UV[sel]
-        return out.ravel()
+        Tb = np.array([T_from(rotvec_to_R(x[6 + 6 * k + 3:6 + 6 * k + 6]), x[6 + 6 * k:6 + 6 * k + 3])
+                       for k in range(len(groups))])
+        As = A_stack
+        if wc is not None and walk_idx:
+            As = A_stack.copy()
+            As[walk_arr] = Od_st @ planar_batch(wc.reshape(-1, 3)) @ Abc_st
+        T = np.linalg.inv(As @ M) @ Tb[g_of_sample]          # (N, 4, 4) T_cam_board
+        P = np.einsum('oij,oj->oi', T[si, :3, :], Xh)        # (O, 3)
+        uv = (P[:, :2] / P[:, 2:3]) * K[[0, 1], [0, 1]] + K[[0, 1], [2, 2]]
+        return (uv - UV).ravel()
 
     def residual(x):
         return residual_core(x)
@@ -982,14 +991,19 @@ def solve(paths, args):
             sp[n_obs + 2 * k, nb + 3 * k] = 1
             sp[n_obs + 2 * k + 1, nb + 3 * k + 1] = 1
         r0 = residual_w(x0w)[:n_obs]
+        # tolerances: 1e-6 relative is ~0.01 mm / 0.001 deg on the mount --
+        # the 1e-8 defaults spent ~300 iterations polishing far below that
         res = least_squares(residual_w, x0w, loss='soft_l1', f_scale=1.0, max_nfev=300,
-                            jac_sparsity=sp, x_scale='jac')
+                            jac_sparsity=sp, x_scale='jac',
+                            ftol=args.tol, xtol=args.tol, gtol=args.tol)
         # mount covariance with the per-sample base unknowns marginalised
-        J = res.jac.toarray() if hasattr(res.jac, 'toarray') else res.jac
+        J = res.jac          # sparse: never densify the full (obs x params) matrix
         dof_w = max(1, n_obs - res.x.size)
         s2w = float(np.sum(res.fun[:n_obs] ** 2) / dof_w)
         try:
-            cov_w = np.linalg.pinv(J.T @ J) * s2w
+            JTJ = J.T @ J
+            JTJ = JTJ.toarray() if hasattr(JTJ, 'toarray') else JTJ
+            cov_w = np.linalg.pinv(JTJ) * s2w
             sd_override = np.sqrt(np.diag(cov_w)[:6])
         except np.linalg.LinAlgError:
             sd_override = None
@@ -997,7 +1011,8 @@ def solve(paths, args):
         print(f'walk base corrections vs odom: |xy| median {1000 * np.median(np.hypot(wcs[:, 0], wcs[:, 1])):.0f} mm, '
               f'yaw range {math.degrees(wcs[:, 2].min()):+.1f}..{math.degrees(wcs[:, 2].max()):+.1f} deg')
         res.fun = res.fun[:n_obs]
-        res.jac = J[:n_obs, :nb]
+        Jm = J[:n_obs, :nb]
+        res.jac = Jm.toarray() if hasattr(Jm, 'toarray') else Jm
         res.x = res.x[:nb]
     else:
         sd_override = None
@@ -1052,6 +1067,7 @@ def solve(paths, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('--tol', type=float, default=1e-6, help='solve: ftol/xtol/gtol')
     ap.add_argument('--odom-sigma-m', type=float, default=0.03,
                     help='solve: soft prior on walk samples\' x/y odometry (yaw is free)')
     ap.add_argument('--solve', metavar='JSONL', nargs='+',
