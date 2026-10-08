@@ -349,7 +349,7 @@
         <param name="Drive Mode">4</param>
         <param name="Operating Mode">5</param>
         <param name="Return Delay Time">0</param>
-        <param name="Current Limit">750</param>
+        <param name="Current Limit">316</param>  <!-- x 2.69 mA = 850 mA -->
         <param name="Profile Velocity">350</param>
         <param name="Profile Acceleration">50</param>
         <param name="Homing Offset">0</param>
