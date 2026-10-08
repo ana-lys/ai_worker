@@ -66,6 +66,11 @@ def generate_launch_description():
         description='Head camera: auto (default; USB-detect OAK-D > D435 > ZED, 720p at fps), '
                     'or force oakd_lite_720p_hw, d435, zedm, oakd_lite, oakd_lite_720p, oakd_lite_720p_mjpeg, none'
     )
+    d435_bitrate_arg = DeclareLaunchArgument(
+        'd435_bitrate_kbps',
+        default_value='10000',
+        description='D435 720p head stream x264 bitrate in kbps (default 10000; x264 default 2048 was blocky)'
+    )
     use_h264_arg = DeclareLaunchArgument(
         'use_h264',
         default_value='true',
@@ -140,7 +145,8 @@ def generate_launch_description():
             d405_flag = '--enable-d405s' if enable_d405s else '--disable-d405s'
             d435_flag = '--d435-rgb' if rgb_source == 'd435' else '--no-d435-rgb'
             cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag,
-                   '--d435-fps', fps]
+                   '--d435-fps', fps,
+                   '--d435-bitrate', LaunchConfiguration('d435_bitrate_kbps').perform(context)]
             if dual_rgb_no_depth:
                 cmd += ['--dual-rgb-no-depth']
             if disable_left_d405:
@@ -273,6 +279,7 @@ def generate_launch_description():
         dual_rgb_no_depth_arg,
         disable_left_d405_arg,
         rgb_source_arg,
+        d435_bitrate_arg,
         use_h264_arg,
         oakd_video_port_arg,
         oakd_bitrate_arg,
