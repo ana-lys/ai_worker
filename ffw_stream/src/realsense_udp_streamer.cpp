@@ -63,7 +63,15 @@ std::mutex cout_mutex;
 std::atomic<bool> g_running{true};
 
 // Monitor variables
+// Keys are inserted in main() BEFORE the camera threads start; threads only
+// touch existing entries (concurrent std::map insertion is a data race).
 std::map<std::string, std::atomic<int>> frames_captured;
+// Camera bring-up (pipe.start + option writes + restart) is serialized: with
+// three RealSense devices initializing in parallel, librealsense's RS-USB
+// backend deadlocked on its global USB lock (lock_singleton) with a control
+// transfer hung -- every camera thread blocked forever, nothing streamed and
+// nothing was logged (2026-10-08, D435 + 2x D405).
+std::mutex g_rs_init_mutex;
 std::mutex timestamp_mutex;
 std::map<std::string, double> latest_timestamps;
 bool phase_delta_printed = false;
@@ -190,7 +198,10 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
     cfg.enable_device(serial);
     cfg.enable_stream(RS2_STREAM_COLOR, width, height, RS2_FORMAT_RGB8, fps);
 
+    std::unique_lock<std::mutex> init_lock(g_rs_init_mutex);
+    log("CAM RGB " + serial + " : starting (camera init serialized)");
     rs2::pipeline_profile profile = pipe.start(cfg);
+    init_lock.unlock();
 
     // Publish the color intrinsics with zero latency: transient_local + reliable
     // latches K so a late-joining consumer sees it immediately, refreshed at ~1 Hz.
@@ -330,6 +341,9 @@ void stream_camera(const std::string &serial, int index,
       cfg.enable_stream(RS2_STREAM_INFRARED, 1, width, height, RS2_FORMAT_Y8, fps);
     }
 
+    // Held through start + exposure/WB writes + restart (released below).
+    std::unique_lock<std::mutex> init_lock(g_rs_init_mutex);
+    log("CAM" + std::to_string(index) + " : starting (camera init serialized)");
     rs2::pipeline_profile profile = pipe.start(cfg);
 
     float depth_scale =
@@ -438,6 +452,7 @@ void stream_camera(const std::string &serial, int index,
         log("CAM" + std::to_string(index) + " color option set failed: " + e.what());
       }
     }
+    init_lock.unlock();
 
     size_t second_bpp = rgb_mode ? 3 : 1;
     std::vector<uint8_t> depth8(width * height, 0);
@@ -676,6 +691,7 @@ int main(int argc, char **argv) {
       if (d435_rgb_enabled) {
         // The D435i replacing the ZED: Stream 720p RGB to the ZED's port
         int rgb_port = base_port + 100;
+        frames_captured["RGB"];
         threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
                              1280, 720, d435_fps, mjpeg, node, cam_info_pub);
       } else {
@@ -697,6 +713,7 @@ int main(int argc, char **argv) {
       // which cameras are RGB, since that's unconditional.
       bool rgb_mode = true;
       bool enable_depth = !dual_rgb_no_depth;
+      frames_captured["CAM" + std::to_string(cam_idx)];
       threads.emplace_back(stream_camera, serials[i], cam_idx,
                            dest_ip, depth_port, ir_port, width, height, fps,
                            max_depth_m, mjpeg, rgb_mode, color_exposure_us, color_wb,
@@ -721,11 +738,30 @@ int main(int argc, char **argv) {
   telemetry_addr.sin_port = htons(base_port + 200);
   inet_pton(AF_INET, dest_ip.c_str(), &telemetry_addr.sin_addr);
 
+  // Startup watchdog: if NO camera has produced a single frame this long after
+  // start, the bring-up is hung (see g_rs_init_mutex) -- say so and exit so
+  // the launch reports the process died instead of streaming nothing silently.
+  constexpr double kNoFrameExitS = 30.0;
+  const auto start_time = std::chrono::steady_clock::now();
+  bool any_frame = false;
+
   while (g_running && rclcpp::ok()) {
     std::this_thread::sleep_for(std::chrono::seconds(5));
 
     auto now = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(now - last_print_time).count();
+
+    if (!any_frame && !frames_captured.empty()) {
+      for (const auto& [cam, count] : frames_captured) {
+        if (count.load() > 0) any_frame = true;
+      }
+      double since_start = std::chrono::duration<double>(now - start_time).count();
+      if (!any_frame && since_start > kNoFrameExitS) {
+        log("FATAL: no frames from any camera " + std::to_string(int(since_start)) +
+            " s after start -- RealSense init hung; exiting (restart the stream)");
+        std::_Exit(2);  // camera threads may be deadlocked inside librealsense
+      }
+    }
     
     std::ostringstream ss;
     ss << "FPS -> ";
