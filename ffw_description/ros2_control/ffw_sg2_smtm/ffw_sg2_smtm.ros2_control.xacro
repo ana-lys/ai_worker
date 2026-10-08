@@ -328,14 +328,16 @@
         <param name="Min Position Limit">-151875</param>
       </gpio>
       <!-- XH540-V270-R right gripper at ID 130 (replaces the XM430-W350).
-           Raw window: Min Position Limit 2000 = CLOSED, Max 3072 = OPEN.
-           Not physical radians: like the RH-P12-RN-A side it reports an
+           Raw window Min Position Limit 2000 = CLOSED, Max 3072 = OPEN.
+           Not physical radians. Like the RH-P12-RN-A side it reports an
            arbitrary 0 (open) .. 1.2 (closed) so teleop treats both grippers
-           alike. [unit info] maps it with a NEGATIVE multiplier:
+           alike. [unit info] maps it with a NEGATIVE multiplier,
              q = raw * m + off,  m = -1.2/1070,  off = -3071*m
-           0 -> raw 3071 (open), 1.2 -> raw 2001 (closed): one tick inside
+           so 0 -> raw 3071 (open) and 1.2 -> raw 2001 (closed), one tick inside
            each limit, because the driver truncates (q-off)/m and 1.2 would
-           otherwise land on 1999, outside the limit. -->
+           otherwise land on 1999, outside the limit.
+           NO colon-space in this comment, xacro keeps comments and the
+           launch parses robot_description as YAML. -->
       <gpio name="dxl130">
         <param name="type">dxl</param>
         <param name="ID">130</param>
