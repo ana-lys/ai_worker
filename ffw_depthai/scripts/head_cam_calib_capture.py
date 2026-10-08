@@ -633,6 +633,15 @@ def capture(a):
 
     planar = planar_T
 
+    def board_in_base(det_pose):
+        tf, _ = node.lookup('base_link', 'head_camera_frame')
+        if tf is None:
+            return None
+        return (T_from(quat_to_R(*tf['q']), tf['t'])
+                @ T_from(quat_to_R(*det_pose['q']), det_pose['t']))
+
+    walk_state = {}   # 'cur' (odom-commanded, rel. start) / 'vis' (board-measured)
+
     def bearing(v):
         return math.atan2(v[1], v[0]), math.atan2(v[2], math.hypot(v[0], v[1]))
 
@@ -653,6 +662,12 @@ def capture(a):
             raise RuntimeError('board not visible at walk start')
         pose = d['pose']
         bx, byaw = (a.base_xy, math.radians(a.base_yaw_deg)) if use_base else (0.0, 0.0)
+        # Odometry yaw drifts (~14 deg over 300 steps on 2026-10-09), so the
+        # box and the final return use the base pose MEASURED from the board:
+        # vis = start base -> current base, from T_base0_board @ inv(T_base_board).
+        T_b0_board = board_in_base(pose)
+        vis = np.zeros(3)
+        walk_state.update(cur=cur, vis=vis)
         for step in range(a.steps):
             js = node.snap()['js']
             head0 = np.array([js['head_joint1'], js['head_joint2']])
@@ -662,10 +677,14 @@ def capture(a):
             # propose a medium step of everything
             nxt = cur.copy()
             if use_base:
-                nxt[0] = np.clip(cur[0] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx)
-                nxt[1] = np.clip(cur[1] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx)
-                nxt[2] = np.clip(cur[2] + math.radians(rng.uniform(-a.walk_yaw_deg, a.walk_yaw_deg)),
-                                 -byaw, byaw)
+                # step chosen so the MEASURED pose stays in the box, applied as
+                # the same delta on the odom-commanded pose
+                want = np.array([
+                    np.clip(vis[0] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx),
+                    np.clip(vis[1] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx),
+                    np.clip(vis[2] + math.radians(rng.uniform(-a.walk_yaw_deg, a.walk_yaw_deg)),
+                            -byaw, byaw)])
+                nxt = cur + (want - vis)
             n_lift = float(np.clip(lift + rng.uniform(-a.walk_lift, a.walk_lift), lo, hi))
             # predicted bearing change of the board centre seen from the camera
             T_new_old = np.linalg.inv(planar(*nxt)) @ planar(*cur)
@@ -725,9 +744,15 @@ def capture(a):
                        base_to_calib=calib, tf_err=terr, stability=stab, passes=good))
             n_ok += 1
             pose = good[-1]['pose']
+            Tbi = board_in_base(pose)
+            if Tbi is not None and T_b0_board is not None:
+                V = T_b0_board @ np.linalg.inv(Tbi)
+                vis = np.array([V[0, 3], V[1, 3], math.atan2(V[1, 0], V[0, 0])])
+            walk_state.update(cur=cur, vis=vis)
             c, _, _ = board_px(pose)
-            log(f'  walk {step}: sample {n_ok}  base ({cur[0]:+.3f},{cur[1]:+.3f},'
-                f'{math.degrees(cur[2]):+.1f}deg) lift {lift:+.3f}  centre ({c[0]:.0f},{c[1]:.0f})'
+            log(f'  walk {step}: sample {n_ok}  base ({vis[0]:+.3f},{vis[1]:+.3f},'
+                f'{math.degrees(vis[2]):+.1f}deg; odom yaw {math.degrees(cur[2]):+.1f}) '
+                f'lift {lift:+.3f}  centre ({c[0]:.0f},{c[1]:.0f})'
                 f'  reproj {good[-1]["reproj_px"]:.2f}px  [{time.monotonic() - t_last:.1f}s]')
             t_last = time.monotonic()
 
@@ -792,7 +817,14 @@ def capture(a):
             if start_lift is not None:
                 move_lift(start_lift)
             if use_base:
-                drive_to(start_odom, 0.0, 0.0, 0.0)
+                if 'vis' in walk_state:
+                    # odom pose that the board says is the true start
+                    back = walk_state['cur'] - walk_state['vis']
+                    log(f'return: odom drift corrected by ({back[0]:+.3f}, {back[1]:+.3f}, '
+                        f'{math.degrees(back[2]):+.1f} deg)')
+                    drive_to(start_odom, *back)
+                else:
+                    drive_to(start_odom, 0.0, 0.0, 0.0)
         except Exception as e:  # noqa: BLE001
             log(f'return to start failed: {e}')
         stop_base()
@@ -869,7 +901,15 @@ def solve(paths, args):
         x0 += [*np.median([T[:3, 3] for T in Ts], axis=0), *R_to_rotvec(Ts[0][:3, :3])]
     x0 = np.array(x0)
 
-    def residual(x):
+    walk_idx = [i for i, s in enumerate(samples) if s.get('mode') == 'walk']
+    walk_pos = {i: k for k, i in enumerate(walk_idx)}
+    A_base = [None] * len(samples)    # walk: odom @ base_to_calib split for corrections
+    for i in walk_idx:
+        o = samples[i]['odom']
+        b = samples[i]['base_to_calib']
+        A_base[i] = (planar_T(o['x'], o['y'], o['yaw']), T_from(quat_to_R(*b['q']), b['t']))
+
+    def residual_core(x, wc=None):
         M = T_from(rotvec_to_R(x[3:6]), x[0:3])
         Tb = [T_from(rotvec_to_R(x[6 + 6 * k + 3:6 + 6 * k + 6]), x[6 + 6 * k:6 + 6 * k + 3])
               for k in range(len(groups))]
@@ -877,7 +917,13 @@ def solve(paths, args):
         for i, sel in enumerate(idx_of):
             if sel.size == 0:
                 continue
-            T_cam_base = np.linalg.inv(A[i] @ M)
+            if wc is not None and i in walk_pos:
+                c = wc[3 * walk_pos[i]:3 * walk_pos[i] + 3]
+                Odom, Abc = A_base[i]
+                Ai = Odom @ planar_T(c[0], c[1], c[2]) @ Abc
+            else:
+                Ai = A[i]
+            T_cam_base = np.linalg.inv(Ai @ M)
             g = gi[sel][0]
             T = T_cam_base @ Tb[g]
             P = (T[:3, :3] @ Xb[sel].T).T + T[:3, 3]
@@ -885,8 +931,70 @@ def solve(paths, args):
             out[sel] = uv - UV[sel]
         return out.ravel()
 
-    r0 = residual(x0)
-    res = least_squares(residual, x0, loss='soft_l1', f_scale=1.0, max_nfev=200)
+    def residual(x):
+        return residual_core(x)
+
+    r0 = residual(x0) if not walk_idx else None
+    if walk_idx:
+        # Walk samples: odometry yaw drifts (2026-10-09: ~14 deg over a 300-step
+        # run), so every walk sample gets its own planar base correction
+        # (dx, dy, dyaw) on top of odom -- yaw free, x/y with a soft prior.
+        nb = 6 + 6 * len(groups)
+        # initial corrections from vision, anchored at each run's first walk
+        # sample (odom is exact there): base pose that puts the board where
+        # that first sample saw it
+        wc0 = np.zeros(3 * len(walk_idx))
+        anchor = {}
+        for k, i in enumerate(walk_idx):
+            Odom, Abc = A_base[i]
+            T_base_board = Abc @ M0 @ T_cam_board(samples[i]['passes'][0])
+            g = samples[i]['group']
+            if g not in anchor:
+                anchor[g] = Odom @ T_base_board            # board in odom
+            T_odom_base = anchor[g] @ np.linalg.inv(T_base_board)
+            C = np.linalg.inv(Odom) @ T_odom_base
+            wc0[3 * k:3 * k + 3] = [C[0, 3], C[1, 3], math.atan2(C[1, 0], C[0, 0])]
+        for g, Tb0 in anchor.items():
+            k = gidx[g]
+            x0[6 + 6 * k:6 + 6 * k + 3] = Tb0[:3, 3]
+            x0[6 + 6 * k + 3:6 + 6 * k + 6] = R_to_rotvec(Tb0[:3, :3])
+        x0w = np.concatenate([x0, wc0])
+
+        def residual_w(x):
+            r = residual_core(x[:nb], x[nb:])
+            prior = x[nb:].reshape(-1, 3)[:, :2].ravel() / args.odom_sigma_m
+            return np.concatenate([r, prior])
+        from scipy.sparse import lil_matrix
+        n_obs = 2 * len(obs)
+        sp = lil_matrix((n_obs + 2 * len(walk_idx), x0w.size), dtype=int)
+        sp[:, :nb] = 1
+        for k, i in enumerate(walk_idx):
+            rows = np.concatenate([2 * idx_of[i], 2 * idx_of[i] + 1])
+            for c in range(3):
+                sp[rows, nb + 3 * k + c] = 1
+            sp[n_obs + 2 * k, nb + 3 * k] = 1
+            sp[n_obs + 2 * k + 1, nb + 3 * k + 1] = 1
+        r0 = residual_w(x0w)[:n_obs]
+        res = least_squares(residual_w, x0w, loss='soft_l1', f_scale=1.0, max_nfev=300,
+                            jac_sparsity=sp, x_scale='jac')
+        # mount covariance with the per-sample base unknowns marginalised
+        J = res.jac.toarray() if hasattr(res.jac, 'toarray') else res.jac
+        dof_w = max(1, n_obs - res.x.size)
+        s2w = float(np.sum(res.fun[:n_obs] ** 2) / dof_w)
+        try:
+            cov_w = np.linalg.pinv(J.T @ J) * s2w
+            sd_override = np.sqrt(np.diag(cov_w)[:6])
+        except np.linalg.LinAlgError:
+            sd_override = None
+        wcs = res.x[nb:].reshape(-1, 3)
+        print(f'walk base corrections vs odom: |xy| median {1000 * np.median(np.hypot(wcs[:, 0], wcs[:, 1])):.0f} mm, '
+              f'yaw range {math.degrees(wcs[:, 2].min()):+.1f}..{math.degrees(wcs[:, 2].max()):+.1f} deg')
+        res.fun = res.fun[:n_obs]
+        res.jac = J[:n_obs, :nb]
+        res.x = res.x[:nb]
+    else:
+        sd_override = None
+        res = least_squares(residual, x0, loss='soft_l1', f_scale=1.0, max_nfev=200)
     r = res.fun.reshape(-1, 2)
     px = np.linalg.norm(r, axis=1)
     dof = max(1, r.size - res.x.size)
@@ -896,6 +1004,8 @@ def solve(paths, args):
         sd = np.sqrt(np.diag(cov)[:6])
     except np.linalg.LinAlgError:
         sd = np.full(6, np.nan)
+    if sd_override is not None:
+        sd = sd_override
     M = T_from(rotvec_to_R(res.x[3:6]), res.x[0:3])
     # static_transform_publisher roll/pitch/yaw: R = Rz(yaw) Ry(pitch) Rx(roll)
     R = M[:3, :3]
@@ -935,6 +1045,8 @@ def solve(paths, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('--odom-sigma-m', type=float, default=0.03,
+                    help='solve: soft prior on walk samples\' x/y odometry (yaw is free)')
     ap.add_argument('--solve', metavar='JSONL', nargs='+',
                     help='solve one or more capture files instead of capturing')
     ap.add_argument('--ns', default='/d435', help='detector namespace (/d435 or /oakd)')

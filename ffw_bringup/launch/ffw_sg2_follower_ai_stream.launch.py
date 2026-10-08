@@ -52,14 +52,14 @@ def _detect_head_camera_label():
 # D435 mount relative to camera_calibration_link (an OPTICAL frame: x right,
 # y down, z forward, at the old ZED-M centre). Nominal was the RGB lens centred
 # there, pitched 15 deg nose-down = roll -15 deg about optical x.
-# Calibrated 2026-10-09 with ffw_depthai head_cam_calib_capture.py: 155 still
-# samples, 7 base placements x 3 lift heights x head grid, bundle fit of every
-# tag corner, reprojection 4.85 -> 2.29 px. Camera ~32 mm forward, ~8 mm left,
-# 15.9 deg down, ~1 deg yaw. y (vertical) and roll are poorly separated at the
-# ~1 m board distance used (two runs: y +28 / -17 mm, roll -15.0 / -16.3 deg);
-# re-run with the board at ~0.6 m and ~1.6 m to pin them down.
-D435_HEAD_CAM_TF = ['--x', '-0.007717', '--y', '-0.003129', '--z', '0.032079',
-                    '--roll', '-0.277217', '--pitch', '-0.010621', '--yaw', '0.017780']
+# Calibrated 2026-10-09 with ffw_depthai head_cam_calib_capture.py --solve over
+# 452 still samples: 155 grid samples (7 base placements x 3 lift heights x
+# head grid) + a 297-step walk (base/lift/head stepping together, base pose
+# per sample free since odom yaw drifted ~14 deg), every tag corner, 1.89 px
+# RMS. Camera ~32 mm forward, ~17 mm left, 15.8 deg down, ~1 deg yaw; the
+# grid-only solve agreed to < 0.1 deg and 6-9 mm sideways/vertical.
+D435_HEAD_CAM_TF = ['--x', '-0.016554', '--y', '0.003038', '--z', '0.031490',
+                    '--roll', '-0.275189', '--pitch', '-0.010889', '--yaw', '0.016625']
 
 
 def generate_launch_description():
