@@ -7,15 +7,15 @@ For every (head_joint1, head_joint2) grid point (n_steps per joint, so
 n_steps^2 poses total):
   1. Command the head there via /head_controller/follow_joint_trajectory.
   2. Wait settle_time seconds for it to stop moving/vibrating.
-  3. Marker-count quality gate, read from /oakd/apriltag_telemetry's
+  3. Marker-count quality gate, read from /head_camera/apriltag_telemetry's
      num_tags (one AprilTag detection pass ~= one "frame" here):
        - num_tags >= 5 right after settling -> accept immediately.
        - else wait 1 more detection frame; if that one has >= 4 -> accept.
        - else wait 2 more detection frames; if that one has >= 3 -> accept.
        - else skip this pose entirely (no row recorded).
   4. On accept, record one row: /head_camera_tf (T_baselink_camera),
-     /oakd/marker_board_pose_camera_frame (T_camera_board), /joint_states,
-     and /oakd/marker_board_pose (T_baselink_board, for convenience) --
+     /head_camera/marker_board_pose_camera_frame (T_camera_board), /joint_states,
+     and /head_camera/marker_board_pose (T_baselink_board, for convenience) --
      the exact same schema record_camera_calibration_check.py uses.
 
 At the end (including on Ctrl-C, using whatever was collected so far), it
@@ -105,8 +105,8 @@ class SweepAndSolveCalibration(Node):
         # Cached latest data.
         self.latest_cam_tf = None          # /head_camera_tf, T_baselink_camera
         self.latest_joint_state = None      # /joint_states
-        self.latest_board_base = None       # /oakd/marker_board_pose, T_baselink_board
-        self.latest_board_camera = None     # /oakd/marker_board_pose_camera_frame, T_camera_board
+        self.latest_board_base = None       # /head_camera/marker_board_pose, T_baselink_board
+        self.latest_board_camera = None     # /head_camera/marker_board_pose_camera_frame, T_camera_board
         self.latest_num_tags = 0
         self.telemetry_seq = 0
         self.cur_h1 = 0.0
@@ -121,10 +121,10 @@ class SweepAndSolveCalibration(Node):
 
         self.create_subscription(TransformStamped, '/head_camera_tf', self._on_cam_tf, transient_qos)
         self.create_subscription(JointState, '/joint_states', self._on_joint_state, 10)
-        self.create_subscription(PoseStamped, '/oakd/marker_board_pose', self._on_board_base, best_effort)
-        self.create_subscription(PoseStamped, '/oakd/marker_board_pose_camera_frame',
+        self.create_subscription(PoseStamped, '/head_camera/marker_board_pose', self._on_board_base, best_effort)
+        self.create_subscription(PoseStamped, '/head_camera/marker_board_pose_camera_frame',
                                   self._on_board_camera, best_effort)
-        self.create_subscription(StringMsg, '/oakd/apriltag_telemetry', self._on_telemetry, best_effort)
+        self.create_subscription(StringMsg, '/head_camera/apriltag_telemetry', self._on_telemetry, best_effort)
 
         self.action_client = ActionClient(self, FollowJointTrajectory, action_topic)
 

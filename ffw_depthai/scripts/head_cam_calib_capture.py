@@ -1072,7 +1072,8 @@ def main():
                     help='solve: soft prior on walk samples\' x/y odometry (yaw is free)')
     ap.add_argument('--solve', metavar='JSONL', nargs='+',
                     help='solve one or more capture files instead of capturing')
-    ap.add_argument('--ns', default='/d435', help='detector namespace (/d435 or /oakd)')
+    ap.add_argument('--ns', default='/head_camera',
+                    help='board-tap namespace (both head cameras publish /head_camera/*)')
     ap.add_argument('--out', default=f'~/head_cam_calib_{time.strftime("%Y%m%d_%H%M%S")}.jsonl')
     ap.add_argument('--plan-only', action='store_true')
     ap.add_argument('--yes', action='store_true', help='do not wait for Enter')

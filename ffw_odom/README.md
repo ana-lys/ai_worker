@@ -57,7 +57,7 @@ a convenience TF utility for the teleop "global limit" feature
 package is 2D lidar odometry/localization.
 
 Three nodes, in a pipeline:
-* **`marker_pose_corrector`**: subscribes `/oakd/marker_board_pose`
+* **`marker_pose_corrector`**: subscribes `/head_camera/marker_board_pose`
   (published by `ffw_depthai`'s AprilTag board detector), applies a fixed
   `board_yaw_offset_rad` correction about the marker's own local Z axis so
   its axes read as ROS front/left/up, inverts it into an absolute
@@ -90,7 +90,7 @@ frame names baked into `marker_ekf.yaml` (`odom_frame`/`world_frame`, both
 * `board_yaw_offset_rad` (double, default: `pi/2`): Fixed yaw correction about
   the marker's own Z axis. Sign/axis convention is unverified — check with
   `ros2 run tf2_ros tf2_echo base_link marker_frame` and adjust if needed.
-* `input_topic` (string, default: `/oakd/marker_board_pose`): Input pose topic.
+* `input_topic` (string, default: `/head_camera/marker_board_pose`): Input pose topic.
 * `output_topic` (string, default: `/oakd/marker_frame_baselink_pose`): Output
   pose-correction topic consumed by `marker_ekf.yaml`'s `pose0`.
 * `position_stddev_m` / `yaw_stddev_rad` / `orientation_stddev_rad`: diagonal

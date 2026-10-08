@@ -9,7 +9,7 @@ def generate_launch_description():
     source_frame_arg = DeclareLaunchArgument(
         'source_frame',
         default_value='base_link',
-        description='Frame the raw /oakd/marker_board_pose is expressed in'
+        description='Frame the raw /head_camera/marker_board_pose is expressed in'
     )
 
     child_frame_arg = DeclareLaunchArgument(
@@ -28,7 +28,7 @@ def generate_launch_description():
 
     input_topic_arg = DeclareLaunchArgument(
         'input_topic',
-        default_value='/oakd/marker_board_pose',
+        default_value='/head_camera/marker_board_pose',
         description='Input PoseStamped topic for the detected marker board pose'
     )
 

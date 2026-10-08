@@ -193,6 +193,10 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
                        rclcpp::Node::SharedPtr node,
                        rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub,
                        bool apriltag, int bitrate_kbps, double apriltag_hz) {
+  // Camera-neutral copy of the intrinsics, next to the /head_camera/* board
+  // topics (the OAK-D streamer publishes the same name for its own camera).
+  auto head_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
+      "/head_camera/camera_info", rclcpp::QoS(1).transient_local().reliable());
   std::ostringstream hdr;
   hdr << "\n=== CAM (RGB ZED-Replacement) " << serial << " : rgb->udp:" << port
       << "  gst=" << (mjpeg ? "mjpeg q90" : "h264 @ " + std::to_string(bitrate_kbps) + " kbps")
@@ -239,19 +243,20 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       ci->p[r * 4 + 3] = 0.0;              // no rectified offset
     }
     cam_info_pub->publish(*ci);
-    log("CAM RGB " + serial + " : published /d435/camera_info " +
+    head_info_pub->publish(*ci);
+    log("CAM RGB " + serial + " : published /d435/camera_info (+ /head_camera/camera_info) " +
         std::to_string(intr.width) + "x" + std::to_string(intr.height) +
         " fx=" + std::to_string(intr.fx) + " fy=" + std::to_string(intr.fy));
 
     // Same 25h9 board detector as the OAK-D tap, on its own thread, fed the
-    // newest frame at ~5 Hz -> /d435/marker_board_pose{,_camera_frame},
-    // /d435/apriltag_telemetry.
+    // newest frame at ~5 Hz -> /head_camera/marker_board_pose{,_camera_frame},
+    // /head_camera/apriltag_telemetry.
     std::unique_ptr<ffw_stream::BoardPoseDetector> tags;
     if (apriltag) {
       // apriltag_hz >= fps = every frame; 2 detector threads so a 720p pass
       // fits inside a 66 ms frame (a busy worker just skips frames).
       tags = std::make_unique<ffw_stream::BoardPoseDetector>(
-          node, "/d435", "d435_camera", "d435", apriltag_hz > 0 ? 1.0 / apriltag_hz - 1e-3 : 0.0, 2);
+          node, "/head_camera", "d435_camera", "d435", apriltag_hz > 0 ? 1.0 / apriltag_hz - 1e-3 : 0.0, 2);
       std::array<double, 9> K;
       std::copy(ci->k.begin(), ci->k.end(), K.begin());
       tags->set_intrinsics(K, std::vector<double>(ci->d.begin(), ci->d.end()));
@@ -335,6 +340,7 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       if (now_ci - last_info_pub > std::chrono::milliseconds(1000)) {
         ci->header.stamp = node->now();
         cam_info_pub->publish(*ci);
+        head_info_pub->publish(*ci);
         last_info_pub = now_ci;
       }
     }

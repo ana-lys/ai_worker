@@ -1,6 +1,6 @@
 // MarkerPoseCorrector.cpp
 //
-// Converts /oakd/marker_board_pose (PoseStamped, T_baselink_marker, ~4-5 Hz
+// Converts /head_camera/marker_board_pose (PoseStamped, T_baselink_marker, ~4-5 Hz
 // AprilTag detections) into an absolute base_link-in-marker_frame pose
 // measurement for robot_localization's ekf_node to fuse with continuous
 // wheel/encoder odometry (see marker_ekf.yaml / marker_ekf.launch.py).
@@ -29,7 +29,7 @@ public:
     source_frame_ = declare_parameter<std::string>("source_frame", "base_link");
     child_frame_ = declare_parameter<std::string>("child_frame", "marker_frame");
     yaw_offset_ = declare_parameter<double>("board_yaw_offset_rad", M_PI / 2.0);
-    input_topic_ = declare_parameter<std::string>("input_topic", "/oakd/marker_board_pose");
+    input_topic_ = declare_parameter<std::string>("input_topic", "/head_camera/marker_board_pose");
     output_topic_ = declare_parameter<std::string>("output_topic", "/oakd/marker_frame_baselink_pose");
     position_stddev_m_ = declare_parameter<double>("position_stddev_m", 0.02);
     yaw_stddev_rad_ = declare_parameter<double>("yaw_stddev_rad", 0.05);

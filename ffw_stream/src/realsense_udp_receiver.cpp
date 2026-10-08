@@ -102,17 +102,10 @@ public:
     // dashboard overlay the same way as the UDP-sourced telemetry strings --
     // just another entry in latest_telemetry_, no separate rendering path.
     apriltag_telemetry_sub_ = this->create_subscription<std_msgs::msg::String>(
-      "/oakd/apriltag_telemetry", rclcpp::QoS(1).best_effort(),
+      "/head_camera/apriltag_telemetry", rclcpp::QoS(1).best_effort(),
       [this](const std_msgs::msg::String::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(telemetry_mutex_);
         latest_telemetry_["AprilTag"] = msg->data;
-      });
-    // Same board tap on the D435 head stream (realsense_udp_streamer).
-    apriltag_d435_telemetry_sub_ = this->create_subscription<std_msgs::msg::String>(
-      "/d435/apriltag_telemetry", rclcpp::QoS(1).best_effort(),
-      [this](const std_msgs::msg::String::SharedPtr msg) {
-        std::lock_guard<std::mutex> lock(telemetry_mutex_);
-        latest_telemetry_["AprilTag-D435"] = msg->data;
       });
 
     int zed_port = base_port + 100;
@@ -803,7 +796,6 @@ private:
   std::map<std::string, std::string> latest_telemetry_;
   std::map<std::string, std::string> last_oakd_latency_str_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr apriltag_telemetry_sub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr apriltag_d435_telemetry_sub_;
 
   std::vector<std::thread> threads_;
   std::thread display_thread_;

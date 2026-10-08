@@ -6,7 +6,7 @@ CSV.
 See camera_calib_lib.py for the full model description. In short: this
 solves for a 6-DOF correction D such that A_i . D . B_i is constant across
 every recorded sample, where A_i = T_baselink_camera (/head_camera_tf) and
-B_i = T_camera_board (/oakd/marker_board_pose_camera_frame).
+B_i = T_camera_board (/head_camera/marker_board_pose_camera_frame).
 
 Usage:
     python3 solve_camera_mount_correction.py /path/to/camera_calib_check.csv

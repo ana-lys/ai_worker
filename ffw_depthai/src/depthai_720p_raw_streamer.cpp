@@ -227,6 +227,10 @@ int main(int argc, char **argv) {
   std::mutex camera_info_mtx;
   auto camera_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
       "/oakd/camera_info", rclcpp::QoS(1).transient_local().reliable());
+  // Camera-neutral copy next to the /head_camera/* board topics (the D435
+  // streamer publishes the same name for its camera).
+  auto head_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
+      "/head_camera/camera_info", rclcpp::QoS(1).transient_local().reliable());
 
   // AprilTag + stream telemetry, single std_msgs/String, published once per
   // detection pass (~5 Hz): "oakd_fps=.. apriltag_fps=.. avg_margin=.. num_tags=.."
@@ -235,7 +239,7 @@ int main(int argc, char **argv) {
   // anyway -- matches the receiver's subscriber QoS below (must agree,
   // RELIABLE can't receive from a BEST_EFFORT publisher).
   auto telemetry_pub = node->create_publisher<std_msgs::msg::String>(
-      "/oakd/apriltag_telemetry", rclcpp::QoS(1).best_effort());
+      "/head_camera/apriltag_telemetry", rclcpp::QoS(1).best_effort());
 
   // Marker board pose in base_link: T_baselink_board = T_baselink_camera *
   // T_camera_board. T_camera_board comes from this node's own solvePnP
@@ -243,13 +247,13 @@ int main(int argc, char **argv) {
   // head_camera_frame -> base_link transform (FK + URDF mount offset), which
   // this node just subscribes to and caches -- no TF listener needed here.
   auto board_pose_pub = node->create_publisher<geometry_msgs::msg::PoseStamped>(
-      "/oakd/marker_board_pose", rclcpp::QoS(1).best_effort());
+      "/head_camera/marker_board_pose", rclcpp::QoS(1).best_effort());
   // Raw T_camera_board, pre-composition with /head_camera_tf -- lets this
   // be compared directly against ~/utilities_ws's apriltag_25h9_cpp
   // debug_board_node, which publishes the same quantity (camera-frame board
   // pose) on /camera/pose when fed the same UDP frames.
   auto board_pose_camera_pub = node->create_publisher<geometry_msgs::msg::PoseStamped>(
-      "/oakd/marker_board_pose_camera_frame", rclcpp::QoS(1).best_effort());
+      "/head_camera/marker_board_pose_camera_frame", rclcpp::QoS(1).best_effort());
   geometry_msgs::msg::TransformStamped latest_cam_tf;
   bool have_cam_tf = false;
   auto cam_tf_sub = node->create_subscription<geometry_msgs::msg::TransformStamped>(
@@ -304,6 +308,7 @@ int main(int argc, char **argv) {
     if (camera_info) {
       camera_info->header.stamp = node->now();
       camera_info_pub->publish(*camera_info);
+      head_info_pub->publish(*camera_info);
     }
   });
 
@@ -412,7 +417,7 @@ int main(int argc, char **argv) {
               1.0 / kDetectPeriodS);
 
   // Telemetry state shared between the 5s OAK-D fps report below and the
-  // per-detection-pass /oakd/apriltag_telemetry publish.
+  // per-detection-pass /head_camera/apriltag_telemetry publish.
   double current_oakd_fps = 0.0;
   double last_reproj_px = -1.0;  // board-pose reprojection error, -1 = no pose yet
   int apriltag_pass_count = 0;
@@ -445,6 +450,7 @@ int main(int argc, char **argv) {
         if (!camera_info) {
           camera_info = build_camera_info(actual_w, actual_h);
           camera_info_pub->publish(*camera_info);
+          head_info_pub->publish(*camera_info);
           RCLCPP_INFO(node->get_logger(),
                       "Published intrinsics on /oakd/camera_info: %ux%u "
                       "fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
@@ -496,7 +502,7 @@ int main(int argc, char **argv) {
           for (uint32_t row = 0; row < dh; ++row) {
             memcpy(im->buf + row * im->stride, data.data() + row * dw, dw);
           }
-          // No console log here -- /oakd/apriltag_telemetry (published below)
+          // No console log here -- /head_camera/apriltag_telemetry (published below)
           // is the only output; the receiver subscribes and draws it on the
           // dashboard overlay instead of this process spamming stdout.
           zarray_t *detections = apriltag_detector_detect(tag_detector, im);

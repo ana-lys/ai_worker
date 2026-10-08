@@ -71,9 +71,9 @@ def build_row(t, h1, h2, cam_tf, board_camera_pose, board_base_pose):
     """Build one CSV_HEADER-ordered row.
 
     cam_tf: geometry_msgs/TransformStamped (/head_camera_tf), T_baselink_camera
-    board_camera_pose: geometry_msgs/PoseStamped (/oakd/marker_board_pose_camera_frame),
+    board_camera_pose: geometry_msgs/PoseStamped (/head_camera/marker_board_pose_camera_frame),
         T_camera_board
-    board_base_pose: geometry_msgs/PoseStamped or None (/oakd/marker_board_pose),
+    board_base_pose: geometry_msgs/PoseStamped or None (/head_camera/marker_board_pose),
         T_baselink_board -- composed pose, included for convenience/debugging
         only; the solver only uses cam_tf and board_camera_pose. NaN-filled
         if not yet available.

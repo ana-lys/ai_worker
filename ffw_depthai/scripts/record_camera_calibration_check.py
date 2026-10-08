@@ -11,11 +11,11 @@ so it does not cancel out the way it would if the board were misdetected by
 a constant amount instead.
 
 Records one row per detection pass (~5 Hz, triggered by
-/oakd/marker_board_pose_camera_frame arriving) to a CSV:
+/head_camera/marker_board_pose_camera_frame arriving) to a CSV:
     t, head_joint1, head_joint2,
     cam_x, cam_y, cam_z, cam_qw, cam_qx, cam_qy, cam_qz,        (T_baselink_camera, /head_camera_tf, cached)
     cam2brd_x, ..., cam2brd_qz,                                  (T_camera_board, this sample)
-    brd_base_x, ..., brd_base_qz                                 (T_baselink_board, /oakd/marker_board_pose, cached)
+    brd_base_x, ..., brd_base_qz                                 (T_baselink_board, /head_camera/marker_board_pose, cached)
 
 The last three columns are ALREADY the composed pose the running node
 publishes -- included so you don't have to recompute the composition by
@@ -58,7 +58,7 @@ class CameraCalibrationCheckRecorder(Node):
 
         self.latest_cam_tf = None      # /head_camera_tf, T_baselink_camera
         self.latest_joint_state = None  # /joint_states
-        self.latest_board_base = None   # /oakd/marker_board_pose, T_baselink_board
+        self.latest_board_base = None   # /head_camera/marker_board_pose, T_baselink_board
 
         transient_qos = QoSProfile(
             depth=1,
@@ -70,11 +70,11 @@ class CameraCalibrationCheckRecorder(Node):
         self.create_subscription(
             JointState, '/joint_states', self._on_joint_state, 10)
         self.create_subscription(
-            PoseStamped, '/oakd/marker_board_pose', self._on_board_base,
+            PoseStamped, '/head_camera/marker_board_pose', self._on_board_base,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         # Trigger: one CSV row per detection pass.
         self.create_subscription(
-            PoseStamped, '/oakd/marker_board_pose_camera_frame', self._on_board_camera,
+            PoseStamped, '/head_camera/marker_board_pose_camera_frame', self._on_board_camera,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
 
         self.rows = []
