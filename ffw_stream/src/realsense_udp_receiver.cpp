@@ -495,7 +495,8 @@ private:
         "appsink drop=true sync=false async=false max-buffers=1";
     } else {
       // ZED / D435 stream H264-over-RTP
-      feed_name = (rgb_source_ == "zedm") ? "ZED" : "D435";
+      feed_name = (rgb_source_ == "zedm") ? "ZED" :
+                  (rgb_source_ == "d435") ? "D435" : "D435/ZED";
       pipeline = "udpsrc port=" + std::to_string(port) +
         " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
         "rtpjitterbuffer latency=50 ! rtph264depay ! decodebin ! videoconvert ! "
@@ -710,7 +711,7 @@ private:
         std::lock_guard<std::mutex> lock(img_mutex_);
         const auto now = std::chrono::steady_clock::now();
         std::chrono::steady_clock::time_point newest{};
-        for (const char *name : {"OAK-D-720p", "D435", "OAK-D", "ZED"}) {
+        for (const char *name : {"OAK-D-720p", "D435", "D435/ZED", "OAK-D", "ZED"}) {
           auto it = last_frame_time_.find(name);
           if (it == last_frame_time_.end()) continue;
           if (now - it->second < std::chrono::seconds(1)) { head_name = name; break; }

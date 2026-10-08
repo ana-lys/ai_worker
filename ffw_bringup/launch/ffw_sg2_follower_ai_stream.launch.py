@@ -332,7 +332,10 @@ def generate_launch_description():
             # on-device HW encoder: the AprilTag board-pose tap needs the raw
             # frame in hand, which the HW-encode path never has (it only ever
             # sees the already-compressed bitstream).
-            'rgb_source': 'oakd_lite_720p',
+            # auto: whichever head camera is on USB (OAK-D > D435 > ZED), all
+            # 1280x720 at 'fps'. An OAK-D still gets oakd_lite_720p (raw NV12
+            # + host x264, above); a D435 goes to 9100 instead of 9110.
+            'rgb_source': 'auto',
             # Revamp: everything 15Hz, no more 30Hz anywhere (OAK-D + both
             # D405s) -- halves camera USB/CPU load system-wide.
             'fps': '15',

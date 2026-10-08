@@ -1,3 +1,4 @@
+import glob
 import os
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
@@ -10,6 +11,33 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
+
+# Head camera auto-detect (rgb_source:=auto): first match by USB vendor[:product]
+# in /sys/bus/usb/devices wins. Every pick streams 1280x720 at the launch fps.
+_HEAD_CAMERAS = (
+    # (label, rgb_source, vendor, products or None = any)
+    ('OAK-D', 'oakd_lite_720p', '03e7', None),           # Movidius (booted f63b / boot 2485)
+    ('D435', 'd435', '8086', {'0b07', '0b3a'}),          # D435 / D435i (D405 is 0b5b)
+    ('ZED', 'zedm', '2b03', None),                       # Stereolabs
+)
+
+
+def _detect_head_camera():
+    present = set()
+    for dev in glob.glob('/sys/bus/usb/devices/*'):
+        try:
+            with open(os.path.join(dev, 'idVendor')) as f:
+                vendor = f.read().strip().lower()
+            with open(os.path.join(dev, 'idProduct')) as f:
+                product = f.read().strip().lower()
+        except OSError:
+            continue
+        present.add((vendor, product))
+    for label, source, vendor, products in _HEAD_CAMERAS:
+        if any(v == vendor and (products is None or p in products) for v, p in present):
+            return label, source
+    return None, None
+
 
 def generate_launch_description():
     dest_ip_arg = DeclareLaunchArgument('dest_ip', default_value='192.168.0.241')
@@ -34,8 +62,9 @@ def generate_launch_description():
     )
     rgb_source_arg = DeclareLaunchArgument(
         'rgb_source',
-        default_value='oakd_lite_720p_hw',
-        description='RGB camera source (default OAK-D 720p HW-encode H264 + D405 H264): oakd_lite_720p_hw, d435, zedm, oakd_lite, oakd_lite_720p, or oakd_lite_720p_mjpeg'
+        default_value='auto',
+        description='Head camera: auto (default; USB-detect OAK-D > D435 > ZED, 720p at fps), '
+                    'or force oakd_lite_720p_hw, d435, zedm, oakd_lite, oakd_lite_720p, oakd_lite_720p_mjpeg, none'
     )
     use_h264_arg = DeclareLaunchArgument(
         'use_h264',
@@ -88,6 +117,16 @@ def generate_launch_description():
         dual_rgb_no_depth = LaunchConfiguration('dual_rgb_no_depth').perform(context).lower() == 'true'
         disable_left_d405 = LaunchConfiguration('disable_left_d405').perform(context).lower() == 'true'
         rgb_source = LaunchConfiguration('rgb_source').perform(context)
+        if rgb_source == 'auto':
+            label, detected = _detect_head_camera()
+            if detected is None:
+                print('[unified_stream] rgb_source=auto: no OAK-D / D435 / ZED on USB '
+                      '-- streaming the D405s only')
+                rgb_source = 'none'
+            else:
+                print(f'[unified_stream] rgb_source=auto: {label} detected '
+                      f'-> {detected} (1280x720 @ {LaunchConfiguration("fps").perform(context)} Hz)')
+                rgb_source = detected
         color_exposure = LaunchConfiguration('color_exposure').perform(context)
         color_wb = LaunchConfiguration('color_wb').perform(context)
         oakd_video_port = LaunchConfiguration('oakd_video_port').perform(context)
@@ -130,11 +169,12 @@ def generate_launch_description():
                         'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/nvidia -name "libjpeg.so*" | head -n 1); fi; '
                         'if [ -z "$NVJPEG" ]; then NVJPEG=$(find /usr/lib/aarch64-linux-gnu/tegra -name "libjpeg.so*" | head -n 1); fi; '
                         'echo "[ZED] Preloading proprietary NVIDIA JPEG library: $NVJPEG"; '
-                        'export LD_PRELOAD=$NVJPEG; "$0" "$1" "$2" "$3"',
+                        'export LD_PRELOAD=$NVJPEG; "$0" "$1" "$2" "$3" "$4"',
                         zed_exec,
                         dest_ip,
                         base_port,
-                        fps
+                        fps,
+                        '720'
                     ],
                     output='screen'
                 )
@@ -216,10 +256,11 @@ def generate_launch_description():
                     }.items()
                 )
             )
-        elif rgb_source != 'd435':
+        elif rgb_source not in ('d435', 'none'):
             raise RuntimeError(
                 f"Unsupported rgb_source '{rgb_source}'. "
-                "Use d435, zedm, oakd_lite, oakd_lite_720p, oakd_lite_720p_hw, or oakd_lite_720p_mjpeg."
+                "Use auto, d435, zedm, oakd_lite, oakd_lite_720p, oakd_lite_720p_hw, "
+                "oakd_lite_720p_mjpeg, or none."
             )
 
         return actions
