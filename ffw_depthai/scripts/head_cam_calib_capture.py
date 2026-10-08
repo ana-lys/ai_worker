@@ -243,6 +243,18 @@ def capture(a):
     threading.Thread(target=ex.spin, daemon=True).start()
     log = lambda *s: print('[calib]', *s, flush=True)  # noqa: E731
 
+    def shutdown():
+        # stop the executor thread before tearing rclpy down -- exiting with it
+        # still spinning aborts the interpreter
+        ex.shutdown()
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+    def bail(msg):
+        log(msg)
+        shutdown()
+        sys.exit(1)
+
     def stop_base():
         node.publishing = True
         for _ in range(5):
@@ -466,7 +478,7 @@ def capture(a):
     lifts = [float(x) for x in a.lift.split(',')] if a.lift else []
     for z in lifts:
         if not (LIFT_LIMITS[0] <= z <= LIFT_LIMITS[1]):
-            sys.exit(f'lift {z} outside {LIFT_LIMITS}')
+            bail(f'lift {z} outside {LIFT_LIMITS}')
     if a.no_base:
         placements = [(0.0, 0.0, 0.0)]
     else:
@@ -478,20 +490,20 @@ def capture(a):
     while time.monotonic() - t0 < 10 and not (node.cam_info and node.snap()['js']):
         time.sleep(0.1)
     if not node.cam_info:
-        sys.exit(f'no {a.ns}/camera_info -- is the head camera streaming?')
+        bail(f'no {a.ns}/camera_info -- is the head camera streaming?')
     s0 = node.snap()
     use_base = not a.no_base
     if use_base:
         time.sleep(1.0)
         s0 = node.snap()
         if not s0['odom'] or s0['odom_age'] > 0.5:
-            sys.exit('no live /odom (swerve_drive_controller active?) -- use --no-base')
+            bail('no live /odom (swerve_drive_controller active?) -- use --no-base')
         if node.cmd_vel_others:
-            sys.exit(f'{node.cmd_vel_others} /cmd_vel msgs from another node in the last '
+            bail(f'{node.cmd_vel_others} /cmd_vel msgs from another node in the last '
                      'second -- stop that teleop first (or --no-base)')
     d0 = latest_pose(0, timeout=3.0)
     if d0 is None:
-        sys.exit(f'no board pose on {a.ns}/apriltag_detections -- board in view?')
+        bail(f'no board pose on {a.ns}/apriltag_detections -- board in view?')
     lifts = lifts or [s0['js'].get('lift_joint', 0.0)]
     n_targets = a.grid * a.grid
     total = len(placements) * len(lifts) * n_targets
@@ -502,7 +514,7 @@ def capture(a):
         f'{s0["js"].get("head_joint2"):.3f}, lift {s0["js"].get("lift_joint"):.3f}, '
         f'board {d0["num_tags"]} tags at {np.linalg.norm(d0["pose"]["t"]):.2f} m')
     if a.plan_only:
-        rclpy.shutdown()
+        shutdown()
         return
     if not a.yes:
         input('[calib] clear space around the base, arms clear of the lift travel -- '
@@ -586,7 +598,7 @@ def capture(a):
             log(f'return to start failed: {e}')
         stop_base()
         f.close()
-        rclpy.shutdown()
+        shutdown()
 
 
 # ══════════════════════════════════════════════════════════════════════ SOLVE
