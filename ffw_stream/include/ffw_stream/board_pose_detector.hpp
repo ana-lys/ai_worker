@@ -13,6 +13,11 @@
 //                                        (dropped if that tf is > 0.5 s old)
 //   <ns>/apriltag_telemetry              "<cam>_fps=.. apriltag_fps=.. avg_margin=..
 //                                         num_tags=.. reproj_px=.."
+//   <ns>/apriltag_detections             one JSON per detection pass (calibration
+//                                         recorders): stamp, image size, every tag's
+//                                         id/margin/4 raw pixel corners, used board
+//                                         tags, reprojection, and this pass's accepted
+//                                         T_camera_board (null if none published)
 //
 // /head_camera_tf is the resolved head_camera_frame -> base_link transform;
 // its mount offset was calibrated for the OAK-D, so the base_link pose is only
@@ -132,6 +137,8 @@ class BoardPoseDetector {
         ns + "/marker_board_pose_camera_frame", rclcpp::QoS(1).best_effort());
     telemetry_pub_ = node_->create_publisher<std_msgs::msg::String>(
         ns + "/apriltag_telemetry", rclcpp::QoS(1).best_effort());
+    detections_pub_ = node_->create_publisher<std_msgs::msg::String>(
+        ns + "/apriltag_detections", rclcpp::QoS(5).best_effort());
     cam_tf_sub_ = node_->create_subscription<geometry_msgs::msg::TransformStamped>(
         "/head_camera_tf", rclcpp::QoS(1).transient_local().reliable(),
         [this](const geometry_msgs::msg::TransformStamped::SharedPtr msg) {
@@ -229,12 +236,17 @@ class BoardPoseDetector {
     zarray_t *detections = apriltag_detector_detect(detector_, im);
     int n = zarray_size(detections);
     double margin_sum = 0.0;
+    std::ostringstream tags_json;
+    tags_json << std::setprecision(6);
     std::vector<cv::Point3f> obj_pts;
     std::vector<cv::Point2f> img_pts;
     for (int i = 0; i < n; ++i) {
       apriltag_detection_t *det;
       zarray_get(detections, i, &det);
       margin_sum += det->decision_margin;
+      tags_json << (i ? "," : "") << "[" << det->id << "," << det->decision_margin;
+      for (int k = 0; k < 4; ++k) tags_json << "," << det->p[k][0] << "," << det->p[k][1];
+      tags_json << "]";
       auto it = board_corners_.find(det->id);
       if (it != board_corners_.end()) {
         for (int k = 0; k < 4; ++k) {
@@ -249,7 +261,25 @@ class BoardPoseDetector {
     apriltag_detections_destroy(detections);
     image_u8_destroy(im);
 
+    published_ = false;
     if (obj_pts.size() >= 4) solve_and_publish(obj_pts, img_pts, K, D, used_tags);
+
+    {
+      std_msgs::msg::String js;
+      std::ostringstream o;
+      o << std::setprecision(9) << "{\"stamp\":" << node_->now().seconds() << ",\"w\":" << w
+        << ",\"h\":" << h << ",\"num_tags\":" << n << ",\"used_tags\":" << used_tags
+        << ",\"reproj_px\":" << last_reproj_px_ << ",\"pose\":";
+      if (published_) {
+        o << "{\"t\":[" << pub_t_.x() << "," << pub_t_.y() << "," << pub_t_.z() << "],\"q\":["
+          << pub_q_.w() << "," << pub_q_.x() << "," << pub_q_.y() << "," << pub_q_.z() << "]}";
+      } else {
+        o << "null";
+      }
+      o << ",\"tags\":[" << tags_json.str() << "]}";  // [id, margin, u0,v0, .., u3,v3]
+      js.data = o.str();
+      detections_pub_->publish(js);
+    }
 
     auto now = std::chrono::steady_clock::now();
     pass_count_++;
@@ -339,6 +369,9 @@ class BoardPoseDetector {
                          pnp_tvec_.at<double>(2));
     auto stamp = node_->now();
     pose_cam_pub_->publish(make_pose(stamp, camera_frame_, R_cb, t_cb));
+    published_ = true;
+    pub_t_ = t_cb;
+    pub_q_ = Eigen::Quaterniond(R_cb);
 
     geometry_msgs::msg::TransformStamped tf;
     {
@@ -381,7 +414,7 @@ class BoardPoseDetector {
   apriltag_detector_t *detector_ = nullptr;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_, pose_cam_pub_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr telemetry_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr telemetry_pub_, detections_pub_;
   rclcpp::Subscription<geometry_msgs::msg::TransformStamped>::SharedPtr cam_tf_sub_;
   std::mutex tf_mtx_;
   geometry_msgs::msg::TransformStamped cam_tf_;
@@ -402,6 +435,9 @@ class BoardPoseDetector {
   bool pnp_seeded_ = false;
   int consecutive_rejects_ = 0;
   double last_reproj_px_ = -1.0;
+  bool published_ = false;          // this pass published a camera-frame pose
+  Eigen::Vector3d pub_t_;
+  Eigen::Quaterniond pub_q_;
   int pass_count_ = 0;
   double apriltag_fps_ = 0.0;
   std::chrono::steady_clock::time_point last_fps_time_;

@@ -103,6 +103,7 @@ install(PROGRAMS
     scripts/sweep_and_solve_camera_calibration.py
     scripts/solve_camera_mount_correction.py
     scripts/camera_calib_lib.py
+    scripts/head_cam_calib_capture.py
     DESTINATION lib/${PROJECT_NAME})
 
 ament_package()
