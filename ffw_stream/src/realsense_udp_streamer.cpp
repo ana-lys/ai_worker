@@ -256,6 +256,7 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
     }
     int fps_frames = 0;
     auto fps_t0 = std::chrono::steady_clock::now();
+    bool ts_domain_logged = false;
 
     size_t expected_size = width * height * 3;
     std::vector<uint8_t> rgb_buf(expected_size, 0);
@@ -300,7 +301,20 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       }
 
       if (tags) {
-        tags->submit_rgb(rgb_buf.data(), width, height, width * 3);  // no-op unless due
+        // Capture time on the system clock: RealSense GLOBAL/SYSTEM-domain
+        // timestamps are host epoch ms; any other domain falls back to arrival.
+        auto dom = color.get_frame_timestamp_domain();
+        double cap_s = (dom == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME ||
+                        dom == RS2_TIMESTAMP_DOMAIN_SYSTEM_TIME)
+            ? color.get_timestamp() / 1000.0
+            : std::chrono::duration<double>(
+                  std::chrono::system_clock::now().time_since_epoch()).count();
+        if (!ts_domain_logged) {
+          ts_domain_logged = true;
+          log("CAM RGB " + serial + " : capture timestamps from domain '" +
+              rs2_timestamp_domain_to_string(dom) + "'");
+        }
+        tags->submit_rgb(rgb_buf.data(), width, height, width * 3, cap_s);  // no-op unless due
         ++fps_frames;
         auto t = std::chrono::steady_clock::now();
         double el = std::chrono::duration<double>(t - fps_t0).count();

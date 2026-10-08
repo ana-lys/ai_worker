@@ -180,7 +180,11 @@ class BoardPoseDetector {
   // due (~period_s) and the worker is idle: then the RGB8 frame is reduced to
   // luma into the worker's buffer and the worker is woken. Never blocks on the
   // detector -- a busy worker just means this frame is skipped.
-  void submit_rgb(const uint8_t *rgb, int w, int h, int stride_bytes) {
+  // cap_stamp: the frame's capture time in seconds on the ROS system clock
+  // (RealSense global/system timestamp), carried into apriltag_detections as
+  // "cap_stamp" so recorders can sample joint states at the exposure, not at
+  // detection end.
+  void submit_rgb(const uint8_t *rgb, int w, int h, int stride_bytes, double cap_stamp = 0.0) {
     auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration<double>(now - last_submit_).count() < period_s_) return;
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
@@ -197,6 +201,7 @@ class BoardPoseDetector {
       }
     }
     gw_ = w;
+    gcap_ = cap_stamp;
     gh_ = h;
     pending_ = true;
     lk.unlock();
@@ -207,6 +212,7 @@ class BoardPoseDetector {
   void run() {
     std::vector<uint8_t> gray;
     int w = 0, h = 0;
+    double cap = 0.0;
     cv::Mat K, D;
     while (true) {
       {
@@ -215,11 +221,12 @@ class BoardPoseDetector {
         if (stop_) return;
         gray.swap(gray_);
         w = gw_;
+        cap = gcap_;
         h = gh_;
         K = K_.clone();
         D = D_.clone();
       }
-      detect_once(gray, w, h, K, D);
+      detect_once(gray, w, h, K, D, cap);
       {
         std::lock_guard<std::mutex> lk(mtx_);
         pending_ = false;
@@ -228,7 +235,7 @@ class BoardPoseDetector {
   }
 
   void detect_once(const std::vector<uint8_t> &gray, int w, int h, const cv::Mat &K,
-                   const cv::Mat &D) {
+                   const cv::Mat &D, double cap_stamp) {
     image_u8_t *im = image_u8_create(w, h);  // aligned stride for apriltag's SIMD
     for (int row = 0; row < h; ++row) {
       std::memcpy(im->buf + row * im->stride, gray.data() + static_cast<size_t>(row) * w, w);
@@ -267,7 +274,9 @@ class BoardPoseDetector {
     {
       std_msgs::msg::String js;
       std::ostringstream o;
-      o << std::setprecision(9) << "{\"stamp\":" << node_->now().seconds() << ",\"w\":" << w
+      o << std::fixed << std::setprecision(6) << "{\"stamp\":" << node_->now().seconds()
+        << ",\"cap_stamp\":" << cap_stamp << std::defaultfloat << std::setprecision(9)
+        << ",\"w\":" << w
         << ",\"h\":" << h << ",\"num_tags\":" << n << ",\"used_tags\":" << used_tags
         << ",\"reproj_px\":" << last_reproj_px_ << ",\"pose\":";
       if (published_) {
@@ -426,6 +435,7 @@ class BoardPoseDetector {
   bool pending_ = false, stop_ = false;
   std::vector<uint8_t> gray_;
   int gw_ = 0, gh_ = 0;
+  double gcap_ = 0.0;
   cv::Mat K_, D_;
   std::chrono::steady_clock::time_point last_submit_;
   std::thread worker_;

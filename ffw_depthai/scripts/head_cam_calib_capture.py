@@ -310,11 +310,11 @@ def capture(a):
         s = node.snap()['js']
         d = max(abs(tilt - s.get('head_joint1', tilt)), abs(pan - s.get('head_joint2', pan)))
         send_traj(node.head_ac, ['head_joint1', 'head_joint2'], [tilt, pan],
-                  max(0.6, d / a.head_vmax))
+                  max(a.head_min_s, d / a.head_vmax))
 
     def move_lift(z):
         cur = node.snap()['js'].get('lift_joint', z)
-        send_traj(node.lift_ac, ['lift_joint'], [z], max(1.5, abs(z - cur) / a.lift_vmax))
+        send_traj(node.lift_ac, ['lift_joint'], [z], max(0.8, abs(z - cur) / a.lift_vmax))
 
     def wait_still(use_base):
         t_still = None
@@ -331,21 +331,35 @@ def capture(a):
             elif t_still is None:
                 t_still = time.monotonic()
             elif time.monotonic() - t_still >= a.still_s:
-                return time.monotonic()
+                # (monotonic, wall) -- wall time is compared with the detector's
+                # cap_stamp (frame capture time on the system clock)
+                return time.monotonic(), time.time()
             time.sleep(0.02)
         raise RuntimeError('robot never came to rest')
 
     def passes_after(t_min, n, timeout):
-        """n fresh detection passes received after t_min (monotonic)."""
+        """n detection passes whose FRAME was captured after t_min = (mono, wall):
+        by cap_stamp when the detector provides it, else by receive time."""
+        mono, wall = t_min if isinstance(t_min, tuple) else (t_min, None)
+
+        def fresh_list():
+            with node.lock:
+                out = []
+                for tr, d in node.dets:
+                    cs = d.get('cap_stamp')
+                    if cs and wall is not None:
+                        if cs > wall:
+                            out.append(d)
+                    elif tr > mono:
+                        out.append(d)
+                return out
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
-            with node.lock:
-                fresh = [d for (tr, d) in node.dets if tr > t_min]
+            fresh = fresh_list()
             if len(fresh) >= n:
                 return fresh[:n]
-            time.sleep(0.05)
-        with node.lock:
-            return [d for (tr, d) in node.dets if tr > t_min]
+            time.sleep(0.02)
+        return fresh_list()
 
     def board_px(pose):
         """(centre_uv, all-corner uv Nx2, depth) for a camera-frame board pose."""
@@ -361,10 +375,6 @@ def capture(a):
         for d in reversed(passes_after(t_min, 1, timeout) or []):
             if d.get('pose'):
                 return d
-        with node.lock:
-            for tr, d in reversed(node.dets):
-                if tr > t_min and d.get('pose'):
-                    return d
         return None
 
     def targets_for(pose):
@@ -435,14 +445,33 @@ def capture(a):
             move_head(tilt, pan)
         return None, f'servo did not converge (err {prev_err:.0f} px)'
 
+    def aim(pose, head0, target):
+        """One head move that should put the board centre on target, predicted
+        from the pose just captured (the board does not move while only the
+        head moves). Returns None, or a skip reason."""
+        K = np.array(node.cam_info['K']).reshape(3, 3)
+        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+        c, _, _ = board_px(pose)
+        d_pan = sign['pan'] * (math.atan((target[0] - cx) / fx) - math.atan((c[0] - cx) / fx))
+        d_tilt = -sign['tilt'] * (math.atan((target[1] - cy) / fy) - math.atan((c[1] - cy) / fy))
+        # relative to the head angles the reference pose was captured at, so a
+        # failed capture in between does not leave the prediction stale
+        tilt, pan = head0[0] + d_tilt, head0[1] + d_pan
+        m = a.joint_margin
+        if not (HEAD_TILT_LIMITS[0] + m <= tilt <= HEAD_TILT_LIMITS[1] - m
+                and HEAD_PAN_LIMITS[0] + m <= pan <= HEAD_PAN_LIMITS[1] - m):
+            return f'head limit (tilt {tilt:.3f}, pan {pan:.3f})'
+        move_head(tilt, pan)
+        return None
+
     def capture_sample():
         for attempt in range(2):
             t_rest = wait_still(use_base)
-            ps = passes_after(t_rest + 0.05, a.passes, a.passes / 5.0 + 3.0)
+            ps = passes_after(t_rest, a.passes, a.passes / 5.0 + 2.0)
             good = [d for d in ps if d.get('pose') and d['num_tags'] >= a.min_tags
-                    and 0 <= d['reproj_px'] <= a.max_reproj]
+                    and 0 <= d['reproj_px'] <= a.max_reproj and board_in_margin(d['pose'])]
             if len(good) < a.passes:
-                reason = (f'{len(good)}/{a.passes} good passes (tags '
+                reason = (f'{len(good)}/{a.passes} good passes in margin (tags '
                           f'{[d["num_tags"] for d in ps]}, reproj '
                           f'{[round(d["reproj_px"], 2) for d in ps]})')
                 continue
@@ -572,6 +601,7 @@ def capture(a):
     start_head = (s0['js']['head_joint1'], s0['js']['head_joint2'])
     start_lift = s0['js'].get('lift_joint')
     n_ok = 0
+    t_last = time.monotonic()
     try:
         for g, (dx, dy, dyaw) in zip(group_ids, placements):
             if use_base:
@@ -588,9 +618,15 @@ def capture(a):
                     if d is None:
                         write(dict(type='skip', group=g, lift=z, reason='board not visible'))
                         continue
+                pose = d['pose']
+                js = node.snap()['js']
+                head0 = (js['head_joint1'], js['head_joint2'])
                 for ti, tgt in enumerate(targets_for(d['pose'])):
-                    det, why = servo_to(tgt)
-                    if det is None:
+                    if a.servo:
+                        det, why = servo_to(tgt)
+                    else:
+                        det, why = True, aim(pose, head0, tgt)
+                    if det is None or why:
                         log(f'  g{g} lift {z:+.2f} target {ti}: skip ({why})')
                         write(dict(type='skip', group=g, lift=z, target=tgt, reason=why))
                         continue
@@ -606,10 +642,14 @@ def capture(a):
                                odom=snap['odom'], joints=snap['js'], head_camera_tf=snap['cam_tf'],
                                base_to_calib=calib, tf_err=terr, stability=stab, passes=good))
                     n_ok += 1
+                    pose = good[-1]['pose']
+                    head0 = (snap['js']['head_joint1'], snap['js']['head_joint2'])
                     c, _, _ = board_px(good[-1]['pose'])
                     log(f'  g{g} lift {z:+.2f} target {ti}: sample {n_ok}  centre '
                         f'({c[0]:.0f},{c[1]:.0f})  tags {good[-1]["num_tags"]}  reproj '
-                        f'{good[-1]["reproj_px"]:.2f}px  spread {stab["spread_mm"]:.2f}mm')
+                        f'{good[-1]["reproj_px"]:.2f}px  spread {stab["spread_mm"]:.2f}mm  '
+                        f'[{time.monotonic() - t_last:.1f}s]')
+                    t_last = time.monotonic()
     except KeyboardInterrupt:
         log('interrupted')
     finally:
@@ -775,20 +815,23 @@ def main():
     ap.add_argument('--base-tol-deg', type=float, default=0.5)
     ap.add_argument('--lift', default='-0.10,-0.18,-0.26',
                     help='lift heights, comma list ("" = stay); 0 = top, min -0.5')
-    ap.add_argument('--lift-vmax', type=float, default=0.05)
-    ap.add_argument('--head-vmax', type=float, default=0.3)
-    ap.add_argument('--grid', type=int, default=3, help='NxN board-centre image targets')
-    ap.add_argument('--grid-span', type=float, default=0.5,
+    ap.add_argument('--lift-vmax', type=float, default=0.10)
+    ap.add_argument('--head-vmax', type=float, default=0.8)
+    ap.add_argument('--head-min-s', type=float, default=0.25, help='shortest head move [s]')
+    ap.add_argument('--grid', type=int, default=5, help='NxN board-centre image targets')
+    ap.add_argument('--grid-span', type=float, default=0.6,
                     help='fraction of the board-fits-in-margin range the grid spans (1 = edge to edge)')
     ap.add_argument('--edge-margin', type=float, default=0.08,
                     help='whole board kept this fraction of W/H away from the edges')
+    ap.add_argument('--servo', action='store_true',
+                    help='closed-loop head servo per target (slow); default is one predicted move')
     ap.add_argument('--servo-iters', type=int, default=4)
     ap.add_argument('--servo-tol-px', type=float, default=25.0)
     ap.add_argument('--servo-gain', type=float, default=0.9)
     ap.add_argument('--joint-margin', type=float, default=0.03, help='rad off head limits')
-    ap.add_argument('--still-s', type=float, default=0.5)
+    ap.add_argument('--still-s', type=float, default=0.2)
     ap.add_argument('--still-joint-vel', type=float, default=0.005)
-    ap.add_argument('--passes', type=int, default=5)
+    ap.add_argument('--passes', type=int, default=2)
     ap.add_argument('--min-tags', type=int, default=4,
                     help='tags per pass (the 15 mm tags are ~14 px at 1 m and rarely detect)')
     ap.add_argument('--max-reproj', type=float, default=1.5)

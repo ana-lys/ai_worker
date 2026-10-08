@@ -49,16 +49,17 @@ def _detect_head_camera_label():
     return mod._detect_head_camera()[0]
 
 
-# Nominal D435 mount relative to camera_calibration_link (an OPTICAL frame:
-# x right, y down, z forward, at the old ZED-M centre). The D435 RGB lens is
-# centred there and the camera is pitched 15 deg nose-down (about +y in the
-# body/ENU frame) = -15 deg about the optical x axis, which swings +z
-# (forward) toward +y (down). It is also shifted slightly in body x/z by an
-# unmeasured amount -- translation left at 0 until the AprilTag head-sweep
-# calibration (ffw_depthai/scripts/sweep_and_solve_camera_calibration.py or
-# ffw_collision_checker/scripts/camera_calib_padfit.py) is re-run for it.
-D435_HEAD_CAM_TF = ['--x', '0.0', '--y', '0.0', '--z', '0.0',
-                    '--roll', '-0.261799', '--pitch', '0.0', '--yaw', '0.0']
+# D435 mount relative to camera_calibration_link (an OPTICAL frame: x right,
+# y down, z forward, at the old ZED-M centre). Nominal was the RGB lens centred
+# there, pitched 15 deg nose-down = roll -15 deg about optical x.
+# Calibrated 2026-10-09 with ffw_depthai head_cam_calib_capture.py: 155 still
+# samples, 7 base placements x 3 lift heights x head grid, bundle fit of every
+# tag corner, reprojection 4.85 -> 2.29 px. Camera ~32 mm forward, ~8 mm left,
+# 15.9 deg down, ~1 deg yaw. y (vertical) and roll are poorly separated at the
+# ~1 m board distance used (two runs: y +28 / -17 mm, roll -15.0 / -16.3 deg);
+# re-run with the board at ~0.6 m and ~1.6 m to pin them down.
+D435_HEAD_CAM_TF = ['--x', '-0.007717', '--y', '-0.003129', '--z', '0.032079',
+                    '--roll', '-0.277217', '--pitch', '-0.010621', '--yaw', '0.017780']
 
 
 def generate_launch_description():
