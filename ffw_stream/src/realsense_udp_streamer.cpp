@@ -49,6 +49,7 @@
 
 #include <condition_variable>
 #include <map>
+#include <memory>
 
 // GStreamer appsrc-based H264 encoding
 #include <gst/gst.h>
@@ -58,6 +59,9 @@
 // (transient_local) QoS — same pattern as the OAK-D streamer's /oakd/camera_info.
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+
+// AprilTag 25h9 board-pose tap on the D435 head stream (own thread).
+#include "ffw_stream/board_pose_detector.hpp"
 
 std::mutex cout_mutex;
 std::atomic<bool> g_running{true};
@@ -179,7 +183,8 @@ void destroy_gst_stream(GstEncoder &enc) {
 void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, int port,
                        int width, int height, int fps, bool mjpeg,
                        rclcpp::Node::SharedPtr node,
-                       rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub) {
+                       rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub,
+                       bool apriltag) {
   std::ostringstream hdr;
   hdr << "\n=== CAM (RGB ZED-Replacement) " << serial << " : rgb->udp:" << port
       << "  gst=" << (mjpeg ? "mjpeg" : "h264") << " ===";
@@ -228,6 +233,20 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
         std::to_string(intr.width) + "x" + std::to_string(intr.height) +
         " fx=" + std::to_string(intr.fx) + " fy=" + std::to_string(intr.fy));
 
+    // Same 25h9 board detector as the OAK-D tap, on its own thread, fed the
+    // newest frame at ~5 Hz -> /d435/marker_board_pose{,_camera_frame},
+    // /d435/apriltag_telemetry.
+    std::unique_ptr<ffw_stream::BoardPoseDetector> tags;
+    if (apriltag) {
+      tags = std::make_unique<ffw_stream::BoardPoseDetector>(node, "/d435", "d435_camera", "d435");
+      std::array<double, 9> K;
+      std::copy(ci->k.begin(), ci->k.end(), K.begin());
+      tags->set_intrinsics(K, std::vector<double>(ci->d.begin(), ci->d.end()));
+      log("CAM RGB " + serial + " : AprilTag 25h9 board detector on (~5 Hz, own thread)");
+    }
+    int fps_frames = 0;
+    auto fps_t0 = std::chrono::steady_clock::now();
+
     size_t expected_size = width * height * 3;
     std::vector<uint8_t> rgb_buf(expected_size, 0);
     std::string cam_name = "RGB";
@@ -268,6 +287,18 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       if (!gst_encoder_push_frame(gst_enc, rgb_buf.data(), expected_size)) {
         log("CAM RGB " + serial + " : gst_encoder_push_frame failed, stopping");
         break;
+      }
+
+      if (tags) {
+        tags->submit_rgb(rgb_buf.data(), width, height, width * 3);  // no-op unless due
+        ++fps_frames;
+        auto t = std::chrono::steady_clock::now();
+        double el = std::chrono::duration<double>(t - fps_t0).count();
+        if (el >= 1.0) {
+          tags->set_camera_fps(fps_frames / el);
+          fps_frames = 0;
+          fps_t0 = t;
+        }
       }
 
       // Refresh the latched camera_info at ~1 Hz so consumers see a live stamp
@@ -552,7 +583,8 @@ int main(int argc, char **argv) {
                  "[--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] "
                  "[--disable-left-d405] "
                  "[--color-exposure <us>] "
-                 "[--color-wb <K>] [--d435-fps <n>] [--h264|--mjpeg] (default H264)"
+                 "[--color-wb <K>] [--d435-fps <n>] [--no-d435-apriltag] "
+                 "[--h264|--mjpeg] (default H264)"
               << std::endl;
     return 1;
   }
@@ -560,6 +592,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> positional_args;
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
+  bool d435_apriltag = true;   // --no-d435-apriltag turns the board tap off
   bool dual_rgb_no_depth = false;  // profile: both D405s stream RGB, depth off
   bool disable_left_d405 = false;  // skip the left D405 (cam_idx 0) entirely
   int d435_fps = 0;            // 0 = follow the shared fps
@@ -588,6 +621,8 @@ int main(int argc, char **argv) {
       if (i + 1 < argc) {
         color_wb = std::atoi(argv[++i]);
       }
+    } else if (arg == "--no-d435-apriltag") {
+      d435_apriltag = false;
     } else if (arg == "--d435-fps") {
       if (i + 1 < argc) {
         d435_fps = std::atoi(argv[++i]);
@@ -637,6 +672,8 @@ int main(int argc, char **argv) {
   auto node = std::make_shared<rclcpp::Node>("realsense_udp_streamer");
   auto cam_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
       "/d435/camera_info", rclcpp::QoS(1).transient_local().reliable());
+  // Spin for the board detector's /head_camera_tf subscription.
+  std::thread([node] { rclcpp::spin(node); }).detach();
 
   rs2::context ctx;
   auto devices = ctx.query_devices();
@@ -693,7 +730,7 @@ int main(int argc, char **argv) {
         int rgb_port = base_port + 100;
         frames_captured["RGB"];
         threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
-                             1280, 720, d435_fps, mjpeg, node, cam_info_pub);
+                             1280, 720, d435_fps, mjpeg, node, cam_info_pub, d435_apriltag);
       } else {
         log("CAM RGB " + serials[i] + " (D435): --no-d435-rgb -- not opened");
       }

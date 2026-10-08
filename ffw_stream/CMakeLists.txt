@@ -14,6 +14,10 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+# D435 AprilTag board-pose tap (include/ffw_stream/board_pose_detector.hpp)
+find_package(apriltag REQUIRED)
+find_package(Eigen3 REQUIRED NO_MODULE)
+find_package(geometry_msgs REQUIRED)
 
 # GStreamer for in-process H264 encoding (realsense_udp_streamer)
 pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0)
@@ -27,13 +31,16 @@ target_include_directories(realsense_udp_streamer PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_compile_features(realsense_udp_streamer PUBLIC c_std_99 cxx_std_17)
-ament_target_dependencies(realsense_udp_streamer rclcpp sensor_msgs)
-target_include_directories(realsense_udp_streamer PRIVATE ${GST_INCLUDE_DIRS})
+ament_target_dependencies(realsense_udp_streamer rclcpp sensor_msgs std_msgs geometry_msgs)
+target_include_directories(realsense_udp_streamer PRIVATE ${GST_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 target_compile_options(realsense_udp_streamer PRIVATE ${GST_CFLAGS_OTHER})
 target_link_libraries(realsense_udp_streamer
   realsense2::realsense2
   pthread
   ${GST_LIBRARIES}
+  apriltag::apriltag
+  Eigen3::Eigen
+  ${OpenCV_LIBS}
 )
 install(TARGETS realsense_udp_streamer
   DESTINATION lib/${PROJECT_NAME})

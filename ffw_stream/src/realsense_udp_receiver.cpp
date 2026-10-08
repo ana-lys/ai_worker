@@ -103,6 +103,13 @@ public:
         std::lock_guard<std::mutex> lock(telemetry_mutex_);
         latest_telemetry_["AprilTag"] = msg->data;
       });
+    // Same board tap on the D435 head stream (realsense_udp_streamer).
+    apriltag_d435_telemetry_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/d435/apriltag_telemetry", rclcpp::QoS(1).best_effort(),
+      [this](const std_msgs::msg::String::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(telemetry_mutex_);
+        latest_telemetry_["AprilTag-D435"] = msg->data;
+      });
 
     int zed_port = base_port + 100;
     threads_.emplace_back(&RealsenseUDPReceiver::zedStreamLoop, this, zed_port);
@@ -791,6 +798,7 @@ private:
   std::map<std::string, std::string> latest_telemetry_;
   std::map<std::string, std::string> last_oakd_latency_str_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr apriltag_telemetry_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr apriltag_d435_telemetry_sub_;
 
   std::vector<std::thread> threads_;
   std::thread display_thread_;
