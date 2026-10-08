@@ -9,8 +9,9 @@ Watches:
   /joint_states             per watched joint: current (effort = Present
                             Current, raw counts) vs its Current Limit --
                             NEAR (>= --warn-frac), SATURATED (>= --sat-frac
-                            held for --sat-hold s), TORQUE-LOSS heuristic
-                            (|current| collapses to ~0 after holding load);
+                            held for --sat-hold s), CUR_COLLAPSE (|current|
+                            -> ~0 after a >= --load-hold s hold while the
+                            gripper does not move = torque cut) vs RELEASE;
                             plus /joint_states stalls (gap > --stall-s)
   /ffw_{follower,base,sensor}/dxl_state
                             Hardware Error Status per ID (decoded bits) and
@@ -71,10 +72,13 @@ class Watchdog(Node):
         self.t0 = time.monotonic()
         self.last_js = None
         self.stalled = False
-        self.st = {j: dict(near=False, sat_since=None, sat=False, loaded_since=None,
-                           lost=False, pmin=math.inf, pmax=-math.inf,
+        self.st = {j: dict(near=False, sat_since=None, sat=False, load_start=None,
+                           load_last=None, load_pos=None, hold_pos=None, zero_since=None, lost=False,
+                           pmin=math.inf, pmax=-math.inf,
                            cmin=math.inf, cmax=-math.inf, n=0) for j in self.joints}
         self.hw = {}       # (topic, id) -> last hw state
+        self.dxl_sig = {}  # topic -> (comm_state, hw tuple) of the last message
+        self.js_idx = {}   # joint -> index, keyed by the name list identity
         self.comm = {}     # topic -> last comm_state
         self.rosout = {}   # kind -> [count, first, last]
         self.batt_low = {}
@@ -116,10 +120,16 @@ class Watchdog(Node):
             self.event("JS_RESUME", "/joint_states", f"after {now - self.last_js:.2f} s")
             self.stalled = False
         self.last_js = now
+        names = tuple(m.name)
+        if self.js_idx.get("_names") != names:
+            self.js_idx = {"_names": names}
+            for j in self.joints:
+                if j in names:
+                    self.js_idx[j] = names.index(j)
         for j, lim in self.joints.items():
-            if j not in m.name:
+            i = self.js_idx.get(j)
+            if i is None:
                 continue
-            i = m.name.index(j)
             pos = m.position[i] if i < len(m.position) else float("nan")
             cur = m.effort[i] if i < len(m.effort) else float("nan")
             s = self.st[j]
@@ -148,18 +158,33 @@ class Watchdog(Node):
                         self.event("CUR_UNSAT", j, f"{amp} after "
                                    f"{now - s['sat_since']:.1f} s saturated")
                     s["sat_since"], s["sat"] = None, False
-            # torque-loss heuristic: was loaded, now ~0 for a while
+            # Current drop after a steady hold. A hold = |current| >= loaded_raw
+            # for >= load_hold s with the position still; hold_pos is where it
+            # settled. Trip / torque cut = current gone while still at hold_pos;
+            # a release = it has moved away (opening) by the time current is ~0.
             if ac >= self.a.loaded_raw:
-                s["loaded_since"] = now
+                if (s["load_start"] is None or now - s["load_last"] > 0.2
+                        or abs(pos - s["load_pos"]) > self.a.still_tol):
+                    s["load_start"], s["load_pos"], s["hold_pos"] = now, pos, None
+                s["load_last"], s["zero_since"] = now, None
+                if s["hold_pos"] is None and now - s["load_start"] >= self.a.load_hold:
+                    s["hold_pos"] = pos
                 if s["lost"]:
                     self.event("CUR_BACK", j, amp)
                     s["lost"] = False
-            elif (ac <= self.a.zero_raw and s["loaded_since"] is not None and not s["lost"]
-                  and now - s["loaded_since"] >= self.a.zero_hold):
-                s["lost"] = True
-                self.event("CUR_COLLAPSE", j,
-                           f"{amp}: was >= {self.a.loaded_raw:g} raw, ~0 for "
-                           f"{self.a.zero_hold:g} s (torque off / released?)")
+            elif ac <= self.a.zero_raw and s["hold_pos"] is not None and not s["lost"]:
+                s["zero_since"] = s["zero_since"] or now
+                if now - s["zero_since"] >= self.a.zero_hold:
+                    held = s["load_last"] - s["load_start"]
+                    moved = abs(pos - s["hold_pos"])
+                    s["lost"], s["load_start"], s["hold_pos"] = True, None, None
+                    if moved < self.a.still_tol:
+                        self.event("CUR_COLLAPSE", j,
+                                   f"{amp}: held >= {self.a.loaded_raw:g} raw for {held:.1f} s, "
+                                   f"now ~0 and NOT moving (d={moved:.3f}) -> torque cut / trip?")
+                    else:
+                        self.event("RELEASE", j, f"{amp}: held {held:.1f} s, then moved "
+                                   f"{moved:.3f} with ~0 current (normal open)")
 
     def on_tick(self):
         if self.last_js is None or self.stalled:
@@ -171,6 +196,11 @@ class Watchdog(Node):
 
     # ------------------------------------------------------------ dxl_state
     def on_dxl(self, topic, m):
+        # ~100 Hz per bus and almost always unchanged: bail out cheaply.
+        sig = (m.comm_state, tuple(m.dxl_hw_state))
+        if self.dxl_sig.get(topic) == sig:
+            return
+        self.dxl_sig[topic] = sig
         src = topic.split("/")[1]
         if self.comm.get(topic) != m.comm_state:
             if topic in self.comm or m.comm_state != 0:
@@ -236,7 +266,12 @@ def main():
     ap.add_argument("--warn-frac", type=float, default=0.8)
     ap.add_argument("--sat-frac", type=float, default=0.95)
     ap.add_argument("--sat-hold", type=float, default=1.0)
-    ap.add_argument("--loaded-raw", type=float, default=50.0)
+    ap.add_argument("--loaded-raw", type=float, default=50.0,
+                    help="|current| that counts as holding a load")
+    ap.add_argument("--load-hold", type=float, default=1.0,
+                    help="a hold must last this long before a drop is judged")
+    ap.add_argument("--still-tol", type=float, default=0.03,
+                    help="position change below this after the drop = not moving")
     ap.add_argument("--zero-raw", type=float, default=8.0)
     ap.add_argument("--zero-hold", type=float, default=0.5)
     ap.add_argument("--stall-s", type=float, default=0.3)
