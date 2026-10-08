@@ -72,6 +72,11 @@ def generate_launch_description():
         description='D435 head stream codec: mjpeg (default, jpegenc q90 like the OAK-D MJPEG feed; '
                     'a lost packet costs one frame) or h264'
     )
+    d435_apriltag_hz_arg = DeclareLaunchArgument(
+        'd435_apriltag_hz',
+        default_value='15',
+        description='D435 AprilTag board-detection passes per second (15 = every frame at 15 fps)'
+    )
     d435_bitrate_arg = DeclareLaunchArgument(
         'd435_bitrate_kbps',
         default_value='10000',
@@ -153,6 +158,7 @@ def generate_launch_description():
             cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag,
                    '--d435-fps', fps,
                    '--d435-codec', LaunchConfiguration('d435_codec').perform(context),
+                   '--d435-apriltag-hz', LaunchConfiguration('d435_apriltag_hz').perform(context),
                    '--d435-bitrate', LaunchConfiguration('d435_bitrate_kbps').perform(context)]
             if dual_rgb_no_depth:
                 cmd += ['--dual-rgb-no-depth']
@@ -287,6 +293,7 @@ def generate_launch_description():
         disable_left_d405_arg,
         rgb_source_arg,
         d435_codec_arg,
+        d435_apriltag_hz_arg,
         d435_bitrate_arg,
         use_h264_arg,
         oakd_video_port_arg,

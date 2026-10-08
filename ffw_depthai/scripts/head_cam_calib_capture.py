@@ -950,9 +950,10 @@ def main():
     ap.add_argument('--walk-yaw-deg', type=float, default=3.0, help='max base yaw step')
     ap.add_argument('--walk-lift', type=float, default=0.04, help='max lift step [m]')
     ap.add_argument('--walk-lift-range', default='-0.26,-0.06', help='lift range for the walk')
-    ap.add_argument('--walk-gain', type=float, default=3.0, help='base P gain for walk steps')
-    ap.add_argument('--walk-tol-m', type=float, default=0.015)
-    ap.add_argument('--walk-tol-deg', type=float, default=1.0)
+    ap.add_argument('--walk-gain', type=float, default=4.0, help='base P gain for walk steps')
+    ap.add_argument('--walk-tol-m', type=float, default=0.03,
+                    help='walk steps only need to get close -- odom records where the base stopped')
+    ap.add_argument('--walk-tol-deg', type=float, default=1.5)
     ap.add_argument('--base-xy', type=float, default=0.20, help='+-x and +-y placement [m]')
     ap.add_argument('--placements', default='',
                     help='subset of placement indices to run, e.g. "2,3,4,5,6" '
@@ -978,7 +979,7 @@ def main():
     ap.add_argument('--servo-tol-px', type=float, default=25.0)
     ap.add_argument('--servo-gain', type=float, default=0.9)
     ap.add_argument('--joint-margin', type=float, default=0.03, help='rad off head limits')
-    ap.add_argument('--still-s', type=float, default=0.2)
+    ap.add_argument('--still-s', type=float, default=0.15)
     ap.add_argument('--still-joint-vel', type=float, default=0.005)
     ap.add_argument('--passes', type=int, default=2)
     ap.add_argument('--min-tags', type=int, default=4,

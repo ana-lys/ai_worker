@@ -192,7 +192,7 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
                        int width, int height, int fps, bool mjpeg,
                        rclcpp::Node::SharedPtr node,
                        rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub,
-                       bool apriltag, int bitrate_kbps) {
+                       bool apriltag, int bitrate_kbps, double apriltag_hz) {
   std::ostringstream hdr;
   hdr << "\n=== CAM (RGB ZED-Replacement) " << serial << " : rgb->udp:" << port
       << "  gst=" << (mjpeg ? "mjpeg q90" : "h264 @ " + std::to_string(bitrate_kbps) + " kbps")
@@ -248,11 +248,15 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
     // /d435/apriltag_telemetry.
     std::unique_ptr<ffw_stream::BoardPoseDetector> tags;
     if (apriltag) {
-      tags = std::make_unique<ffw_stream::BoardPoseDetector>(node, "/d435", "d435_camera", "d435");
+      // apriltag_hz >= fps = every frame; 2 detector threads so a 720p pass
+      // fits inside a 66 ms frame (a busy worker just skips frames).
+      tags = std::make_unique<ffw_stream::BoardPoseDetector>(
+          node, "/d435", "d435_camera", "d435", apriltag_hz > 0 ? 1.0 / apriltag_hz - 1e-3 : 0.0, 2);
       std::array<double, 9> K;
       std::copy(ci->k.begin(), ci->k.end(), K.begin());
       tags->set_intrinsics(K, std::vector<double>(ci->d.begin(), ci->d.end()));
-      log("CAM RGB " + serial + " : AprilTag 25h9 board detector on (~5 Hz, own thread)");
+      log("CAM RGB " + serial + " : AprilTag 25h9 board detector on (~" +
+          std::to_string(static_cast<int>(apriltag_hz)) + " Hz, own thread)");
     }
     int fps_frames = 0;
     auto fps_t0 = std::chrono::steady_clock::now();
@@ -608,7 +612,7 @@ int main(int argc, char **argv) {
                  "[--disable-left-d405] "
                  "[--color-exposure <us>] "
                  "[--color-wb <K>] [--d435-fps <n>] [--d435-codec mjpeg|h264] [--d435-bitrate <kbps>] "
-                 "[--no-d435-apriltag] "
+                 "[--d435-apriltag-hz <hz>] [--no-d435-apriltag] "
                  "[--h264|--mjpeg] (default H264)"
               << std::endl;
     return 1;
@@ -618,6 +622,7 @@ int main(int argc, char **argv) {
   bool enable_d405s = true;
   bool d435_rgb_enabled = true;
   bool d435_apriltag = true;   // --no-d435-apriltag turns the board tap off
+  double d435_apriltag_hz = 15.0;  // detection passes/s (capped by the D435 fps)
   bool dual_rgb_no_depth = false;  // profile: both D405s stream RGB, depth off
   bool disable_left_d405 = false;  // skip the left D405 (cam_idx 0) entirely
   int d435_fps = 0;            // 0 = follow the shared fps
@@ -651,6 +656,10 @@ int main(int argc, char **argv) {
     } else if (arg == "--color-wb") {
       if (i + 1 < argc) {
         color_wb = std::atoi(argv[++i]);
+      }
+    } else if (arg == "--d435-apriltag-hz") {
+      if (i + 1 < argc) {
+        d435_apriltag_hz = std::atof(argv[++i]);
       }
     } else if (arg == "--no-d435-apriltag") {
       d435_apriltag = false;
@@ -771,7 +780,7 @@ int main(int argc, char **argv) {
         frames_captured["RGB"];
         threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
                              1280, 720, d435_fps, d435_mjpeg, node, cam_info_pub, d435_apriltag,
-                             d435_bitrate_kbps);
+                             d435_bitrate_kbps, d435_apriltag_hz);
       } else {
         log("CAM RGB " + serials[i] + " (D435): --no-d435-rgb -- not opened");
       }

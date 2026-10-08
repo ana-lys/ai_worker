@@ -37,6 +37,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -125,11 +126,12 @@ class BoardPoseDetector {
   // ns e.g. "/d435"; cam_label prefixes the telemetry fps field ("d435").
   BoardPoseDetector(rclcpp::Node::SharedPtr node, const std::string &ns,
                     const std::string &camera_frame, const std::string &cam_label,
-                    double period_s = 0.2)
+                    double period_s = 0.2, int nthreads = 1)
       : node_(std::move(node)), camera_frame_(camera_frame), cam_label_(cam_label),
         period_s_(period_s), board_corners_(buildBoardCorners()) {
     family_ = tag25h9_create();
     detector_ = apriltag_detector_create();
+    detector_->nthreads = std::max(1, nthreads);
     apriltag_detector_add_family(detector_, family_);
     pose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
         ns + "/marker_board_pose", rclcpp::QoS(1).best_effort());
