@@ -100,7 +100,8 @@ def generate_launch_description():
             rs_exec = os.path.join(get_package_prefix('ffw_stream'), 'lib', 'ffw_stream', 'realsense_udp_streamer')
             d405_flag = '--enable-d405s' if enable_d405s else '--disable-d405s'
             d435_flag = '--d435-rgb' if rgb_source == 'd435' else '--no-d435-rgb'
-            cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag]
+            cmd = [rs_exec, dest_ip, base_port, d405_flag, d435_flag,
+                   '--d435-fps', fps]
             if dual_rgb_no_depth:
                 cmd += ['--dual-rgb-no-depth']
             if disable_left_d405:

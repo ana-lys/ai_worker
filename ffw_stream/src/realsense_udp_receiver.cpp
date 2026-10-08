@@ -29,7 +29,10 @@ public:
     this->declare_parameter<bool>("disable_left_d405", false);
     this->declare_parameter<int>("depthai_video_port", 9100);
     this->declare_parameter<int>("oakd_720p_video_port", 9110);
-    this->declare_parameter<std::string>("rgb_source", "oakd_lite");
+    // "auto": the head camera is told by its UDP port -- OAK-D 720p on
+    // oakd_720p_video_port (9110), D435 on base_port+100 (9100). Both are
+    // always listened on; the dashboard shows whichever is live.
+    this->declare_parameter<std::string>("rgb_source", "auto");
     this->declare_parameter<std::string>("oakd_codec", "h264");
     this->declare_parameter<std::string>("rs_codec", "h264");
 
@@ -481,9 +484,18 @@ private:
           "appsink drop=true sync=false max-buffers=1";
         RCLCPP_INFO(this->get_logger(), "[OAK-D] Using MJPEG receiver pipeline (fallback)");
       }
+    } else if (rgb_source_ != "zedm" && rs_codec_ == "mjpeg") {
+      // D435 from realsense_udp_streamer --mjpeg (same codec as the D405s)
+      feed_name = "D435";
+      pipeline = "udpsrc port=" + std::to_string(port) +
+        " buffer-size=2147483647 "
+        "caps=\"application/x-rtp, media=video, encoding-name=JPEG, payload=26\" ! "
+        "rtpjpegdepay ! jpegdec ! videoconvert ! "
+        "queue max-size-buffers=1 leaky=downstream ! "
+        "appsink drop=true sync=false async=false max-buffers=1";
     } else {
       // ZED / D435 stream H264-over-RTP
-      feed_name = "ZED";
+      feed_name = (rgb_source_ == "zedm") ? "ZED" : "D435";
       pipeline = "udpsrc port=" + std::to_string(port) +
         " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
         "rtpjitterbuffer latency=50 ! rtph264depay ! decodebin ! videoconvert ! "
@@ -512,6 +524,7 @@ private:
         {
           std::lock_guard<std::mutex> lock(img_mutex_);
           latest_images_[feed_name] = frame.clone();
+          last_frame_time_[feed_name] = std::chrono::steady_clock::now();
         }
 
         frames_received_[feed_name]++;
@@ -574,6 +587,7 @@ private:
         {
           std::lock_guard<std::mutex> lock(img_mutex_);
           latest_images_[feed_name] = frame.clone();
+          last_frame_time_[feed_name] = std::chrono::steady_clock::now();
         }
 
         frames_received_[feed_name]++;
@@ -687,12 +701,22 @@ private:
         camera_grids.push_back(cam_grid);
       }
 
+      // Head feed: the first LIVE one (frame < 1 s old) in preference order,
+      // else the most recently seen -- so swapping the robot's head camera
+      // (OAK-D 9110 <-> D435 9100) switches the dashboard without a restart.
       cv::Mat zed_frame;
+      std::string head_name;
       {
         std::lock_guard<std::mutex> lock(img_mutex_);
-        if (latest_images_.count("OAK-D-720p")) zed_frame = latest_images_["OAK-D-720p"].clone();
-        else if (latest_images_.count("OAK-D")) zed_frame = latest_images_["OAK-D"].clone();
-        else if (latest_images_.count("ZED")) zed_frame = latest_images_["ZED"].clone();
+        const auto now = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point newest{};
+        for (const char *name : {"OAK-D-720p", "D435", "OAK-D", "ZED"}) {
+          auto it = last_frame_time_.find(name);
+          if (it == last_frame_time_.end()) continue;
+          if (now - it->second < std::chrono::seconds(1)) { head_name = name; break; }
+          if (it->second > newest) { newest = it->second; head_name = name; }
+        }
+        if (!head_name.empty()) zed_frame = latest_images_[head_name].clone();
       }
 
       cv::Mat dashboard;
@@ -707,14 +731,14 @@ private:
           int new_width = std::round(final_grid.cols * scale);
           cv::Mat final_grid_scaled;
           cv::resize(final_grid, final_grid_scaled, cv::Size(new_width, zed_frame.rows));
-          cv::putText(zed_frame, "Primary RGB Feed", cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
+          cv::putText(zed_frame, "Head: " + head_name, cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
           cv::hconcat(zed_frame, final_grid_scaled, dashboard);
         } else {
           dashboard = final_grid;
         }
       } else if (!zed_frame.empty()) {
         dashboard = zed_frame;
-        cv::putText(dashboard, "Primary RGB Feed", cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
+        cv::putText(dashboard, "Head: " + head_name, cv::Point(10, 40), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 255, 0), 3);
       }
 
       if (dashboard.empty()) {
@@ -758,6 +782,7 @@ private:
 
   std::mutex img_mutex_;
   std::map<std::string, cv::Mat> latest_images_;
+  std::map<std::string, std::chrono::steady_clock::time_point> last_frame_time_;
   std::map<std::string, int> frames_received_;
   std::map<std::string, std::chrono::steady_clock::time_point> fps_timers_;
 

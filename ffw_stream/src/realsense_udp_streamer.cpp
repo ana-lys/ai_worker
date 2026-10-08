@@ -18,7 +18,11 @@
 //   realsense_udp_streamer <dest_ip> <base_port> [width=480] [height=270]
 //   [fps=30] [max_depth_m=1.0] [--enable-d405s|--disable-d405s]
 //   [--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] [--disable-left-d405]
-//   [--color-exposure <microseconds>]
+//   [--color-exposure <microseconds>] [--d435-fps <n>]
+//
+// The head D435/D435i is identified by USB product ID (or model name), not
+// serial, so any unit works; it always streams 1280x720 RGB at --d435-fps
+// (default: the shared fps; the D435 color sensor accepts 6/15/30).
 //
 // Port mapping (per camera index i, 0-based):
 //   depth -> base_port + i*2   (unused when --dual-rgb-no-depth)
@@ -533,7 +537,7 @@ int main(int argc, char **argv) {
                  "[--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] "
                  "[--disable-left-d405] "
                  "[--color-exposure <us>] "
-                 "[--color-wb <K>] [--h264|--mjpeg] (default H264)"
+                 "[--color-wb <K>] [--d435-fps <n>] [--h264|--mjpeg] (default H264)"
               << std::endl;
     return 1;
   }
@@ -543,6 +547,7 @@ int main(int argc, char **argv) {
   bool d435_rgb_enabled = true;
   bool dual_rgb_no_depth = false;  // profile: both D405s stream RGB, depth off
   bool disable_left_d405 = false;  // skip the left D405 (cam_idx 0) entirely
+  int d435_fps = 0;            // 0 = follow the shared fps
   bool mjpeg = false;          // default H264 (x264enc zerolatency); --mjpeg → jpegenc intra-only zero-latency
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   int color_wb = -1;           // -1 = leave SDK default white balance
@@ -567,6 +572,10 @@ int main(int argc, char **argv) {
     } else if (arg == "--color-wb") {
       if (i + 1 < argc) {
         color_wb = std::atoi(argv[++i]);
+      }
+    } else if (arg == "--d435-fps") {
+      if (i + 1 < argc) {
+        d435_fps = std::atoi(argv[++i]);
       }
     } else if (arg == "--mjpeg") {
       mjpeg = true;
@@ -598,6 +607,7 @@ int main(int argc, char **argv) {
   if (width == 0) width = 480;
   if (height == 0) height = 270;
   if (fps == 0) fps = 15;
+  if (d435_fps <= 0) d435_fps = fps;
   if (max_depth_m <= 0) max_depth_m = 1.0f;
 
   std::signal(SIGINT, on_sigint);
@@ -620,17 +630,32 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // The head D435/D435i (USB PID 0B07 / 0B3A) is told apart from the D405
+  // hand cameras (0B5B) by product ID, falling back to the model name.
+  auto is_d435 = [](const rs2::device &dev) {
+    std::string pid = dev.supports(RS2_CAMERA_INFO_PRODUCT_ID)
+                          ? dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID) : "";
+    std::transform(pid.begin(), pid.end(), pid.begin(), ::toupper);
+    if (pid == "0B07" || pid == "0B3A") return true;
+    std::string name = dev.supports(RS2_CAMERA_INFO_NAME)
+                           ? dev.get_info(RS2_CAMERA_INFO_NAME) : "";
+    return name.find("D435") != std::string::npos;
+  };
+
   std::vector<std::string> serials;
+  std::vector<bool> d435_flags;
   for (size_t i = 0; i < devices.size(); ++i) {
     std::string serial =
         devices[i].supports(RS2_CAMERA_INFO_SERIAL_NUMBER)
             ? devices[i].get_info(RS2_CAMERA_INFO_SERIAL_NUMBER)
             : "";
     serials.push_back(serial);
+    d435_flags.push_back(is_d435(devices[i]));
   }
   
   // Reverse the default SDK enumeration order so Left becomes 0 and Right becomes 1
   std::reverse(serials.begin(), serials.end());
+  std::reverse(d435_flags.begin(), d435_flags.end());
 
   log("Destination: " + dest_ip + "  base_port=" + std::to_string(base_port) +
       "  " + std::to_string(width) + "x" + std::to_string(height) + "@" +
@@ -638,6 +663,7 @@ int main(int argc, char **argv) {
       "  codec=" + std::string(mjpeg ? "mjpeg" : "h264") +
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
+      "  d435_fps=" + std::to_string(d435_fps) +
       "  dual_rgb_no_depth=" + std::string(dual_rgb_no_depth ? "on" : "off") +
       "  disable_left_d405=" + std::string(disable_left_d405 ? "on" : "off") +
       "  color_exposure_us=" + std::to_string(color_exposure_us) +
@@ -646,12 +672,14 @@ int main(int argc, char **argv) {
   std::vector<std::thread> threads;
   int cam_idx = 0;
   for (size_t i = 0; i < serials.size(); ++i) {
-    if (serials[i] == "941322072865") {
+    if (d435_flags[i]) {
       if (d435_rgb_enabled) {
         // The D435i replacing the ZED: Stream 720p RGB to the ZED's port
         int rgb_port = base_port + 100;
         threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
-                             1280, 720, 30, mjpeg, node, cam_info_pub);
+                             1280, 720, d435_fps, mjpeg, node, cam_info_pub);
+      } else {
+        log("CAM RGB " + serials[i] + " (D435): --no-d435-rgb -- not opened");
       }
     } else if (enable_d405s) {
       if (disable_left_d405 && cam_idx == 0) {

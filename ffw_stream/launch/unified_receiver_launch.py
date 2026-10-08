@@ -5,8 +5,10 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('rgb_source', default_value='oakd_lite',
-                              description='RGB source: zedm, d435, oakd_lite, oakd_lite_720p, oakd_lite_720p_hw, or oakd_lite_720p_mjpeg'),
+        DeclareLaunchArgument('rgb_source', default_value='auto',
+                              description='Head camera: auto (default; detected by UDP port -- OAK-D 720p on 9110, '
+                                          'D435 on 9100), or force zedm, d435, oakd_lite (1080p fallback on 9100), '
+                                          'oakd_lite_720p, oakd_lite_720p_hw, oakd_lite_720p_mjpeg'),
         DeclareLaunchArgument('headless', default_value='false'),
         DeclareLaunchArgument('oakd_codec', default_value='h264',
                               description='OAK-D codec: h264 (default, H264-Baseline zero-lag) or mjpeg (zero-latency)'),
