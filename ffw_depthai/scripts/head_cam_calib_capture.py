@@ -581,7 +581,8 @@ def capture(a):
         log(f'      lift heights {lifts}; {a.grid}x{a.grid} board-centre targets; '
             f'{total} samples max (~{total * 1.5 / 60:.0f} min)')
     else:
-        log(f'plan: walk {a.steps} steps; base box +-{a.base_xy:.2f} m +-{a.base_yaw_deg:.0f} deg '
+        log(f'plan: walk {a.steps} steps; base box x {a.base_x_range} y {a.base_y_range} m '
+            f'+-{a.base_yaw_deg:.0f} deg '
             f'{"" if use_base else "(base off) "}step <= {a.walk_xy:.2f} m / {a.walk_yaw_deg:.0f} deg; '
             f'lift {a.walk_lift_range} step <= {a.walk_lift:.2f}; ~{a.steps * 1.3 / 60:.0f} min')
     log(f'      start: head tilt {s0["js"].get("head_joint1"):.3f} pan '
@@ -661,7 +662,9 @@ def capture(a):
         if d is None:
             raise RuntimeError('board not visible at walk start')
         pose = d['pose']
-        bx, byaw = (a.base_xy, math.radians(a.base_yaw_deg)) if use_base else (0.0, 0.0)
+        byaw = math.radians(a.base_yaw_deg) if use_base else 0.0
+        xr = [float(v) for v in a.base_x_range.split(',')] if use_base else [0.0, 0.0]
+        yr = [float(v) for v in a.base_y_range.split(',')] if use_base else [0.0, 0.0]
         # Odometry yaw drifts (~14 deg over 300 steps on 2026-10-09), so the
         # box and the final return use the base pose MEASURED from the board:
         # vis = start base -> current base, from T_base0_board @ inv(T_base_board).
@@ -680,8 +683,8 @@ def capture(a):
                 # step chosen so the MEASURED pose stays in the box, applied as
                 # the same delta on the odom-commanded pose
                 want = np.array([
-                    np.clip(vis[0] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx),
-                    np.clip(vis[1] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx),
+                    np.clip(vis[0] + rng.uniform(-a.walk_xy, a.walk_xy), xr[0], xr[1]),
+                    np.clip(vis[1] + rng.uniform(-a.walk_xy, a.walk_xy), yr[0], yr[1]),
                     np.clip(vis[2] + math.radians(rng.uniform(-a.walk_yaw_deg, a.walk_yaw_deg)),
                             -byaw, byaw)])
                 nxt = cur + (want - vis)
@@ -1061,6 +1064,10 @@ def main():
     ap.add_argument('--grid-mode', action='store_true',
                     help='old structured mode: fixed placements x lifts x head grid')
     ap.add_argument('--steps', type=int, default=300, help='walk mode: number of steps')
+    ap.add_argument('--base-x-range', default='-0.30,0.10',
+                    help='walk: allowed base x relative to start [m] (board-measured), "lo,hi"')
+    ap.add_argument('--base-y-range', default='-0.30,0.10',
+                    help='walk: allowed base y relative to start [m] (board-measured), "lo,hi"')
     ap.add_argument('--seed', type=int, default=None)
     ap.add_argument('--walk-xy', type=float, default=0.05, help='max base x/y step [m]')
     ap.add_argument('--walk-yaw-deg', type=float, default=3.0, help='max base yaw step')
