@@ -236,7 +236,18 @@ def capture(a):
             tr, r = t.transform.translation, t.transform.rotation
             return dict(t=[tr.x, tr.y, tr.z], q=[r.w, r.x, r.y, r.z]), None
 
-    rclpy.init()
+    import signal
+    from rclpy.signals import SignalHandlerOptions
+    # rclpy's own handlers would shut ROS down under the main loop (SIGTERM
+    # left it running blind); instead both signals raise KeyboardInterrupt
+    # here, so the finally block stops the base and returns to start with ROS
+    # still alive.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+
+    def _raise(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, _raise)
+    signal.signal(signal.SIGTERM, _raise)
     node = Cap()
     ex = MultiThreadedExecutor(num_threads=3)
     ex.add_node(node)
@@ -361,7 +372,10 @@ def capture(a):
         if lo_u > hi_u or lo_v > hi_v:
             return []          # board too big to fit with margins at this distance
         n = a.grid
-        fr = [0.5] if n == 1 else [i / (n - 1) for i in range(n)]
+        # span < 1 pulls the grid toward the middle of the allowed range:
+        # edge targets need head angles past the joint limits
+        lo_s = 0.5 - a.grid_span / 2
+        fr = [0.5] if n == 1 else [lo_s + a.grid_span * i / (n - 1) for i in range(n)]
         pts = []
         for j, fv in enumerate(fr):
             row = [(lo_u + fu * (hi_u - lo_u), lo_v + fv * (hi_v - lo_v)) for fu in fr]
@@ -736,11 +750,13 @@ def main():
     ap.add_argument('--base-wmax', type=float, default=0.10)
     ap.add_argument('--base-tol-m', type=float, default=0.01)
     ap.add_argument('--base-tol-deg', type=float, default=0.5)
-    ap.add_argument('--lift', default='0.0,-0.10,-0.20',
+    ap.add_argument('--lift', default='-0.10,-0.18,-0.26',
                     help='lift heights, comma list ("" = stay); 0 = top, min -0.5')
     ap.add_argument('--lift-vmax', type=float, default=0.05)
     ap.add_argument('--head-vmax', type=float, default=0.3)
     ap.add_argument('--grid', type=int, default=3, help='NxN board-centre image targets')
+    ap.add_argument('--grid-span', type=float, default=0.5,
+                    help='fraction of the board-fits-in-margin range the grid spans (1 = edge to edge)')
     ap.add_argument('--edge-margin', type=float, default=0.08,
                     help='whole board kept this fraction of W/H away from the edges')
     ap.add_argument('--servo-iters', type=int, default=4)
@@ -750,7 +766,8 @@ def main():
     ap.add_argument('--still-s', type=float, default=0.5)
     ap.add_argument('--still-joint-vel', type=float, default=0.005)
     ap.add_argument('--passes', type=int, default=5)
-    ap.add_argument('--min-tags', type=int, default=6)
+    ap.add_argument('--min-tags', type=int, default=4,
+                    help='tags per pass (the 15 mm tags are ~14 px at 1 m and rarely detect)')
     ap.add_argument('--max-reproj', type=float, default=1.5)
     ap.add_argument('--max-spread-mm', type=float, default=1.5)
     ap.add_argument('--max-spread-deg', type=float, default=0.2)
