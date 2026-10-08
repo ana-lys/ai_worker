@@ -195,7 +195,7 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
                        bool apriltag, int bitrate_kbps) {
   std::ostringstream hdr;
   hdr << "\n=== CAM (RGB ZED-Replacement) " << serial << " : rgb->udp:" << port
-      << "  gst=" << (mjpeg ? "mjpeg" : "h264 @ " + std::to_string(bitrate_kbps) + " kbps")
+      << "  gst=" << (mjpeg ? "mjpeg q90" : "h264 @ " + std::to_string(bitrate_kbps) + " kbps")
       << " ===";
   log(hdr.str());
 
@@ -593,7 +593,8 @@ int main(int argc, char **argv) {
                  "[--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] "
                  "[--disable-left-d405] "
                  "[--color-exposure <us>] "
-                 "[--color-wb <K>] [--d435-fps <n>] [--d435-bitrate <kbps>] [--no-d435-apriltag] "
+                 "[--color-wb <K>] [--d435-fps <n>] [--d435-codec mjpeg|h264] [--d435-bitrate <kbps>] "
+                 "[--no-d435-apriltag] "
                  "[--h264|--mjpeg] (default H264)"
               << std::endl;
     return 1;
@@ -606,7 +607,12 @@ int main(int argc, char **argv) {
   bool dual_rgb_no_depth = false;  // profile: both D405s stream RGB, depth off
   bool disable_left_d405 = false;  // skip the left D405 (cam_idx 0) entirely
   int d435_fps = 0;            // 0 = follow the shared fps
-  int d435_bitrate_kbps = 10000;  // 720p@15: ~83 KB/frame, same as the OAK-D's 20 Mbps @ 30
+  int d435_bitrate_kbps = 10000;  // h264 only: 720p@15 ~83 KB/frame, as the OAK-D's 20 Mbps @ 30
+  // D435 head stream codec, independent of the D405s' --h264/--mjpeg: MJPEG
+  // (jpegenc q90, same as the OAK-D MJPEG feed) by default -- every frame is
+  // intra, so a lost packet costs that one frame instead of smearing blocks
+  // until the next H264 keyframe.
+  bool d435_mjpeg = true;
   bool mjpeg = false;          // default H264 (x264enc zerolatency); --mjpeg → jpegenc intra-only zero-latency
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   int color_wb = -1;           // -1 = leave SDK default white balance
@@ -634,6 +640,10 @@ int main(int argc, char **argv) {
       }
     } else if (arg == "--no-d435-apriltag") {
       d435_apriltag = false;
+    } else if (arg == "--d435-codec") {
+      if (i + 1 < argc) {
+        d435_mjpeg = std::string(argv[++i]) != "h264";
+      }
     } else if (arg == "--d435-bitrate") {
       if (i + 1 < argc) {
         d435_bitrate_kbps = std::atoi(argv[++i]);
@@ -731,6 +741,7 @@ int main(int argc, char **argv) {
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
       "  d435_fps=" + std::to_string(d435_fps) +
+      "  d435_codec=" + std::string(d435_mjpeg ? "mjpeg" : "h264") +
       "  dual_rgb_no_depth=" + std::string(dual_rgb_no_depth ? "on" : "off") +
       "  disable_left_d405=" + std::string(disable_left_d405 ? "on" : "off") +
       "  color_exposure_us=" + std::to_string(color_exposure_us) +
@@ -745,7 +756,7 @@ int main(int argc, char **argv) {
         int rgb_port = base_port + 100;
         frames_captured["RGB"];
         threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
-                             1280, 720, d435_fps, mjpeg, node, cam_info_pub, d435_apriltag,
+                             1280, 720, d435_fps, d435_mjpeg, node, cam_info_pub, d435_apriltag,
                              d435_bitrate_kbps);
       } else {
         log("CAM RGB " + serials[i] + " (D435): --no-d435-rgb -- not opened");

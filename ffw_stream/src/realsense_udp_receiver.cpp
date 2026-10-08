@@ -35,6 +35,9 @@ public:
     this->declare_parameter<std::string>("rgb_source", "auto");
     this->declare_parameter<std::string>("oakd_codec", "h264");
     this->declare_parameter<std::string>("rs_codec", "h264");
+    // D435 head stream on base_port+100: its own codec (streamer --d435-codec,
+    // default mjpeg), independent of the D405s' rs_codec.
+    this->declare_parameter<std::string>("d435_codec", "mjpeg");
 
     int base_port = this->get_parameter("base_port").as_int();
     num_cameras_ = this->get_parameter("num_cameras").as_int();
@@ -46,6 +49,7 @@ public:
     rgb_source_ = this->get_parameter("rgb_source").as_string();
     oakd_codec_ = this->get_parameter("oakd_codec").as_string();
     rs_codec_ = this->get_parameter("rs_codec").as_string();
+    d435_codec_ = this->get_parameter("d435_codec").as_string();
 
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
@@ -491,8 +495,8 @@ private:
           "appsink drop=true sync=false max-buffers=1";
         RCLCPP_INFO(this->get_logger(), "[OAK-D] Using MJPEG receiver pipeline (fallback)");
       }
-    } else if (rgb_source_ != "zedm" && rs_codec_ == "mjpeg") {
-      // D435 from realsense_udp_streamer --mjpeg (same codec as the D405s)
+    } else if (rgb_source_ != "zedm" && d435_codec_ == "mjpeg") {
+      // D435 from realsense_udp_streamer --d435-codec mjpeg (default)
       feed_name = "D435";
       pipeline = "udpsrc port=" + std::to_string(port) +
         " buffer-size=2147483647 "
@@ -784,6 +788,7 @@ private:
   std::string rgb_source_;
   std::string oakd_codec_;
   std::string rs_codec_;
+  std::string d435_codec_;
 
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_depth_;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_ir_;

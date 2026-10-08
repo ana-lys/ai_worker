@@ -12,6 +12,9 @@ def generate_launch_description():
         DeclareLaunchArgument('headless', default_value='false'),
         DeclareLaunchArgument('oakd_codec', default_value='h264',
                               description='OAK-D codec: h264 (default, H264-Baseline zero-lag) or mjpeg (zero-latency)'),
+        DeclareLaunchArgument('d435_codec', default_value='mjpeg',
+                              description='D435 head stream (9100) codec: mjpeg (default) or h264 -- '
+                                          'must match the streamer d435_codec'),
         DeclareLaunchArgument('rs_codec', default_value='h264',
                               description='RealSense D405/D435 codec: h264 (default) or mjpeg (zero-latency)'),
         DeclareLaunchArgument('oakd_720p_video_port', default_value='9110',
@@ -36,6 +39,7 @@ def generate_launch_description():
                 'rgb_source': LaunchConfiguration('rgb_source'),
                 'oakd_codec': LaunchConfiguration('oakd_codec'),
                 'rs_codec': LaunchConfiguration('rs_codec'),
+                'd435_codec': LaunchConfiguration('d435_codec'),
                 'oakd_720p_video_port': LaunchConfiguration('oakd_720p_video_port'),
                 'dual_rgb_no_depth': LaunchConfiguration('dual_rgb_no_depth'),
                 'disable_left_d405': LaunchConfiguration('disable_left_d405'),
