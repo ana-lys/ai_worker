@@ -528,6 +528,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(PathJoinSubstitution([FindPackageShare('ffw_odom'),
                                                             'launch',
                                                             'marker_ekf.launch.py'])),
+        # board pose from whichever head camera is on USB (the D435 tap
+        # publishes under /d435; the OAK-D one under /oakd)
+        launch_arguments={'input_topic': '/d435/marker_board_pose' if head_cam_label == 'D435'
+                          else '/oakd/marker_board_pose'}.items(),
         condition=IfCondition(AndSubstitution(launch_cameras, launch_marker_ekf))
     )
 
