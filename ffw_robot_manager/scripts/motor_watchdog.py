@@ -35,8 +35,11 @@ import re
 import time
 from datetime import datetime
 
+import struct
+
 import rclpy
 from rclpy.node import Node
+from rclpy.serialization import deserialize_message
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from rcl_interfaces.msg import Log
 from sensor_msgs.msg import BatteryState, JointState
@@ -90,8 +93,11 @@ class Watchdog(Node):
             self.csvw.writerow(["wall_time", "t_s", "kind", "source", "detail"])
 
         self.create_subscription(JointState, "/joint_states", self.on_js, 50)
+        # 3 buses x 100 Hz: take them raw and decode only when the payload
+        # after the header (comm_state / ids / torque / hw state) changes.
         for t in DXL_TOPICS:
-            self.create_subscription(DynamixelState, t, lambda m, t=t: self.on_dxl(t, m), 10)
+            self.create_subscription(DynamixelState, t, lambda b, t=t: self.on_dxl_raw(t, b),
+                                     10, raw=True)
         rosout_qos = QoSProfile(depth=1000, reliability=ReliabilityPolicy.RELIABLE,
                                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                 history=HistoryPolicy.KEEP_LAST)
@@ -195,12 +201,17 @@ class Watchdog(Node):
             self.event("JS_STALL", "/joint_states", f"no message for {gap:.2f} s")
 
     # ------------------------------------------------------------ dxl_state
-    def on_dxl(self, topic, m):
-        # ~100 Hz per bus and almost always unchanged: bail out cheaply.
-        sig = (m.comm_state, tuple(m.dxl_hw_state))
-        if self.dxl_sig.get(topic) == sig:
+    def on_dxl_raw(self, topic, data):
+        # CDR: 4 B encapsulation, header.stamp (8 B), header.frame_id (u32 len + bytes)
+        off = 12
+        (n,) = struct.unpack_from("<I", data, off)
+        tail = bytes(data[off + 4 + n:])
+        if self.dxl_sig.get(topic) == tail:
             return
-        self.dxl_sig[topic] = sig
+        self.dxl_sig[topic] = tail
+        self.on_dxl(topic, deserialize_message(data, DynamixelState))
+
+    def on_dxl(self, topic, m):
         src = topic.split("/")[1]
         if self.comm.get(topic) != m.comm_state:
             if topic in self.comm or m.comm_state != 0:
