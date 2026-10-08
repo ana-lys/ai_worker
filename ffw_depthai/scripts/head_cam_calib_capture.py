@@ -121,6 +121,11 @@ def T_from(R, t):
     return T
 
 
+def planar_T(x, y, yaw):
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    return np.array([[c, -s_, 0, x], [s_, c, 0, y], [0, 0, 1, 0], [0, 0, 0, 1.0]])
+
+
 def board_corners():
     """{id: 4x3 corners in board frame}, apriltag p[0..3] order."""
     out = {}
@@ -272,7 +277,7 @@ def capture(a):
             node.cmd_pub.publish(Twist())
             time.sleep(0.02)
 
-    def send_traj(ac, joints, positions, duration):
+    def send_traj(ac, joints, positions, duration, wait=True):
         if not ac.wait_for_server(timeout_sec=3.0):
             raise RuntimeError(f'action server for {joints} not available')
         g = FollowJointTrajectory.Goal()
@@ -300,6 +305,12 @@ def capture(a):
         if not gh.accepted:
             raise RuntimeError(f'goal rejected for {joints}')
         res = gh.get_result_async()
+        if not wait:
+            return res, joints, duration
+        wait_traj((res, joints, duration))
+
+    def wait_traj(h):
+        res, joints, duration = h
         t0 = time.monotonic()
         while not res.done():
             if time.monotonic() - t0 > duration + 10:
@@ -487,7 +498,9 @@ def capture(a):
         return None, None, reason
 
     # ── base motion (closed loop on /odom) ──────────────────────────────────
-    def drive_to(start, dx, dy, dyaw):
+    def drive_to(start, dx, dy, dyaw, gain=1.2, tol_m=None, tol_deg=None):
+        tol_m = a.base_tol_m if tol_m is None else tol_m
+        tol_deg = a.base_tol_deg if tol_deg is None else tol_deg
         sx, sy, syaw = start['x'], start['y'], start['yaw']
         gx = sx + dx * math.cos(syaw) - dy * math.sin(syaw)
         gy = sy + dx * math.sin(syaw) + dy * math.cos(syaw)
@@ -507,19 +520,19 @@ def capture(a):
                     raise RuntimeError('base overshoot guard tripped')
                 ex_w, ey_w = gx - o['x'], gy - o['y']
                 eyaw = math.atan2(math.sin(gyaw - o['yaw']), math.cos(gyaw - o['yaw']))
-                if math.hypot(ex_w, ey_w) < a.base_tol_m and abs(eyaw) < math.radians(a.base_tol_deg):
+                if math.hypot(ex_w, ey_w) < tol_m and abs(eyaw) < math.radians(tol_deg):
                     break
                 if time.monotonic() - t0 > 40:
                     raise RuntimeError('base move timed out')
                 c, s_ = math.cos(o['yaw']), math.sin(o['yaw'])
                 ex_b, ey_b = c * ex_w + s_ * ey_w, -s_ * ex_w + c * ey_w
-                v = np.array([ex_b, ey_b]) * 1.2
+                v = np.array([ex_b, ey_b]) * gain
                 n = np.linalg.norm(v)
                 if n > a.base_vmax:
                     v *= a.base_vmax / n
                 tw = Twist()
                 tw.linear.x, tw.linear.y = float(v[0]), float(v[1])
-                tw.angular.z = float(max(-a.base_wmax, min(a.base_wmax, 1.5 * eyaw)))
+                tw.angular.z = float(max(-a.base_wmax, min(a.base_wmax, 1.25 * gain * eyaw)))
                 node.cmd_pub.publish(tw)
                 time.sleep(0.05)
         finally:
@@ -563,9 +576,14 @@ def capture(a):
     lifts = lifts or [s0['js'].get('lift_joint', 0.0)]
     n_targets = a.grid * a.grid
     total = len(placements) * len(lifts) * n_targets
-    log(f'plan: {len(placements)} base placements {placements if use_base else "(base off)"}')
-    log(f'      lift heights {lifts}; {a.grid}x{a.grid} board-centre targets; '
-        f'{total} samples max (~{total * 5 / 60:.0f} min)')
+    if a.grid_mode:
+        log(f'plan: {len(placements)} base placements {placements if use_base else "(base off)"}')
+        log(f'      lift heights {lifts}; {a.grid}x{a.grid} board-centre targets; '
+            f'{total} samples max (~{total * 1.5 / 60:.0f} min)')
+    else:
+        log(f'plan: walk {a.steps} steps; base box +-{a.base_xy:.2f} m +-{a.base_yaw_deg:.0f} deg '
+            f'{"" if use_base else "(base off) "}step <= {a.walk_xy:.2f} m / {a.walk_yaw_deg:.0f} deg; '
+            f'lift {a.walk_lift_range} step <= {a.walk_lift:.2f}; ~{a.steps * 1.3 / 60:.0f} min')
     log(f'      start: head tilt {s0["js"].get("head_joint1"):.3f} pan '
         f'{s0["js"].get("head_joint2"):.3f}, lift {s0["js"].get("lift_joint"):.3f}, '
         f'board {d0["num_tags"]} tags at {np.linalg.norm(d0["pose"]["t"]):.2f} m')
@@ -602,7 +620,121 @@ def capture(a):
     start_lift = s0['js'].get('lift_joint')
     n_ok = 0
     t_last = time.monotonic()
+
+    def cam_state(det_pose):
+        """(board centre in base_link, camera position in base_link) for a
+        camera-frame board pose, via the current TF base_link->head_camera_frame."""
+        tf, _ = node.lookup('base_link', 'head_camera_frame')
+        if tf is None:
+            return None, None
+        T = T_from(quat_to_R(*tf['q']), tf['t'])
+        p_cam = quat_to_R(*det_pose['q']) @ BOARD_CENTER + np.array(det_pose['t'])
+        return (T @ np.append(p_cam, 1.0))[:3], T[:3, 3]
+
+    planar = planar_T
+
+    def bearing(v):
+        return math.atan2(v[1], v[0]), math.atan2(v[2], math.hypot(v[0], v[1]))
+
+    def walk():
+        """Medium random steps of base + lift + head together (~0.5 s), one
+        still capture after each. The head re-aim compensates the predicted
+        board-bearing change of the base/lift step, plus a random image target."""
+        nonlocal n_ok, t_last
+        rng = np.random.default_rng(a.seed)
+        lo, hi = (float(x) for x in a.walk_lift_range.split(','))
+        K = np.array(node.cam_info['K']).reshape(3, 3)
+        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+        cur = np.zeros(3)  # base dx, dy, dyaw relative to start
+        lift = node.snap()['js']['lift_joint']
+        lift = min(hi, max(lo, lift))
+        d = latest_pose(wait_still(use_base))
+        if d is None:
+            raise RuntimeError('board not visible at walk start')
+        pose = d['pose']
+        bx, byaw = (a.base_xy, math.radians(a.base_yaw_deg)) if use_base else (0.0, 0.0)
+        for step in range(a.steps):
+            js = node.snap()['js']
+            head0 = np.array([js['head_joint1'], js['head_joint2']])
+            p_b, cam_b = cam_state(pose)
+            if p_b is None:
+                raise RuntimeError('no TF base_link->head_camera_frame')
+            # propose a medium step of everything
+            nxt = cur.copy()
+            if use_base:
+                nxt[0] = np.clip(cur[0] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx)
+                nxt[1] = np.clip(cur[1] + rng.uniform(-a.walk_xy, a.walk_xy), -bx, bx)
+                nxt[2] = np.clip(cur[2] + math.radians(rng.uniform(-a.walk_yaw_deg, a.walk_yaw_deg)),
+                                 -byaw, byaw)
+            n_lift = float(np.clip(lift + rng.uniform(-a.walk_lift, a.walk_lift), lo, hi))
+            # predicted bearing change of the board centre seen from the camera
+            T_new_old = np.linalg.inv(planar(*nxt)) @ planar(*cur)
+            p_new = (T_new_old @ np.append(p_b, 1.0))[:3]
+            cam_new = cam_b + np.array([0, 0, n_lift - lift])
+            az0, el0 = bearing(p_b - cam_b)
+            az1, el1 = bearing(p_new - cam_new)
+            c, _, _ = board_px(pose)
+            goal = None
+            for _try in range(6):
+                tgts = targets_for(pose)
+                tu, tv = tgts[rng.integers(len(tgts))] if tgts else (c[0], c[1])
+                if _try == 5:
+                    tu, tv = c[0], c[1]       # last resort: just keep the board where it is
+                d_pan = (az1 - az0) + (math.atan((tu - cx) / fx) - math.atan((c[0] - cx) / fx))
+                d_tilt = -(el1 - el0) - (math.atan((tv - cy) / fy) - math.atan((c[1] - cy) / fy))
+                cand = head0 + np.array([d_tilt, d_pan])
+                m = a.joint_margin
+                if (HEAD_TILT_LIMITS[0] + m <= cand[0] <= HEAD_TILT_LIMITS[1] - m
+                        and HEAD_PAN_LIMITS[0] + m <= cand[1] <= HEAD_PAN_LIMITS[1] - m):
+                    goal = cand
+                    break
+            if goal is None:
+                # head can't follow this base/lift step: undo it, keep head
+                nxt, n_lift, goal = cur.copy(), lift, head0
+            # move everything at once
+            dh = float(np.max(np.abs(goal - head0)))
+            hh = send_traj(node.head_ac, ['head_joint1', 'head_joint2'], list(goal),
+                           max(a.head_min_s, dh / a.head_vmax), wait=False)
+            hl = send_traj(node.lift_ac, ['lift_joint'], [n_lift],
+                           max(a.head_min_s, abs(n_lift - lift) / a.lift_vmax), wait=False)
+            if use_base and np.any(nxt != cur):
+                drive_to(start_odom, nxt[0], nxt[1], nxt[2], gain=a.walk_gain,
+                         tol_m=a.walk_tol_m, tol_deg=a.walk_tol_deg)
+            wait_traj(hh)
+            wait_traj(hl)
+            cur, lift = nxt, n_lift
+            good, stab, why = capture_sample()
+            if good is None:
+                # likely drifted out of the margin: re-centre from a fresh pose, retry once
+                d = latest_pose(wait_still(use_base))
+                if d is not None:
+                    js = node.snap()['js']
+                    if aim(d['pose'], (js['head_joint1'], js['head_joint2']), (cx, cy)) is None:
+                        good, stab, why = capture_sample()
+                if good is None:
+                    log(f'  walk {step}: skip ({why})')
+                    write(dict(type='skip', mode='walk', step=step, reason=why))
+                    if d is not None:
+                        pose = d['pose']
+                    continue
+            snap = node.snap()
+            calib, terr = node.lookup('base_link', 'camera_calibration_link')
+            write(dict(type='sample', mode='walk', time=time.time(), group='walk', step=step,
+                       base_rel=cur.tolist(), lift_target=lift, target_px=[0, 0],
+                       odom=snap['odom'], joints=snap['js'], head_camera_tf=snap['cam_tf'],
+                       base_to_calib=calib, tf_err=terr, stability=stab, passes=good))
+            n_ok += 1
+            pose = good[-1]['pose']
+            c, _, _ = board_px(pose)
+            log(f'  walk {step}: sample {n_ok}  base ({cur[0]:+.3f},{cur[1]:+.3f},'
+                f'{math.degrees(cur[2]):+.1f}deg) lift {lift:+.3f}  centre ({c[0]:.0f},{c[1]:.0f})'
+                f'  reproj {good[-1]["reproj_px"]:.2f}px  [{time.monotonic() - t_last:.1f}s]')
+            t_last = time.monotonic()
+
     try:
+      if not a.grid_mode:
+        walk()
+      else:
         for g, (dx, dy, dyaw) in zip(group_ids, placements):
             if use_base:
                 log(f'base -> placement {g}: dx {dx:+.2f} dy {dy:+.2f} dyaw {math.degrees(dyaw):+.1f}')
@@ -700,7 +832,13 @@ def solve(paths, args):
     A = []    # T_base_calib per sample
     for i, s in enumerate(samples):
         b = s['base_to_calib']
-        A.append(T_from(quat_to_R(*b['q']), b['t']))
+        Ai = T_from(quat_to_R(*b['q']), b['t'])
+        if s.get('mode') == 'walk':
+            # walk: the base moves every sample, so the board is fixed in odom
+            # (one pose per run) and odometry carries the base motion
+            o = s['odom']
+            Ai = planar_T(o['x'], o['y'], o['yaw']) @ Ai
+        A.append(Ai)
         for p in s['passes']:
             for tag in p['tags']:
                 tid = int(tag[0])
@@ -804,13 +942,24 @@ def main():
     ap.add_argument('--plan-only', action='store_true')
     ap.add_argument('--yes', action='store_true', help='do not wait for Enter')
     ap.add_argument('--no-base', action='store_true')
+    ap.add_argument('--grid-mode', action='store_true',
+                    help='old structured mode: fixed placements x lifts x head grid')
+    ap.add_argument('--steps', type=int, default=300, help='walk mode: number of steps')
+    ap.add_argument('--seed', type=int, default=None)
+    ap.add_argument('--walk-xy', type=float, default=0.05, help='max base x/y step [m]')
+    ap.add_argument('--walk-yaw-deg', type=float, default=3.0, help='max base yaw step')
+    ap.add_argument('--walk-lift', type=float, default=0.04, help='max lift step [m]')
+    ap.add_argument('--walk-lift-range', default='-0.26,-0.06', help='lift range for the walk')
+    ap.add_argument('--walk-gain', type=float, default=3.0, help='base P gain for walk steps')
+    ap.add_argument('--walk-tol-m', type=float, default=0.015)
+    ap.add_argument('--walk-tol-deg', type=float, default=1.0)
     ap.add_argument('--base-xy', type=float, default=0.20, help='+-x and +-y placement [m]')
     ap.add_argument('--placements', default='',
                     help='subset of placement indices to run, e.g. "2,3,4,5,6" '
                          '(0 start, 1 +x, 2 -x, 3 +y, 4 -y, 5 +yaw, 6 -yaw)')
     ap.add_argument('--base-yaw-deg', type=float, default=10.0)
-    ap.add_argument('--base-vmax', type=float, default=0.05)
-    ap.add_argument('--base-wmax', type=float, default=0.10)
+    ap.add_argument('--base-vmax', type=float, default=0.12)
+    ap.add_argument('--base-wmax', type=float, default=0.20)
     ap.add_argument('--base-tol-m', type=float, default=0.01)
     ap.add_argument('--base-tol-deg', type=float, default=0.5)
     ap.add_argument('--lift', default='-0.10,-0.18,-0.26',
