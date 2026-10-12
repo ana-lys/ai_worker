@@ -26,12 +26,23 @@
 // last base-frame pose, incoming goals dropped; latched /teleop_core/halted
 // tells joy_hand to hold. Resume after 1 s healthy: frozen goals re-anchored
 // in marker_frame where they are. Starts halted.
+//
+// Base clamp while goals are anchored (D5), on top of the speed cap, always
+// as ONE factor on the whole twist:
+//   predictive: scale the twist so no anchored goal, carried clamp_horizon_s
+//     ahead, leaves its arm's reach box (base frame), or moves further
+//     outside it if it already is;
+//   reactive: if an arm's achieved EE is > 2 cm / 3 deg from its goal while
+//     the base moves, only error-reducing twists pass until both arms are
+//     back under 1 cm / 1.5 deg.
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <Eigen/Dense>
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -93,10 +104,25 @@ public:
     marker_max_age_s_ = this->declare_parameter("marker_max_age_s", 0.3);
     external_hold_timeout_s_ = this->declare_parameter("external_hold_timeout_s", 1.0);
     const double rate = std::max(1.0, this->declare_parameter("rate_hz", 100.0));
+    tick_dt_ = 1.0 / rate;
     base_cmd_timeout_s_ = this->declare_parameter("base_cmd_timeout_s", 0.3);
     spacemouse_idle_s_ = this->declare_parameter("spacemouse_idle_s", 0.3);
     anchored_max_linear_ = this->declare_parameter("anchored_max_linear_vel", 0.10);
     anchored_max_angular_ = this->declare_parameter("anchored_max_angular_vel", 0.20);
+
+    // Reach boxes in the base frame [x_min x_max y_min y_max z_min z_max].
+    // Defaults are rough (shoulders at y +-0.23 m, ~0.8 m reach; z depends
+    // on the lift) -- tune per setup.
+    const auto box_l = this->declare_parameter("reach_box_left",
+      std::vector<double>{0.15, 0.75, -0.10, 0.60, 0.40, 1.60});
+    const auto box_r = this->declare_parameter("reach_box_right",
+      std::vector<double>{0.15, 0.75, -0.60, 0.10, 0.40, 1.60});
+    clamp_horizon_s_ = this->declare_parameter("clamp_horizon_s", 0.3);
+    trip_m_ = this->declare_parameter("reactive_trip_m", 0.02);
+    trip_rad_ = this->declare_parameter("reactive_trip_deg", 3.0) * M_PI / 180.0;
+    clear_m_ = this->declare_parameter("reactive_clear_m", 0.01);
+    clear_rad_ = this->declare_parameter("reactive_clear_deg", 1.5) * M_PI / 180.0;
+    achieved_max_age_s_ = this->declare_parameter("achieved_max_age_s", 0.5);
 
     marker_health_ = this->declare_parameter("marker_health", false);
     detection_timeout_s_ = this->declare_parameter("detection_timeout_s", 2.0);
@@ -139,9 +165,24 @@ public:
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     const std::array<std::string, 2> names {"left", "right"};
+    const std::array<std::vector<double>, 2> boxes {box_l, box_r};
     for (size_t i = 0; i < arms_.size(); ++i) {
       Arm &arm = arms_[i];
       arm.name = names[i];
+      if (boxes[i].size() != 6) {
+        throw std::invalid_argument("reach_box_" + arm.name + " needs 6 values");
+      }
+      for (int k = 0; k < 3; ++k) {
+        arm.box_min[k] = boxes[i][2 * k];
+        arm.box_max[k] = boxes[i][2 * k + 1];
+      }
+      arm.achieved_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        std::string("/ik_solver/achieved_ee_pose_") + arm.name[0], 10,
+        [this, &arm](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+          arm.achieved = pose_to_eigen(msg->pose);
+          arm.achieved_stamp = this->now();
+          arm.achieved_valid = true;
+        });
       arm.goal_pub = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         "/spacemouse/" + arm.name + "/ee_target_pose", 10);
       arm.goal_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -181,6 +222,11 @@ private:
     bool valid {false};
     bool anchored {false};            // goal frame is marker_frame
     bool frozen {false};              // anchored goal frozen in the base frame by a HALT
+    Eigen::Vector3d box_min, box_max;  // reach box, base frame
+    Eigen::Isometry3d achieved {Eigen::Isometry3d::Identity()};   // solver's EE, base frame
+    rclcpp::Time achieved_stamp;
+    bool achieved_valid {false};
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_sub;
     Eigen::Isometry3d goal {Eigen::Isometry3d::Identity()};   // in its native frame
     bool held {false};
     rclcpp::Time hold_last_true;
@@ -385,7 +431,7 @@ private:
         if (arm.valid && arm.anchored && !arm.held) publish_goal(arm, T_base_marker * arm.goal);
       }
     }
-    step_base(any_anchored || halted_);
+    step_base(any_anchored || halted_, (tf_ok && !halted_) ? &T_base_marker : nullptr);
   }
 
   static bool is_zero(const geometry_msgs::msg::Twist &t)
@@ -399,7 +445,7 @@ private:
     return src.received && (now - src.stamp).seconds() <= base_cmd_timeout_s_;
   }
 
-  void step_base(bool any_anchored)
+  void step_base(bool any_anchored, const Eigen::Isometry3d *T_base_marker)
   {
     const rclcpp::Time now = this->now();
     const BaseSource &sm = sources_[kSpaceMouse];
@@ -429,9 +475,114 @@ private:
     geometry_msgs::msg::Twist out = *in;
     if (halted_) out = geometry_msgs::msg::Twist();   // D4: base forced to zero
     if (any_anchored) scale_twist(out, anchored_max_linear_, anchored_max_angular_);
+    if (any_anchored && T_base_marker) clamp_base(out, *T_base_marker);
     cmd_vel_pub_->publish(out);
     last_out_ = out;
     base_output_active_ = true;
+  }
+
+  // Base motion over h seconds of twist t, in the current base frame (planar).
+  static Eigen::Isometry3d base_step(const geometry_msgs::msg::Twist &t, double h)
+  {
+    Eigen::Isometry3d D = Eigen::Isometry3d::Identity();
+    D.translation() = Eigen::Vector3d(t.linear.x * h, t.linear.y * h, 0.0);
+    D.linear() = Eigen::AngleAxisd(t.angular.z * h, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    return D;
+  }
+
+  static double box_violation(const Arm &arm, const Eigen::Vector3d &p)
+  {
+    const Eigen::Vector3d below = (arm.box_min - p).cwiseMax(0.0);
+    const Eigen::Vector3d above = (p - arm.box_max).cwiseMax(0.0);
+    return (below + above).norm();
+  }
+
+  bool achieved_fresh(const Arm &arm) const
+  {
+    return arm.achieved_valid &&
+           (this->now() - arm.achieved_stamp).seconds() <= achieved_max_age_s_;
+  }
+
+  // Goal of an anchored arm in the base frame after the base moves by twist
+  // t for h seconds.
+  Eigen::Isometry3d goal_after(const Arm &arm, const Eigen::Isometry3d &T_base_marker,
+                               const geometry_msgs::msg::Twist &t, double h) const
+  {
+    return base_step(t, h).inverse() * T_base_marker * arm.goal;
+  }
+
+  void clamp_base(geometry_msgs::msg::Twist &out, const Eigen::Isometry3d &T_bm)
+  {
+    if (is_zero(out)) return;
+    const auto anchored = [](const Arm &a) { return a.valid && a.anchored && !a.held; };
+
+    // ── Predictive: largest s in [0, 1] keeping every goal in its box ──
+    auto ok = [&](double s) {
+      geometry_msgs::msg::Twist ts = out;
+      scale_twist_by(ts, s);
+      for (const Arm &arm : arms_) {
+        if (!anchored(arm)) continue;
+        const double now_v = box_violation(arm, (T_bm * arm.goal).translation());
+        const double new_v =
+          box_violation(arm, goal_after(arm, T_bm, ts, clamp_horizon_s_).translation());
+        if (new_v > now_v + 1e-6) return false;
+      }
+      return true;
+    };
+    if (!ok(1.0)) {
+      double lo = 0.0, hi = 1.0;
+      for (int i = 0; i < 12; ++i) {
+        const double mid = 0.5 * (lo + hi);
+        (ok(mid) ? lo : hi) = mid;
+      }
+      scale_twist_by(out, lo);
+      if (lo < 0.99) RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "Base clamp: twist scaled to %.0f %% (anchored goal at its reach box)", lo * 100.0);
+      if (is_zero(out) || lo == 0.0) return;
+    }
+
+    // ── Reactive backstop: arm lagging its goal while the base moves ──
+    bool any_tripped = false, all_clear = true;
+    for (const Arm &arm : arms_) {
+      if (!anchored(arm) || !achieved_fresh(arm)) continue;
+      const Eigen::Isometry3d gb = T_bm * arm.goal;
+      const double dp = (gb.translation() - arm.achieved.translation()).norm();
+      const double da = Eigen::AngleAxisd(gb.linear() * arm.achieved.linear().transpose()).angle();
+      if (dp > trip_m_ || da > trip_rad_) any_tripped = true;
+      if (dp > clear_m_ || da > clear_rad_) all_clear = false;
+    }
+    if (!reactive_tripped_ && any_tripped) {
+      reactive_tripped_ = true;
+      RCLCPP_WARN(this->get_logger(),
+        "Base clamp: arm lags its anchored goal (> %.0f mm / %.1f deg) -- only "
+        "error-reducing base motion until it catches up", trip_m_ * 1000.0, trip_rad_ * 180.0 / M_PI);
+    } else if (reactive_tripped_ && all_clear) {
+      reactive_tripped_ = false;
+      RCLCPP_INFO(this->get_logger(), "Base clamp: arms caught up, base released");
+    }
+    if (!reactive_tripped_) return;
+    for (const Arm &arm : arms_) {
+      if (!anchored(arm) || !achieved_fresh(arm)) continue;
+      const Eigen::Vector3d a = arm.achieved.translation();
+      const double before = ((T_bm * arm.goal).translation() - a).norm();
+      // one tick ahead: the direction must close the gap (a longer horizon
+      // would overshoot the arm and reject the twist that catches it up)
+      const double after = (goal_after(arm, T_bm, out, tick_dt_).translation() - a).norm();
+      if (after > before - 1e-6 && before > clear_m_) {
+        out = geometry_msgs::msg::Twist();
+        return;
+      }
+    }
+  }
+
+  static void scale_twist_by(geometry_msgs::msg::Twist &t, double s)
+  {
+    t.linear.x *= s;
+    t.linear.y *= s;
+    t.linear.z *= s;
+    t.angular.x *= s;
+    t.angular.y *= s;
+    t.angular.z *= s;
   }
 
   // Scale the WHOLE twist by one factor so |v_xy| <= max_lin, |w_z| <= max_ang.
@@ -442,12 +593,7 @@ private:
     double s = 1.0;
     if (v > max_lin) s = std::min(s, max_lin / v);
     if (w > max_ang) s = std::min(s, max_ang / w);
-    t.linear.x *= s;
-    t.linear.y *= s;
-    t.linear.z *= s;
-    t.angular.x *= s;
-    t.angular.y *= s;
-    t.angular.z *= s;
+    scale_twist_by(t, s);
   }
 
   void publish_goal(Arm &arm, const Eigen::Isometry3d &goal_base)
@@ -474,7 +620,17 @@ private:
   bool sm_ever_active_ {false};
   bool base_output_active_ {false};
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
-  geometry_msgs::msg::Twist last_out_;   // last /cmd_vel sent (EKF jump prediction)
+  geometry_msgs::msg::Twist last_out_;
+
+  // ── Base clamp (D5) ──
+  double clamp_horizon_s_ {0.3};
+  double trip_m_ {0.02};
+  double trip_rad_ {3.0 * M_PI / 180.0};
+  double clear_m_ {0.01};
+  double clear_rad_ {1.5 * M_PI / 180.0};
+  double achieved_max_age_s_ {0.5};
+  bool reactive_tripped_ {false};
+  double tick_dt_ {0.01};   // last /cmd_vel sent (EKF jump prediction)
 
   // ── Marker health (D4) ──
   bool marker_health_ {false};
