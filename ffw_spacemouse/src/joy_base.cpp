@@ -11,6 +11,7 @@
 #include "sensor_msgs/msg/joy.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/empty.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "trajectory_msgs/msg/joint_trajectory_point.hpp"
@@ -69,6 +70,12 @@ public:
     this->declare_parameter("logitech_active_topic", "/logitech/base_active");
     // /teleop_core/base/spacemouse when teleop_core owns /cmd_vel.
     this->declare_parameter("cmd_vel_topic", "/cmd_vel");
+    // use_teleop_core: base twist, head and the left-mouse lift all go to
+    // teleop_core (MARKER_TELEOP_PLAN 0c), which merges them with the
+    // Logitech -- no /logitech/base_active latch. The solver then runs with
+    // joy_lift:=false.
+    this->declare_parameter("use_teleop_core", false);
+    use_teleop_core_ = this->get_parameter("use_teleop_core").as_bool();
 
     // ── Joint topics
     // ──────────────────────────────────────────────────────────
@@ -106,19 +113,29 @@ public:
         std::bind(&JoyBase::joint_state_callback, this, _1));
 
     // Logitech active flag — true means Logitech has taken over base control
-    logitech_active_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-        this->get_parameter("logitech_active_topic").as_string(), 10,
-        [this](const std_msgs::msg::Bool::SharedPtr msg) {
-          logitech_active_ = msg->data;
-        });
+    if (!use_teleop_core_) {
+      logitech_active_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+          this->get_parameter("logitech_active_topic").as_string(), 10,
+          [this](const std_msgs::msg::Bool::SharedPtr msg) {
+            logitech_active_ = msg->data;
+          });
+    }
 
     // ── Publishers
     // ────────────────────────────────────────────────────────────
     cmd_vel_pub_ =
         this->create_publisher<geometry_msgs::msg::Twist>(
-            this->get_parameter("cmd_vel_topic").as_string(), 10);
+            use_teleop_core_ ? "/teleop_core/base/spacemouse"
+                             : this->get_parameter("cmd_vel_topic").as_string(),
+            10);
     head_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
-        this->get_parameter("head_topic").as_string(), 10);
+        use_teleop_core_ ? "/teleop_core/head/spacemouse"
+                         : this->get_parameter("head_topic").as_string(),
+        10);
+    if (use_teleop_core_) {
+      lift_pub_ = this->create_publisher<std_msgs::msg::Float64>(
+          "/teleop_core/lift/spacemouse", 10);
+    }
     mode_pub_ =
         this->create_publisher<std_msgs::msg::String>("/teleop_mode", 10);
     // Full machine-state resync request. Fired once on joint-state recovery:
@@ -280,6 +297,21 @@ private:
     if (!joint_state_ready_)
       return;
 
+    // Lift (teleop_core only): same scaling as the solver's own /left/joy
+    // lift -- cubic, 0.005 * 0.2 m per message at full deflection.
+    if (lift_pub_) {
+      const int iz = this->get_parameter("axis_z").as_int();
+      if (iz >= 0 && iz < static_cast<int>(msg->axes.size())) {
+        double z = msg->axes[iz];
+        if (this->get_parameter("invert_z").as_bool()) z = -z;
+        if (std::abs(z) > 0.01) {
+          std_msgs::msg::Float64 dz;
+          dz.data = z * z * z * 0.005 * 0.2;
+          lift_pub_->publish(dz);
+        }
+      }
+    }
+
     double head_step = this->get_parameter("head_step").as_double();
     double pitch = get_axis(*msg, this->get_parameter("axis_pitch").as_int(),
                             this->get_parameter("invert_pitch").as_bool());
@@ -335,6 +367,8 @@ private:
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr lift_pub_;  // teleop_core only
+  bool use_teleop_core_{false};
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr resync_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr

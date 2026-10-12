@@ -424,6 +424,11 @@ public:
     this->declare_parameter("hardware_mode", true);
     hardware_mode_ = this->get_parameter("hardware_mode").as_bool();
 
+    // joy_lift=false: ignore the BASE-mode /left/joy z lift; teleop_core
+    // (ffw_spacemouse) then shifts the goals itself (MARKER_TELEOP_PLAN D7).
+    this->declare_parameter("joy_lift", true);
+    joy_lift_ = this->get_parameter("joy_lift").as_bool();
+
     // Dynamic joint group locking
     this->declare_parameter<bool>("left_arm_enabled", true);
     this->declare_parameter<bool>("right_arm_enabled", true);
@@ -2111,7 +2116,7 @@ private:
       left_btn1_press_time_ = now;
     left_btn1_ = new_btn1;
 
-    if (current_mode_ == "BASE" && msg->axes.size() > 2) {
+    if (joy_lift_ && current_mode_ == "BASE" && msg->axes.size() > 2) {
       // In BASE mode, left mouse Z axis controls synchronized lift of both IK
       // targets
       double z = msg->axes[2];
@@ -2326,6 +2331,7 @@ private:
   std::string robot_model_ = "bg2";
   std::atomic<bool> hardware_sync_requested_{false};
   std::string current_mode_ = "BASE";
+  bool joy_lift_ = true;
   sensor_msgs::msg::JointState latest_real_joints_;
   int joint_msg_count_ = 0;
   // Set on the first /joint_states and never reset (joint_msg_count_ IS reset

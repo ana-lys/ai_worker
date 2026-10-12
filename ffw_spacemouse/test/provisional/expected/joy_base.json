@@ -1,0 +1,8 @@
+{
+ "cmd_x": 0.125,
+ "cmd_x_with_latch": 0.125,
+ "head_relayed": true,
+ "lift_1s_m": 0.1,
+ "lift_stops_on_release": true,
+ "mode": "BASE"
+}
