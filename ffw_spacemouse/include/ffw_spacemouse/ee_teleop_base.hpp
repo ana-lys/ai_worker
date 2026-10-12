@@ -85,6 +85,13 @@ public:
         ? "/teleop_core/" + target_arm_ + "/ee_goal"
         : "/spacemouse/" + target_arm_ + "/ee_target_pose";
     pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(topic_name, 10);
+    if (use_teleop_core_) {
+      // teleop_core HALT (marker health): hold; on resume re-base onto the
+      // achieved pose, like a native-frame outage (native_ok_).
+      core_halted_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/teleop_core/halted", rclcpp::QoS(1).reliable().transient_local(),
+        [this](const std_msgs::msg::Bool::SharedPtr msg) { core_halted_ = msg->data; });
+    }
 
     // Delta stream (deltas out): what the human commanded on the /spacemouse
     // delta path this tick, map frame, AFTER the lock/limit-profile clamps.
@@ -647,7 +654,7 @@ private:
     }
 
     Eigen::Isometry3d T_base_native;
-    if (!lookup_base_from_native(T_base_native)) {
+    if (core_halted_ || !lookup_base_from_native(T_base_native)) {
       native_ok_ = false;
       return;   // publish nothing: the solver holds its last target
     }
@@ -860,6 +867,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr pose_changed_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   bool use_teleop_core_ {false};
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr core_halted_sub_;
+  bool core_halted_ {false};
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr delta_pub_;  // /spacemouse/<arm>/ee_target_delta (deltas out)
   rclcpp::TimerBase::SharedPtr control_timer_;
 

@@ -18,6 +18,14 @@
 // is anchored the whole twist is scaled by ONE factor to the anchored speed
 // cap (one factor keeps the swerve steering targets fixed). No fresh input:
 // one zero, then silence, so other /cmd_vel users are not fought.
+//
+// Marker health (marker_health:=true, D4): HALT when no board detection for
+// > 2 s, marker TF older than marker_max_age_s, or (while goals are
+// anchored) one EKF correction jump > 5 cm / 3 deg beyond the commanded base
+// motion. HALT = base twist forced to zero, anchored goals frozen at their
+// last base-frame pose, incoming goals dropped; latched /teleop_core/halted
+// tells joy_hand to hold. Resume after 1 s healthy: frozen goals re-anchored
+// in marker_frame where they are. Starts halted.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -31,6 +39,7 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include <deque>
 #include "tf2/exceptions.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
@@ -88,6 +97,29 @@ public:
     spacemouse_idle_s_ = this->declare_parameter("spacemouse_idle_s", 0.3);
     anchored_max_linear_ = this->declare_parameter("anchored_max_linear_vel", 0.10);
     anchored_max_angular_ = this->declare_parameter("anchored_max_angular_vel", 0.20);
+
+    marker_health_ = this->declare_parameter("marker_health", false);
+    detection_timeout_s_ = this->declare_parameter("detection_timeout_s", 2.0);
+    resume_healthy_s_ = this->declare_parameter("resume_healthy_s", 1.0);
+    jump_max_m_ = this->declare_parameter("jump_max_m", 0.05);
+    jump_max_rad_ = this->declare_parameter("jump_max_deg", 3.0) * M_PI / 180.0;
+    warn_min_rate_hz_ = this->declare_parameter("detection_warn_rate_hz", 6.4);
+    warn_max_gap_s_ = this->declare_parameter("detection_warn_gap_s", 0.6);
+    halted_pub_ = this->create_publisher<std_msgs::msg::Bool>(
+      "/teleop_core/halted", rclcpp::QoS(1).reliable().transient_local());
+    if (marker_health_) {
+      detection_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        this->declare_parameter("detection_topic", "/head_camera/marker_board_pose"),
+        rclcpp::QoS(5).best_effort(),
+        [this](const geometry_msgs::msg::PoseStamped::SharedPtr) {
+          detections_.push_back(this->now());
+          last_detection_ = detections_.back();
+          have_detection_ = true;
+        });
+      set_halted(true, "starting suspended until marker health is OK");
+    } else {
+      set_halted(false, nullptr);
+    }
 
     sources_[kSpaceMouse].name = "spacemouse";
     sources_[kLogitech].name = "logitech";
@@ -148,6 +180,7 @@ private:
     std::string name;
     bool valid {false};
     bool anchored {false};            // goal frame is marker_frame
+    bool frozen {false};              // anchored goal frozen in the base frame by a HALT
     Eigen::Isometry3d goal {Eigen::Isometry3d::Identity()};   // in its native frame
     bool held {false};
     rclcpp::Time hold_last_true;
@@ -178,7 +211,7 @@ private:
         "%s goal in unsupported frame '%s' -- dropped", arm.name.c_str(), frame.c_str());
       return;
     }
-    if (hold_active(arm)) return;
+    if (hold_active(arm) || halted_) return;
     arm.goal = pose_to_eigen(msg.pose);
     arm.valid = true;
     if (!arm.anchored) publish_goal(arm, arm.goal);   // relay as it arrives
@@ -214,7 +247,106 @@ private:
       return false;
     }
     T = transform_to_eigen(t);
+    tf_stamp_ = rclcpp::Time(t.header.stamp);
     return true;
+  }
+
+  void set_halted(bool halted, const char *why)
+  {
+    halted_ = halted;
+    std_msgs::msg::Bool msg;
+    msg.data = halted;
+    halted_pub_->publish(msg);
+    if (why) {
+      if (halted) RCLCPP_WARN(this->get_logger(), "HALT: %s", why);
+      else RCLCPP_INFO(this->get_logger(), "Resumed: %s", why);
+    }
+  }
+
+  // EKF correction jump: new TF vs the previous one carried forward by the
+  // commanded base motion (T_base'<-marker = D^-1 * T_base<-marker).
+  bool ekf_jumped(const Eigen::Isometry3d &T_now, std::string &why)
+  {
+    const bool fresh_tf = !have_prev_tf_ || tf_stamp_ != prev_tf_stamp_;
+    if (!fresh_tf) return false;
+    bool jumped = false;
+    if (have_prev_tf_) {
+      const double dt = (tf_stamp_ - prev_tf_stamp_).seconds();
+      const double wz = last_out_.angular.z * dt;
+      Eigen::Isometry3d D = Eigen::Isometry3d::Identity();
+      D.translation() = Eigen::Vector3d(last_out_.linear.x * dt, last_out_.linear.y * dt, 0.0);
+      D.linear() = Eigen::AngleAxisd(wz, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+      const Eigen::Isometry3d err = (D.inverse() * prev_tf_).inverse() * T_now;
+      const double dp = err.translation().norm();
+      const double da = Eigen::AngleAxisd(err.linear()).angle();
+      if (dp > jump_max_m_ || da > jump_max_rad_) {
+        jumped = true;
+        why = "EKF jump " + std::to_string(dp * 100.0).substr(0, 4) + " cm / " +
+              std::to_string(da * 180.0 / M_PI).substr(0, 4) + " deg";
+      }
+    }
+    prev_tf_ = T_now;
+    prev_tf_stamp_ = tf_stamp_;
+    have_prev_tf_ = true;
+    return jumped;
+  }
+
+  // One health evaluation per tick (D4). Returns the reason when unhealthy.
+  bool marker_healthy(bool tf_ok, const Eigen::Isometry3d &T, bool check_jump, std::string &why)
+  {
+    const rclcpp::Time now = this->now();
+    while (!detections_.empty() && (now - detections_.front()).seconds() > 2.0)
+      detections_.pop_front();
+    // WARN only: low rate / long gap inside the 2 s window
+    const double rate = detections_.size() / 2.0;
+    double gap = 0.0;
+    for (size_t i = 1; i < detections_.size(); ++i)
+      gap = std::max(gap, (detections_[i] - detections_[i - 1]).seconds());
+    if (!halted_ && (rate < warn_min_rate_hz_ || gap > warn_max_gap_s_)) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "Board detections weak: %.1f Hz, max gap %.2f s (2 s window)", rate, gap);
+    }
+    const double det_age = have_detection_ ? (now - last_detection_).seconds() : 1e9;
+    if (det_age > detection_timeout_s_) {
+      why = "no board detection for > " + std::to_string(detection_timeout_s_).substr(0, 3) + " s";
+      return false;
+    }
+    if (!tf_ok) {
+      why = marker_frame_ + " TF missing or stale (EKF dead?)";
+      have_prev_tf_ = false;
+      return false;
+    }
+    if (check_jump && ekf_jumped(T, why)) return false;
+    if (!check_jump) {
+      prev_tf_ = T;
+      prev_tf_stamp_ = tf_stamp_;
+      have_prev_tf_ = true;
+    }
+    return true;
+  }
+
+  void enter_halt(const std::string &why)
+  {
+    for (Arm &arm : arms_) {
+      if (arm.valid && arm.anchored && have_last_good_tf_) {
+        arm.goal = last_good_tf_ * arm.goal;   // freeze at the last published base pose
+        arm.anchored = false;
+        arm.frozen = true;
+      }
+    }
+    set_halted(true, why.c_str());
+  }
+
+  void resume(const Eigen::Isometry3d &T_base_marker)
+  {
+    for (Arm &arm : arms_) {
+      if (arm.frozen) {
+        arm.goal = T_base_marker.inverse() * arm.goal;   // re-anchor where it is
+        arm.anchored = true;
+        arm.frozen = false;
+      }
+    }
+    set_halted(false, "marker healthy");
   }
 
   void tick()
@@ -223,13 +355,37 @@ private:
     for (Arm &arm : arms_) {
       if (arm.valid && arm.anchored && !hold_active(arm)) any_anchored = true;
     }
-    Eigen::Isometry3d T_base_marker;
-    if (any_anchored && lookup_base_from_marker(T_base_marker)) {
+    Eigen::Isometry3d T_base_marker = Eigen::Isometry3d::Identity();
+    const bool tf_ok =
+      (any_anchored || marker_health_) && lookup_base_from_marker(T_base_marker);
+
+    if (marker_health_) {
+      std::string why;
+      const bool healthy = marker_healthy(tf_ok, T_base_marker, any_anchored, why);
+      const rclcpp::Time now = this->now();
+      if (!healthy) {
+        healthy_since_valid_ = false;
+        if (!halted_) enter_halt(why);
+        else RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Halted: %s", why.c_str());
+      } else if (halted_) {
+        if (!healthy_since_valid_) {
+          healthy_since_ = now;
+          healthy_since_valid_ = true;
+        } else if ((now - healthy_since_).seconds() >= resume_healthy_s_) {
+          resume(T_base_marker);
+          any_anchored = true;
+        }
+      }
+    }
+
+    if (tf_ok && !halted_) {
+      last_good_tf_ = T_base_marker;
+      have_last_good_tf_ = true;
       for (Arm &arm : arms_) {
         if (arm.valid && arm.anchored && !arm.held) publish_goal(arm, T_base_marker * arm.goal);
       }
     }
-    step_base(any_anchored);
+    step_base(any_anchored || halted_);
   }
 
   static bool is_zero(const geometry_msgs::msg::Twist &t)
@@ -265,13 +421,16 @@ private:
       if (base_output_active_) {
         cmd_vel_pub_->publish(geometry_msgs::msg::Twist());   // stop once, then silence
         base_output_active_ = false;
+        last_out_ = geometry_msgs::msg::Twist();
       }
       return;
     }
 
     geometry_msgs::msg::Twist out = *in;
+    if (halted_) out = geometry_msgs::msg::Twist();   // D4: base forced to zero
     if (any_anchored) scale_twist(out, anchored_max_linear_, anchored_max_angular_);
     cmd_vel_pub_->publish(out);
+    last_out_ = out;
     base_output_active_ = true;
   }
 
@@ -315,6 +474,30 @@ private:
   bool sm_ever_active_ {false};
   bool base_output_active_ {false};
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  geometry_msgs::msg::Twist last_out_;   // last /cmd_vel sent (EKF jump prediction)
+
+  // ── Marker health (D4) ──
+  bool marker_health_ {false};
+  bool halted_ {false};
+  double detection_timeout_s_ {2.0};
+  double resume_healthy_s_ {1.0};
+  double jump_max_m_ {0.05};
+  double jump_max_rad_ {3.0 * M_PI / 180.0};
+  double warn_min_rate_hz_ {6.4};
+  double warn_max_gap_s_ {0.6};
+  std::deque<rclcpp::Time> detections_;   // receive times, last 2 s
+  rclcpp::Time last_detection_;
+  bool have_detection_ {false};
+  rclcpp::Time healthy_since_;
+  bool healthy_since_valid_ {false};
+  rclcpp::Time tf_stamp_;
+  Eigen::Isometry3d prev_tf_ {Eigen::Isometry3d::Identity()};
+  rclcpp::Time prev_tf_stamp_;
+  bool have_prev_tf_ {false};
+  Eigen::Isometry3d last_good_tf_ {Eigen::Isometry3d::Identity()};
+  bool have_last_good_tf_ {false};
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr halted_pub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr detection_sub_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::TimerBase::SharedPtr timer_;
