@@ -57,6 +57,11 @@ foreach(arm_teleop joy_hand joy_hand_marker)
   endif()
 endforeach()
 
+# teleop_core: the only publisher of arm goals to the solver (MARKER_TELEOP_PLAN 0b)
+add_executable(teleop_core src/teleop_core.cpp)
+ament_target_dependencies(teleop_core rclcpp geometry_msgs std_msgs tf2 tf2_ros)
+target_link_libraries(teleop_core Eigen3::Eigen)
+
 # Build Base teleop node (maps joystick → cmd_vel + head)
 add_executable(joy_base src/joy_base.cpp)
 ament_target_dependencies(joy_base rclcpp sensor_msgs geometry_msgs trajectory_msgs)
@@ -65,6 +70,7 @@ ament_target_dependencies(joy_base rclcpp sensor_msgs geometry_msgs trajectory_m
 install(TARGETS
   joy_hand
   joy_hand_marker
+  teleop_core
   joy_base
   DESTINATION lib/${PROJECT_NAME}
 )

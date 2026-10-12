@@ -76,7 +76,14 @@ public:
     this->declare_parameter("quest_achieved_pose_topic_l", "/ik_solver/achieved_ee_pose_l");
     this->declare_parameter("quest_achieved_pose_topic_r", "/ik_solver/achieved_ee_pose_r");
 
-    std::string topic_name = "/spacemouse/" + target_arm_ + "/ee_target_pose";
+    // use_teleop_core: send the goal in its native frame to teleop_core, which
+    // re-expresses it in the base frame and is the only publisher to the
+    // solver (MARKER_TELEOP_PLAN 0b). Off: publish to the solver directly.
+    this->declare_parameter("use_teleop_core", false);
+    use_teleop_core_ = this->get_parameter("use_teleop_core").as_bool();
+    std::string topic_name = use_teleop_core_
+        ? "/teleop_core/" + target_arm_ + "/ee_goal"
+        : "/spacemouse/" + target_arm_ + "/ee_target_pose";
     pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(topic_name, 10);
 
     // Delta stream (deltas out): what the human commanded on the /spacemouse
@@ -777,13 +784,14 @@ private:
     if (!achieved_pose_valid_) return;
 
     const Eigen::Isometry3d goal_base = T_base_native * ee_goal_;
+    const Eigen::Isometry3d &goal_out = use_teleop_core_ ? ee_goal_ : goal_base;
     geometry_msgs::msg::PoseStamped msg;
     msg.header.stamp = this->now();
-    msg.header.frame_id = "map";
-    msg.pose.position.x = goal_base.translation().x();
-    msg.pose.position.y = goal_base.translation().y();
-    msg.pose.position.z = goal_base.translation().z();
-    Eigen::Quaterniond q(goal_base.linear());
+    msg.header.frame_id = use_teleop_core_ ? ee_goal_frame_ : "map";
+    msg.pose.position.x = goal_out.translation().x();
+    msg.pose.position.y = goal_out.translation().y();
+    msg.pose.position.z = goal_out.translation().z();
+    Eigen::Quaterniond q(goal_out.linear());
     msg.pose.orientation.x = q.x();
     msg.pose.orientation.y = q.y();
     msg.pose.orientation.z = q.z();
@@ -851,6 +859,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr resync_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr pose_changed_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
+  bool use_teleop_core_ {false};
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr delta_pub_;  // /spacemouse/<arm>/ee_target_delta (deltas out)
   rclcpp::TimerBase::SharedPtr control_timer_;
 
