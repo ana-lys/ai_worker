@@ -238,6 +238,7 @@ def launch_setup(context):
                 'quest_debug_error': LaunchConfiguration('quest_debug_error'),
                 'quest_thumb_engage_min': LaunchConfiguration('quest_thumb_engage_min'),
                 'quest_trigger_engage_min': LaunchConfiguration('quest_trigger_engage_min'),
+                'left_ctrl_override_enabled': LaunchConfiguration('left_ctrl_override_enabled'),
             }.items()
         )
     )
@@ -256,6 +257,7 @@ def launch_setup(context):
                 'quest_debug_error': LaunchConfiguration('quest_debug_error'),
                 'quest_thumb_engage_min': LaunchConfiguration('quest_thumb_engage_min'),
                 'quest_trigger_engage_min': LaunchConfiguration('quest_trigger_engage_min'),
+                'left_ctrl_override_enabled': LaunchConfiguration('left_ctrl_override_enabled'),
             }.items()
         )
     )
@@ -294,6 +296,8 @@ def launch_setup(context):
     quest_debug_solver_str = LaunchConfiguration('quest_debug_solver').perform(context)
     quest_debug_solver = quest_debug_solver_str.lower() in ('true', '1', 'yes')
     goal_source = LaunchConfiguration('goal_source').perform(context)
+    no_finger = LaunchConfiguration('no_finger').perform(context).lower() in ('true', '1', 'yes')
+    collision_scale = float(LaunchConfiguration('collision_scale').perform(context))
     nodes.append(
         Node(
             package='ffw_collision_checker',
@@ -305,6 +309,9 @@ def launch_setup(context):
                 'robot_model': robot_model,
                 'quest_debug_solver': quest_debug_solver,
                 'goal_source': goal_source,
+                'ik_scene': ('scene_inverse_kinematic_no_finger.xml' if no_finger
+                             else 'scene_inverse_kinematic.xml'),
+                'collision_scale': collision_scale,
             }]
         )
     )
@@ -395,6 +402,15 @@ def generate_launch_description():
             'robot_model', default_value='bg2',
             description='Robot model variant: bg2 (RH-P12-RN-A grippers) or smtm (XM430 right gripper).'),
         DeclareLaunchArgument(
+            'collision_scale', default_value='0.5',
+            description='IK solver collision safety-distance scale, clamped to [0.2, 1.0]: every '
+                        'd_safe (global 10 cm, left/right grippers 1 cm) x this. Live: '
+                        'ros2 param set /ffw_ik_solver_teleop collision_scale 0.5'),
+        DeclareLaunchArgument(
+            'no_finger', default_value='false',
+            description='IK solver + its viewer use the model without the 8 RH-P12-RN-A finger '
+                        'bodies (scene_inverse_kinematic_no_finger.xml); every margin unchanged.'),
+        DeclareLaunchArgument(
             'goal_source', default_value='ee',
             description="IK solver teleop goal source: 'ee' (spacemouse/quest, default) or 'rail' "
                         "(external controller streams qpos on /qpos_rail). Runtime-flippable via "
@@ -432,5 +448,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'quest_debug_solver', default_value='false',
             description='Forward to ffw_ik_solver_teleop: print the pre-clip target vs achieved pose + solveStep result for quest slow->fast diagnostics.'),
+        DeclareLaunchArgument(
+            'left_ctrl_override_enabled', default_value='false',
+            description='Forward to joy_hand (right arm only): enable the left-controller '
+                        'continuous override -- trigger scales SpaceMouse speed, grip re-levels '
+                        'roll/yaw to zero. Independent of the 2-handed trigger+grip engage/track '
+                        'gesture, which always stays active regardless of this flag. Default off.'),
         OpaqueFunction(function=launch_setup),
     ])

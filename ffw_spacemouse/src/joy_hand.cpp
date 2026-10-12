@@ -25,6 +25,7 @@
 #include "tf2/time.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
+#include "ffw_collision_checker/msg/goal_constraints.hpp"
 
 using std::placeholders::_1;
 
@@ -258,6 +259,31 @@ public:
           }
       });
 
+    // ── External hold (script-owned arm) ──────────────────────────
+    // A script (e.g. contact_force_episodes.py) drives this arm through the
+    // solver's absolute-pose topic /quest/<arm>/ee_target_pose. Our idle
+    // 100 Hz delta stream would pull the solver target back to our stale
+    // ee_goal_, so we go silent while held. `true` must be re-sent at least
+    // every external_hold_timeout_s; release is `false` or that timeout.
+    // Release re-bases ee_goal_ onto the achieved pose (see control timer).
+    this->declare_parameter("external_hold_timeout_s", 1.0);
+    external_hold_timeout_s_ = this->get_parameter("external_hold_timeout_s").as_double();
+    external_hold_last_true_ = this->now();
+    external_hold_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/spacemouse/" + target_arm_ + "/external_hold", 10,
+      [this](const std_msgs::msg::Bool::SharedPtr msg) {
+          if (msg->data) {
+            external_hold_last_true_ = this->now();
+            if (!external_hold_) {
+              external_hold_ = true;
+              RCLCPP_INFO(this->get_logger(),
+                "External hold ON — mapper silent (%s)", target_arm_.c_str());
+            }
+          } else if (external_hold_) {
+            release_external_hold("released");
+          }
+      });
+
     // ── Pose-change subscription (solver → mapper) ─────────────────
     // Fired by ffw_ik_solver_teleop when a pose load / home reset homing
     // completes: the arm settled at a pose the mapper never commanded, so
@@ -444,6 +470,44 @@ public:
           "roll[%.3f,%.3f] pitch[%.3f,%.3f] yaw[%.3f,%.3f]",
           target_arm_.c_str(), p.px_min, p.px_max, p.py_min, p.py_max, p.pz_min, p.pz_max,
           p.roll_min, p.roll_max, p.pitch_min, p.pitch_max, p.yaw_min, p.yaw_max);
+      });
+
+    // Live goal constraints (EE locks + limit boxes) for ffw_ik_shadow_solver,
+    // which clamps its query goals the same way (goal_constraints.hpp).
+    // Latched so a late-starting shadow gets the current state; polled and
+    // republished on change so every mutation site (callbacks, resync
+    // re-capture) is covered.
+    goal_constraints_pub_ = this->create_publisher<ffw_collision_checker::msg::GoalConstraints>(
+      "/spacemouse/" + target_arm_ + "/goal_constraints",
+      rclcpp::QoS(1).reliable().transient_local());
+    goal_constraints_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(100), [this]() {
+        ffw_collision_checker::msg::GoalConstraints msg;
+        {
+          std::lock_guard<std::mutex> lock(ee_lock_mutex_);
+          msg.arm = target_arm_;
+          msg.goal_frame = ee_goal_frame_;
+          msg.roll_locked = soft_lock_ee_roll_;
+          msg.pitch_locked = soft_lock_ee_pitch_;
+          msg.yaw_locked = soft_lock_ee_yaw_;
+          msg.locked_roll = soft_locked_roll_;
+          msg.locked_pitch = soft_locked_pitch_;
+          msg.locked_yaw = soft_locked_yaw_;
+          msg.orientation_slack = ee_orientation_slack_;
+          const LimitProfile &p = limit_profile_;
+          msg.local_active = p.active;
+          msg.local_bounds = {p.px_min, p.px_max, p.py_min, p.py_max, p.pz_min, p.pz_max,
+                              p.roll_min, p.roll_max, p.pitch_min, p.pitch_max, p.yaw_min, p.yaw_max};
+          const GlobalLimitProfile &g = global_limit_profile_;
+          msg.global_active = g.active;
+          msg.global_frame = g.frame_id;
+          msg.global_bounds = {g.px_min, g.px_max, g.py_min, g.py_max, g.pz_min, g.pz_max,
+                               g.roll_min, g.roll_max, g.pitch_min, g.pitch_max, g.yaw_min, g.yaw_max};
+        }
+        if (goal_constraints_published_ && msg == last_goal_constraints_) return;
+        goal_constraints_pub_->publish(msg);
+        last_goal_constraints_ = msg;
+        goal_constraints_published_ = true;
       });
 
     // ── Quest subscriptions & publishers (quest_teleop_plan §7, Task 2) ──
@@ -1076,9 +1140,28 @@ private:
     joy_received_ = true;
   }
 
+  // End an external hold: re-base ee_goal_ onto where the arm actually is, so
+  // the first delta after release carries no jump back to the pre-hold goal.
+  void release_external_hold(const char *why)
+  {
+    external_hold_ = false;
+    if (achieved_pose_valid_) ee_goal_ = achieved_pose_map_;
+    RCLCPP_INFO(this->get_logger(),
+      "External hold OFF (%s) — ee_goal_ re-based to achieved pose (%s)",
+      why, target_arm_.c_str());
+  }
+
   void control_timer_callback()
   {
     if (current_mode_ == "BASE") return;
+
+    if (external_hold_) {
+      if ((this->now() - external_hold_last_true_).seconds() > external_hold_timeout_s_) {
+        release_external_hold("timeout");
+      } else {
+        return;   // script owns the arm: publish nothing
+      }
+    }
 
     // Left-quest grip override: runs every tick regardless of which path
     // below fills ee_goal_ (quest-engaged or SpaceMouse joystick), so holding
@@ -1307,6 +1390,10 @@ private:
   rclcpp::Subscription<ffw_spacemouse_msgs::msg::LeftControlOverride>::SharedPtr left_ctrl_sub_;  // /quest/left/control_override (right-arm instance only)
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ee_lock_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr limit_profile_sub_;
+  rclcpp::Publisher<ffw_collision_checker::msg::GoalConstraints>::SharedPtr goal_constraints_pub_;
+  rclcpp::TimerBase::SharedPtr goal_constraints_timer_;
+  ffw_collision_checker::msg::GoalConstraints last_goal_constraints_;
+  bool goal_constraints_published_ {false};
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr resync_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr pose_changed_sub_;
@@ -1334,6 +1421,15 @@ private:
   // stale pre-sync poses and must not anchor the re-base (epoch = no resync
   // yet, every message passes).
   rclcpp::Time resync_stamp_;
+
+  // External hold (/spacemouse/<arm>/external_hold): while held, an external
+  // script owns this arm's goal via the solver's absolute-pose topic and this
+  // mapper publishes nothing. Expires external_hold_timeout_s after the last
+  // `true`, so a dead script can't lock the SpaceMouse out.
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr external_hold_sub_;
+  bool external_hold_ {false};
+  rclcpp::Time external_hold_last_true_;
+  double external_hold_timeout_s_ {1.0};
 
   Eigen::Isometry3d ee_goal_;
   double command_dt_ {0.01};

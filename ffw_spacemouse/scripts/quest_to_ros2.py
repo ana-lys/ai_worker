@@ -104,6 +104,44 @@ BUTTON_BITS = ("trigger", "grip", "a_x", "b_y", "thumbstick", "menu")
 # Flip the sign if it shifts the wrong way for your grip.
 CONTROLLER_EE_OFFSET_LOCAL = (0.1, 0.0, 0.0)
 
+# Low-pass filter (EMA) on each controller's published pose, applied per side
+# (independent left/right filter state) right after the EE offset shift,
+# before the torso-relative transform. alpha is the weight on the NEW sample:
+# 1.0 = no filtering, smaller = heavier smoothing / more lag. Quest 3 Touch
+# tracking has a small amount of high-frequency jitter that isn't real hand
+# motion; this trades a few ms of lag for removing it. Tune with
+# --lowpass-alpha if teleop feels sluggish (raise it) or still jittery
+# (lower it).
+DEFAULT_LOWPASS_ALPHA = 0.35
+
+
+def lowpass_vec3(prev, new, alpha):
+    """EMA-blend a 3-vector toward *new*; passes *new* through untouched
+    on the first sample (prev is None)."""
+    if prev is None:
+        return new
+    return tuple(alpha * n + (1.0 - alpha) * p for p, n in zip(prev, new))
+
+
+def lowpass_quat(prev, new, alpha):
+    """EMA-blend a unit quaternion (x, y, z, w) toward *new*, re-normalized.
+
+    Flips *new* to the same hemisphere as *prev* first (quaternions double-
+    cover rotations -- q and -q are the same orientation, but nlerp-ing
+    across hemispheres would spin the short way around through the wrong
+    side). Plain nlerp, not slerp: the per-tick angle between samples here is
+    tiny (jitter, not a real fast rotation), so the difference from a true
+    slerp is negligible and this avoids a trig call every packet.
+    """
+    if prev is None:
+        return new
+    dot = sum(p * n for p, n in zip(prev, new))
+    if dot < 0.0:
+        new = tuple(-v for v in new)
+    blended = tuple(alpha * n + (1.0 - alpha) * p for p, n in zip(prev, new))
+    norm = math.sqrt(sum(v * v for v in blended))
+    return tuple(v / norm for v in blended) if norm > 1e-9 else new
+
 
 def button_floats(buttons: int) -> list[float]:
     """Decode the buttons bitmask into 6 individual 0.0/1.0 floats.
@@ -307,8 +345,14 @@ def serve_tcp(host: str, port: int, line_callback) -> None:
 class QuestControllerPoseNode(Node):
     """Listens for HTS controller telemetry and publishes PoseStamped at full rate."""
 
-    def __init__(self, *, tui: bool, bind: str = "udp:0.0.0.0:9500"):
+    def __init__(self, *, tui: bool, bind: str = "udp:0.0.0.0:9500",
+                 lowpass_alpha: float = DEFAULT_LOWPASS_ALPHA):
         super().__init__("quest_controller_pose")
+        self._lowpass_alpha = lowpass_alpha
+        # Per-side filter state (independent EMA for left/right so one
+        # controller dropping out doesn't reset the other's smoothing).
+        self._filt_pos = {"left": None, "right": None}
+        self._filt_quat = {"left": None, "right": None}
 
         self._pub_left = self.create_publisher(PoseStamped, "left_controller_pose", 10)
         self._pub_right = self.create_publisher(PoseStamped, "right_controller_pose", 10)
@@ -550,6 +594,24 @@ class QuestControllerPoseNode(Node):
         ox, oy, oz = rotate_vector((rqx, rqy, rqz, rqw), CONTROLLER_EE_OFFSET_LOCAL)
         rx, ry, rz = rx + ox, ry + oy, rz + oz
 
+        if "Left" in label or "left" in label:
+            side = "left"
+        elif "Right" in label or "right" in label:
+            side = "right"
+        else:
+            return
+
+        # Low-pass BEFORE the torso-relative transform: a single per-side EMA
+        # in the raw ROS frame, ahead of both the PoseStamped publish and the
+        # /quest_state pack, so every consumer (joy_hand's quest_state_sub_,
+        # the HUD, /left_controller_pose et al.) sees the same smoothed pose.
+        filt_pos = lowpass_vec3(self._filt_pos[side], (rx, ry, rz), self._lowpass_alpha)
+        filt_quat = lowpass_quat(self._filt_quat[side], (rqx, rqy, rqz, rqw), self._lowpass_alpha)
+        self._filt_pos[side] = filt_pos
+        self._filt_quat[side] = filt_quat
+        rx, ry, rz = filt_pos
+        rqx, rqy, rqz, rqw = filt_quat
+
         msg = self.make_torso_pose_stamped(
             stamp, (rx, ry, rz), (rqx, rqy, rqz, rqw))
 
@@ -561,7 +623,7 @@ class QuestControllerPoseNode(Node):
         torso_quat = (msg.pose.orientation.x, msg.pose.orientation.y,
                       msg.pose.orientation.z, msg.pose.orientation.w)
 
-        if "Left" in label or "left" in label:
+        if side == "left":
             self._left_rel = torso_pos
             self._state["left"] = {"pose": (torso_pos, torso_quat),
                                    "analog": analog}
@@ -573,7 +635,7 @@ class QuestControllerPoseNode(Node):
                 throttle_duration_sec=0.25,
             )
             self._publish_quest_state()
-        elif "Right" in label or "right" in label:
+        else:
             self._right_rel = torso_pos
             self._state["right"] = {"pose": (torso_pos, torso_quat),
                                     "analog": analog}
@@ -611,6 +673,12 @@ def main():
              "terminal (needed under `ros2 launch`/quest.launch.py, which pipes "
              "stdout and would otherwise fall back to line-flooding mode).",
     )
+    parser.add_argument(
+        "--lowpass-alpha", type=float, default=DEFAULT_LOWPASS_ALPHA,
+        help="EMA low-pass weight on each controller's published pose, in "
+             f"(0, 1] (default: {DEFAULT_LOWPASS_ALPHA}). 1.0 disables "
+             "filtering; lower = smoother but more lag.",
+    )
     args = parser.parse_args()
 
     host = args.host or ("0.0.0.0" if args.protocol == "udp" else "localhost")
@@ -626,7 +694,7 @@ def main():
     print(f"quest_to_ros2  |  {bind}  |  torso-relative controller XYZ (Ctrl+C to quit)", flush=True)
 
     rclpy.init()
-    node = QuestControllerPoseNode(tui=tui, bind=bind)
+    node = QuestControllerPoseNode(tui=tui, bind=bind, lowpass_alpha=args.lowpass_alpha)
 
     if args.protocol == "udp":
 

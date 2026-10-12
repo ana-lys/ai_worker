@@ -59,6 +59,12 @@ def generate_launch_description():
     quest_debug_error_arg = DeclareLaunchArgument(
         'quest_debug_error', default_value='false',
         description='Print the APPROACH error budget (ep/er + position distances) in joy_hand for slow->fast diagnostics.')
+    left_ctrl_override_enabled_arg = DeclareLaunchArgument(
+        'left_ctrl_override_enabled', default_value='false',
+        description='Enable the left-controller continuous override on the right arm: '
+                    'trigger scales SpaceMouse speed, grip re-levels roll/yaw to zero. '
+                    'Independent of the 2-handed trigger+grip engage/track gesture, which '
+                    'always stays active regardless of this flag. Default off.')
 
     return LaunchDescription([
         target_arm_arg,
@@ -74,6 +80,7 @@ def generate_launch_description():
         quest_thumb_engage_min_arg,
         quest_trigger_engage_min_arg,
         quest_debug_error_arg,
+        left_ctrl_override_enabled_arg,
         Node(
             package='joy',
             executable='joy_node',
@@ -121,6 +128,7 @@ def generate_launch_description():
                 'quest_timeout_s': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_timeout_s'), value_type=float),
                 'quest_debug_engage': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_debug_engage'), value_type=bool),
                 'quest_debug_error': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_debug_error'), value_type=bool),
+                'left_ctrl_override_enabled': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('left_ctrl_override_enabled'), value_type=bool),
                 'quest_thumb_engage_min': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_thumb_engage_min'), value_type=float),
                 'quest_trigger_engage_min': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('quest_trigger_engage_min'), value_type=float),
                 **joint_limits,
