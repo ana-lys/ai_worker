@@ -1,8 +1,6 @@
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -14,11 +12,9 @@
 #include "sensor_msgs/msg/joy.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
-#include "std_msgs/msg/float32_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/empty.hpp"
-#include "std_msgs/msg/float32.hpp"
 #include "ffw_spacemouse_msgs/msg/left_control_override.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "tf2/exceptions.h"
@@ -72,82 +68,11 @@ public:
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-    // ── Quest override parameters (quest_teleop_plan §7, Task 2) ──
-    this->declare_parameter("quest_state_topic", "/quest_state");
     this->declare_parameter("quest_achieved_pose_topic_l", "/ik_solver/achieved_ee_pose_l");
     this->declare_parameter("quest_achieved_pose_topic_r", "/ik_solver/achieved_ee_pose_r");
-    this->declare_parameter("quest_active_topic_prefix", "/quest");
-    this->declare_parameter("quest_publish_notifications", true);   // only ONE instance fires
-    this->declare_parameter("quest_notification_topic", "/ffw_control/notification");
-    this->declare_parameter("quest_hold_engage_s", 2.0);
-    this->declare_parameter("quest_release_min", 0.1);   // all 4 floats < this → count arms (§4)
-    this->declare_parameter("quest_thumb_analog_offset", 7);    // grip, within arm block (§3)
-    this->declare_parameter("quest_trigger_analog_offset", 6);  // trigger, within arm block (§3)
-    this->declare_parameter("quest_thumb_engage_min", 0.5);     // thumb >= 0.5 keeps mode alive
-    this->declare_parameter("quest_trigger_engage_min", 0.5);
-    this->declare_parameter("quest_w_slow", 0.15);
-    this->declare_parameter("quest_approach_pos_m", 0.05);
-    this->declare_parameter("quest_approach_ang_rad", 0.10);
-    this->declare_parameter("quest_timeout_s", 0.5);        // no /quest_state → auto-return
-    this->declare_parameter("quest_achieved_max_age_s", 0.5); // engage re-base: achieved age limit
-    this->declare_parameter("quest_hold_hysteresis", 0.05); // keep-alive/early-release band (§4)
-    this->declare_parameter("quest_frame_rot_rpy", std::vector<double>{0.0, 0.0, 0.0}); // optional alignment
-    this->declare_parameter("quest_pos_scale", 1.0);
-    this->declare_parameter("quest_xy_scale", 3.0);     // TRACK reach gain: stacks with the velocity lead (§6 TEST 3)
-    this->declare_parameter("quest_lead_t", 0.25);      // §6 TEST 3: feedforward lead distance = hand velocity × T_lead
-    this->declare_parameter("quest_vel_alpha", 0.2);    // §6 TEST 3: EMA factor on the smoothed hand velocity
-    this->declare_parameter("quest_debug_engage", false);  // log detect_engage edges (§4)
-    this->declare_parameter("quest_debug_error", false);   // §10: print APPROACH error budget
-
-    quest_state_topic_ = this->get_parameter("quest_state_topic").as_string();
-    quest_active_topic_ = this->get_parameter("quest_active_topic_prefix").as_string() +
-                          "/" + target_arm_ + "/active";
-    // Per-arm state topic (quest_teleop_plan §8b): published once per state
-    // change so the solver can pick a per-state leash — 1.5cm during APPROACH
-    // (before trigger release), 6cm after (TRACK).
-    quest_state_pub_topic_ = this->get_parameter("quest_active_topic_prefix").as_string() +
-                             "/" + target_arm_ + "/state";
-    // Per-arm trigger feed: live trigger analog each quest tick. In TRACK the
-    // solver maps it to the gripper (1 → close, 0 → open); CTRL/APPROACH ignore
-    // it so the 4-way engage hold never slams the gripper (quest_teleop_plan §11).
-    quest_trigger_pub_topic_ = this->get_parameter("quest_active_topic_prefix").as_string() +
-                               "/" + target_arm_ + "/trigger";
-    quest_notification_topic_ = this->get_parameter("quest_notification_topic").as_string();
-    quest_publish_notifications_ = this->get_parameter("quest_publish_notifications").as_bool();
-    quest_hold_engage_s_ = this->get_parameter("quest_hold_engage_s").as_double();
-    quest_release_min_ = this->get_parameter("quest_release_min").as_double();
-    quest_thumb_analog_offset_ = this->get_parameter("quest_thumb_analog_offset").as_int();
-    quest_trigger_analog_offset_ = this->get_parameter("quest_trigger_analog_offset").as_int();
-    quest_thumb_engage_min_ = this->get_parameter("quest_thumb_engage_min").as_double();
-    quest_trigger_engage_min_ = this->get_parameter("quest_trigger_engage_min").as_double();
-    quest_w_slow_ = this->get_parameter("quest_w_slow").as_double();
-    quest_approach_pos_m_ = this->get_parameter("quest_approach_pos_m").as_double();
-    quest_approach_ang_rad_ = this->get_parameter("quest_approach_ang_rad").as_double();
-    quest_timeout_s_ = this->get_parameter("quest_timeout_s").as_double();
-    quest_achieved_max_age_s_ = this->get_parameter("quest_achieved_max_age_s").as_double();
-    quest_hold_hysteresis_ = this->get_parameter("quest_hold_hysteresis").as_double();
-    quest_pos_scale_ = this->get_parameter("quest_pos_scale").as_double();
-    quest_xy_scale_ = this->get_parameter("quest_xy_scale").as_double();
-    quest_lead_t_ = this->get_parameter("quest_lead_t").as_double();
-    quest_vel_alpha_ = this->get_parameter("quest_vel_alpha").as_double();
-    quest_debug_engage_ = this->get_parameter("quest_debug_engage").as_bool();
-    quest_debug_error_ = this->get_parameter("quest_debug_error").as_bool();
-
-    const std::vector<double> frame_rpy =
-        this->get_parameter("quest_frame_rot_rpy").as_double_array();
-    if (frame_rpy.size() >= 3) {
-      quest_frame_rot_.linear() =
-          Eigen::AngleAxisd(frame_rpy[0], Eigen::Vector3d::UnitX()).toRotationMatrix() *
-          Eigen::AngleAxisd(frame_rpy[1], Eigen::Vector3d::UnitY()).toRotationMatrix() *
-          Eigen::AngleAxisd(frame_rpy[2], Eigen::Vector3d::UnitZ()).toRotationMatrix();
-    }
 
     std::string topic_name = "/spacemouse/" + target_arm_ + "/ee_target_pose";
     pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(topic_name, 10);
-    // Quest mode publishes the same ee_goal_ to its own topic: the solver treats
-    // /spacemouse goals as deltas and /quest goals as absolute poses (§10 fix).
-    std::string quest_topic_name = "/quest/" + target_arm_ + "/ee_target_pose";
-    quest_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(quest_topic_name, 10);
 
     // Delta stream (deltas out): what the human commanded on the /spacemouse
     // delta path this tick, map frame, AFTER the lock/limit-profile clamps.
@@ -165,15 +90,7 @@ public:
       "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
           if (msg->data == current_mode_)
             return;  // no transition
-          if (current_mode_ == "ARM" && msg->data != "ARM") {
-            // Emergency stop (quest_teleop_plan §4 "Abort", §7): stop listening
-            // to the quest, freeze ee_goal_ where it is, reset to the pre-count
-            // state. Lives in the callback, not the timer, so it executes even
-            // though the timer early-returns in BASE.
-            enter_quest_state(QuestState::SM_CONTROL);
-            engage_armed_ = false;
-            hold_started_ = false;
-          } else if (msg->data == "ARM" && current_mode_ != "ARM") {
+          if (msg->data == "ARM" && current_mode_ != "ARM") {
             // BASE→ARM: re-base the mapper into the world frame from the latest
             // achieved pose, so the switch injects no phantom delta (§11).
             if (achieved_pose_valid_) {
@@ -206,7 +123,7 @@ public:
 
     // ── Achieved-pose subscription (quest_teleop_plan §5/§11, Task 1) ──
     // World-frame EE pose from the solver, used to re-base the mapper's delta
-    // accumulation onto the real pose and to anchor the Quest engage. No new
+    // accumulation onto the real pose. No new
     // mutex: the timer and this callback share the single executor thread
     // (like precision_mode_).
     const std::string achieved_topic = (target_arm_ == "right")
@@ -220,9 +137,6 @@ public:
         Eigen::Quaterniond q(msg->pose.orientation.w, msg->pose.orientation.x,
                              msg->pose.orientation.y, msg->pose.orientation.z);
         achieved_pose_map_.linear() = q.normalized().toRotationMatrix();
-        // Mapper's own receive time — freshness for the engage re-base is
-        // measured from this, NOT header.stamp (§5).
-        achieved_pose_received_time_ = this->now();
         if (!achieved_pose_valid_) {
           // After a machine-state resync (joint-state recovery) only a pose
           // published AFTER the resync may anchor us — the solver re-snaps
@@ -510,24 +424,6 @@ public:
         goal_constraints_published_ = true;
       });
 
-    // ── Quest subscriptions & publishers (quest_teleop_plan §7, Task 2) ──
-    quest_state_sub_ = this->create_subscription<std_msgs::msg::Float32MultiArray>(
-      quest_state_topic_, 10,
-      [this](const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
-        // §3 flat layout: [left block 0-15][right block 16-31][head pose 32-37].
-        quest_data_ = msg->data;          // cache (single-threaded executor → no mutex)
-        quest_data_valid_ = true;
-        quest_last_msg_time_ = this->now();   // §9 arrival watchdog
-      });
-
-    quest_active_pub_ = this->create_publisher<std_msgs::msg::Bool>(quest_active_topic_, 10);
-    quest_notification_pub_ =
-      this->create_publisher<std_msgs::msg::String>(quest_notification_topic_, 10);
-    quest_state_pub_ =
-      this->create_publisher<std_msgs::msg::String>(quest_state_pub_topic_, 10);
-    quest_trigger_pub_ =
-      this->create_publisher<std_msgs::msg::Float32>(quest_trigger_pub_topic_, 10);
-
     // Initialize pose at origin
     ee_goal_ = Eigen::Isometry3d::Identity();
 
@@ -537,26 +433,11 @@ public:
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(command_dt_)),
       std::bind(&JoyHand::control_timer_callback, this));
 
-    quest_last_msg_time_ = this->now();   // watchdog baseline before first message
 
     RCLCPP_INFO(this->get_logger(), "SpaceMouse pose mapper started. Publishing to /spacemouse/ee_target_pose");
-    RCLCPP_INFO(this->get_logger(),
-      "Quest override ready (%s): active on %s", target_arm_.c_str(),
-      quest_active_topic_.c_str());
   }
 
 private:
-  // ── /quest_state layout (quest_to_ros2.py, quest_teleop_plan §3) ──
-  // Each controller block: [0-5] pose (x,y,z,roll,pitch,yaw), [6] trigger,
-  // [7] grip (thumb), [8-9] stick, [10-15] button floats. Right block = +16.
-  static constexpr size_t QUEST_RIGHT_OFFSET = 16;
-
-  // Quest override state machine (quest_teleop_plan §4-§10, Task 2).
-  // Declared before the quest helpers below: a member function's *parameter
-  // list* is not a complete-class context, so the enumerator must be visible
-  // at the point of the helper declarations, not just in their bodies.
-  enum class QuestState { SM_CONTROL, QUEST_APPROACH, QUEST_TRACK };
-
   // ── EE lock helpers ─────────────────────────────────────────────
 
   static Eigen::Vector3d extract_rpy(const Eigen::Matrix3d &R) {
@@ -700,437 +581,6 @@ private:
     ee_goal_ = T_frame_from_goal.inverse() * goal_in_frame;
   }
 
-  // ── Quest override helpers (quest_teleop_plan §4-§10, Task 2) ──
-
-  // Analog float for one hand, offset within that hand's controller block.
-  // Out-of-range → 0.0 (safe-fail: never engages, §9).
-  double quest_analog(int hand, int offset_within_block) const {
-    const size_t idx =
-        static_cast<size_t>(hand) * QUEST_RIGHT_OFFSET +
-        static_cast<size_t>(std::max(offset_within_block, 0));
-    if (idx >= quest_data_.size()) return 0.0;
-    return quest_data_[idx];
-  }
-
-  // Keep-alive: thumb >= engage_min − hysteresis on BOTH hands (§4).
-  bool quest_thumbs_held() {
-    const double thr = quest_thumb_engage_min_ - quest_hold_hysteresis_;
-    return quest_analog(0, quest_thumb_analog_offset_) >= thr &&
-           quest_analog(1, quest_thumb_analog_offset_) >= thr;
-  }
-
-  // Early-release / go-fast: both triggers still held (same hysteresis) (§4).
-  bool quest_triggers_held() {
-    const double thr = quest_trigger_engage_min_ - quest_hold_hysteresis_;
-    return quest_analog(0, quest_trigger_analog_offset_) >= thr &&
-           quest_analog(1, quest_trigger_analog_offset_) >= thr;
-  }
-
-  // Re-read this instance's control pose from the latest /quest_state and apply
-  // the optional frame alignment (§5/§7): Q' = R(quest_frame_rot_rpy)·Q,
-  // translation scaled by quest_pos_scale. Called every quest tick (the target
-  // is never latched at engage — §5).
-  void update_quest_target() {
-    const int block = (target_arm_ == "right") ? static_cast<int>(QUEST_RIGHT_OFFSET) : 0;
-    if (quest_data_.size() < static_cast<size_t>(block) + 6)
-      return;  // incomplete bridge data: hold the last target (safe-fail)
-    const std::vector<float> &d = quest_data_;
-    // Extrinsic XYZ RPY — matches quest_to_ros2.py torso_relative() (§3/§5)
-    Eigen::Matrix3d R_quest =
-        Eigen::AngleAxisd(d[block + 3], Eigen::Vector3d::UnitX()).toRotationMatrix() *
-        Eigen::AngleAxisd(d[block + 4], Eigen::Vector3d::UnitY()).toRotationMatrix() *
-        Eigen::AngleAxisd(d[block + 5], Eigen::Vector3d::UnitZ()).toRotationMatrix();
-    quest_target_.linear() = quest_frame_rot_.linear() * R_quest;
-    quest_target_.translation() =
-        quest_pos_scale_ *
-        (quest_frame_rot_.linear() *
-         Eigen::Vector3d(d[block + 0], d[block + 1], d[block + 2]));
-  }
-
-  // §10 error budget: combined pos+rot vs the live quest target, measured on
-  // the achieved pose, unlocked axes only. err < 1.0 ⟺ err_pos <
-  // quest_approach_pos_m AND err_rot < quest_approach_ang_rad. The ep/er
-  // breakdown feeds the §10 debug so the slow→fast convergence is inspectable.
-  struct QuestErrorBudget {
-    double ep {std::numeric_limits<double>::infinity()};
-    double er {std::numeric_limits<double>::infinity()};
-    double err {std::numeric_limits<double>::infinity()};
-  };
-  QuestErrorBudget quest_error_budget() {
-    QuestErrorBudget out;
-    if (!achieved_pose_valid_)
-      return out;   // can't measure → never READY
-    out.ep =
-        (achieved_pose_map_.translation() - quest_target_.translation()).norm() /
-        quest_approach_pos_m_;
-
-    // Relative rotation achieved→target, decomposed as extrinsic XYZ RPY;
-    // locked axes are irreducible (§10) so they are excluded from the error.
-    Eigen::Matrix3d R_rel = achieved_pose_map_.linear().transpose() * quest_target_.linear();
-    Eigen::Vector3d rpy = extract_rpy(R_rel);
-    if (soft_lock_ee_roll_) rpy.x() = 0.0;
-    if (soft_lock_ee_pitch_) rpy.y() = 0.0;
-    if (soft_lock_ee_yaw_) rpy.z() = 0.0;
-    Eigen::Matrix3d R_red =
-        (Eigen::AngleAxisd(rpy.x(), Eigen::Vector3d::UnitX()).toRotationMatrix() *
-         Eigen::AngleAxisd(rpy.y(), Eigen::Vector3d::UnitY()).toRotationMatrix() *
-         Eigen::AngleAxisd(rpy.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix());
-    const double cos_ang = std::clamp((R_red.trace() - 1.0) / 2.0, -1.0, 1.0);
-    out.er = std::acos(cos_ang) / quest_approach_ang_rad_;
-
-    out.err = std::max(out.ep, out.er);
-    return out;
-  }
-
-  const char *quest_state_name() const {
-    switch (quest_state_) {
-      case QuestState::SM_CONTROL: return "CTRL";
-      case QuestState::QUEST_APPROACH: return "APPROACH";
-      case QuestState::QUEST_TRACK: return "TRACK";
-    }
-    return "?";
-  }
-
-  // §10 debug (quest_debug_error=true): print the error budget on a throttle
-  // while quest is active, plus the three position distances that explain it —
-  // achieved→target (what READY measures), goal→target (interpolation
-  // residual), achieved→goal (arm tracking lag). Slow→fast failure shows up
-  // immediately: err stuck ≥1 while one of these is large and not shrinking.
-  void debug_error() {
-    if (!quest_debug_error_) return;
-    if (this->now().seconds() - last_debug_error_s_ < 0.2) return;
-    last_debug_error_s_ = this->now().seconds();
-    const auto b = quest_error_budget();
-    const double at =
-        (achieved_pose_map_.translation() - quest_target_.translation()).norm();
-    const double gt =
-        (ee_goal_.translation() - quest_target_.translation()).norm();
-    const double ag =
-        (achieved_pose_map_.translation() - ee_goal_.translation()).norm();
-    RCLCPP_INFO(this->get_logger(),
-      "quest %s [%s]: err=%.2f ep=%.2f er=%.2f  |ach->tgt|=%.3fm |goal->tgt|=%.3fm |ach->goal|=%.3fm",
-      target_arm_.c_str(), quest_state_name(), b.err, b.ep, b.er, at, gt, ag);
-  }
-
-  // §4 debug (quest_debug_engage=true): log each detect_engage edge — arming,
-  // hold start, disarm — once per transition with the four raw analog values,
-  // so the receive path is visible without flooding the 100 Hz control tick.
-  void debug_engage(const std::string &label, double lt, double lth,
-                    double rt, double rth) {
-    if (!quest_debug_engage_)
-      return;
-    if (label == last_debug_engage_label_)
-      return;  // transition-only
-    last_debug_engage_label_ = label;
-    RCLCPP_INFO(this->get_logger(),
-      "quest engage %s: %s  lt=%.2f lth=%.2f rt=%.2f rth=%.2f",
-      target_arm_.c_str(), label.c_str(), lt, lth, rt, rth);
-  }
-
-  // §4 engage detection: runs every ARM tick while in SM_CONTROL. Arms only
-  // from all-four-zero, then requires an uninterrupted THUMB+TRIGGER ≥ 0.5 on
-  // both hands for quest_hold_engage_s. Any interruption disarms (§4).
-  void detect_engage() {
-    if (!quest_data_valid_) {
-      debug_engage("NO_DATA", 0.0, 0.0, 0.0, 0.0);
-      return;  // no /quest_state yet — nothing to engage on
-    }
-    // Right-hand floats live at indices 22-23 (rt/rth) — a short payload
-    // would read 0.0 via quest_analog and fake an all-zero baseline (§3).
-    if (quest_data_.size() < 24) {
-      debug_engage("MALFORMED(size=" + std::to_string(quest_data_.size()) + ")",
-                   0.0, 0.0, 0.0, 0.0);
-      return;
-    }
-
-    // Four engage floats read globally at fixed indices regardless of
-    // target_arm_ — the gesture is 2-handed (§3/§4). "Thumb" = analog grip.
-    const double lt = quest_analog(0, quest_trigger_analog_offset_);
-    const double lth = quest_analog(0, quest_thumb_analog_offset_);
-    const double rt = quest_analog(1, quest_trigger_analog_offset_);
-    const double rth = quest_analog(1, quest_thumb_analog_offset_);
-
-    const bool all_zero =
-        lt < quest_release_min_ && lth < quest_release_min_ &&
-        rt < quest_release_min_ && rth < quest_release_min_;
-    const bool all_held =
-        lt >= quest_trigger_engage_min_ && lth >= quest_thumb_engage_min_ &&
-        rt >= quest_trigger_engage_min_ && rth >= quest_thumb_engage_min_;
-
-    if (all_zero) {
-      engage_armed_ = true;       // clean baseline: arm the count (§4)
-      hold_started_ = false;
-      last_debug_progress_s_ = -1.0;
-      debug_engage("COUNT-READY (all-zero baseline)", lt, lth, rt, rth);
-    } else if (all_held) {
-      if (!engage_armed_) {
-        // All four pressed but no all-zero baseline was seen first — the
-        // release-then-hold sequence (§4) has not been armed, so this squeeze
-        // does not count. Tell the user instead of silently ignoring it.
-        debug_engage("SQUEEZED (release to all-zero first)", lt, lth, rt, rth);
-      } else {
-        // Uninterrupted 4-button hold — run the 2 s countdown
-        if (!hold_started_) {
-          hold_started_ = true;
-          hold_start_time_ = this->now();
-          last_debug_progress_s_ = 0.0;
-          debug_engage("HOLDING (count started)", lt, lth, rt, rth);
-        }
-        // Show the countdown tick so the 2 s requirement is visible
-        if (quest_debug_engage_) {
-          const double el = (this->now() - hold_start_time_).seconds();
-          if (el - last_debug_progress_s_ >= 0.5) {
-            last_debug_progress_s_ = el;
-            RCLCPP_INFO(this->get_logger(),
-              "quest engage %s: HOLDING %.1f/%.1fs  lt=%.2f lth=%.2f rt=%.2f rth=%.2f",
-              target_arm_.c_str(), el, quest_hold_engage_s_, lt, lth, rt, rth);
-          }
-        }
-        if ((this->now() - hold_start_time_).seconds() >= quest_hold_engage_s_) {
-          engage_from_hold();     // gated on a fresh achieved pose (§4)
-        }
-      }
-    } else {
-      // Partial: some fingers down, not yet all four. This is the normal
-      // start-of-squeeze — the count has NOT begun, so do not cancel yet.
-      // Only a break after the hold actually started disarms (§4).
-      if (hold_started_) {
-        engage_armed_ = false;    // hold broke mid-count; must re-zero (§4)
-        hold_started_ = false;
-        last_debug_progress_s_ = -1.0;
-        debug_engage("CANCELLED (hold broke — need all 4 ≥0.5)", lt, lth, rt, rth);
-      } else {
-        // Armed but mid-squeeze: wait for all four ≥0.5. Stream live values
-        // so a held gesture is visible even before the count starts (§4).
-        if (quest_debug_engage_ &&
-            this->now().seconds() - last_debug_live_s_ > 0.5) {
-          last_debug_live_s_ = this->now().seconds();
-          RCLCPP_INFO(this->get_logger(),
-            "quest engage %s: LIVE  lt=%.2f lth=%.2f rt=%.2f rth=%.2f",
-            target_arm_.c_str(), lt, lth, rt, rth);
-        }
-      }
-    }
-  }
-
-  // The engage edge, gated on a live achieved pose (§4/§5). Re-captures
-  // soft-lock centers so apply_ee_locks() does not fight the re-base (§6).
-  void engage_from_hold() {
-    if (!achieved_pose_valid_) {
-      RCLCPP_WARN(this->get_logger(),
-        "Quest engage ignored: no achieved pose yet (%s)", target_arm_.c_str());
-      return;
-    }
-    const double age = (this->now() - achieved_pose_received_time_).seconds();
-    if (age > quest_achieved_max_age_s_) {
-      RCLCPP_WARN(this->get_logger(),
-        "Quest engage ignored: achieved pose stale (%.2f s > %.2f s) (%s)",
-        age, quest_achieved_max_age_s_, target_arm_.c_str());
-      return;
-    }
-
-    if (soft_lock_ee_roll_ || soft_lock_ee_yaw_ || soft_lock_ee_pitch_) {
-      std::lock_guard<std::mutex> lock(ee_lock_mutex_);
-      Eigen::Vector3d rpy = extract_rpy(achieved_pose_map_.linear());
-      if (soft_lock_ee_roll_) soft_locked_roll_ = rpy.x();
-      if (soft_lock_ee_yaw_) soft_locked_yaw_ = rpy.z();
-      if (soft_lock_ee_pitch_) soft_locked_pitch_ = rpy.y();
-      RCLCPP_INFO(this->get_logger(),
-        "Re-captured soft-lock centers at engage (%s)", target_arm_.c_str());
-    }
-
-    ee_goal_ = achieved_pose_map_;   // no jump — the arm is already here (§5)
-    enter_quest_state(QuestState::QUEST_APPROACH);
-    RCLCPP_INFO(this->get_logger(),
-      "Quest override engaged (%s) — slow approach toward hand", target_arm_.c_str());
-  }
-
-  // §4 per-tick evaluation in the QUEST states. Order: keep-alive, arrival
-  // watchdog, then per-state transitions (go-fast on trigger release from
-  // APPROACH; no convergence/error requirement — trigger release always wins).
-  void step_quest_state_machine() {
-    // §9 arrival watchdog: no /quest_state for quest_timeout_s → abort freeze.
-    if ((this->now() - quest_last_msg_time_).seconds() > quest_timeout_s_) {
-      abort_to_control("quest stream timeout");
-      return;
-    }
-
-    // (1) keep-alive: either thumb below threshold → SM_CONTROL (§4)
-    if (!quest_thumbs_held()) {
-      abort_to_control("thumb released");
-      return;
-    }
-
-    update_quest_target();   // live target re-read each tick (§5)
-
-    debug_error();   // §10: print APPROACH error budget when enabled
-
-    switch (quest_state_) {
-      case QuestState::QUEST_APPROACH: {
-        // No convergence/error gate: releasing the triggers (thumbs kept)
-        // always enters fast mode, whatever the approach error is (§4).
-        if (!quest_triggers_held()) {
-          enter_quest_state(QuestState::QUEST_TRACK);
-          RCLCPP_INFO(this->get_logger(),
-            "Quest TRACK — raw pose published directly (§6 TEST, %s)",
-            target_arm_.c_str());
-        }
-        break;
-      }
-      case QuestState::QUEST_TRACK:
-        break;  // keep-alive / watchdog only
-      default:
-        break;
-    }
-  }
-
-  // §6 interpolation (TEST 3): BOTH states share the same led goal — the raw
-  // hand pose advanced by v·T_lead (x,y reach-scaled). TRACK publishes it
-  // direct; APPROACH glides toward it at a low interpolation rate (w_slow) so
-  // the approach stays slow and careful, and the arm is already riding the led
-  // trajectory when the triggers release — no route change, no catch-up burst
-  // at the APPROACH→TRACK crossing. Rotation slerps at w_slow in APPROACH (so
-  // grabbing doesn't snap hand orientation onto the arm) and goes raw in TRACK.
-  void step_quest_interpolation() {
-    // §6 TEST 3: velocity feedforward — goal = raw hand pose + v·T_lead. The
-    // lead is nonzero only while the hand is moving (v≈0 at rest → no parked
-    // offset, unlike the reach scale alone), and it pushes the goal v·T_lead
-    // ahead of the hand so the solver's 3cm leash/damper never holds the arm
-    // back. It stacks on top of quest_xy_scale (2.0 default): scale amplifies
-    // the absolute reach, lead adds motion-dependent speed.
-    const Eigen::Vector3d hand_pos = quest_target_.translation();
-    update_quest_velocity(hand_pos);   // keep the feedforward velocity warm
-    Eigen::Vector3d led_target = hand_pos;
-    if (quest_vel_seeded_) led_target += quest_vel_f_ * quest_lead_t_;
-    led_target.x() *= quest_xy_scale_;
-    led_target.y() *= quest_xy_scale_;
-
-    if (quest_state_ == QuestState::QUEST_TRACK) {
-      ee_goal_.translation() = led_target;
-      ee_goal_.linear() = quest_target_.linear();   // rotation goes raw in TRACK
-      return;
-    }
-
-    // APPROACH: slow glide toward the led target. Translation and rotation both
-    // move w_slow (~15%/tick) of the way each tick, so the arm eases in and
-    // decelerates as the gap closes — a careful approach, not a snap.
-    const Eigen::Vector3d cur_pos = ee_goal_.translation();
-    ee_goal_.translation() = cur_pos + quest_w_slow_ * (led_target - cur_pos);
-
-    Eigen::Quaterniond q_cur(ee_goal_.linear());
-    Eigen::Quaterniond q_tgt(quest_target_.linear());
-    Eigen::Quaterniond q_new = q_cur.slerp(quest_w_slow_, q_tgt);
-    ee_goal_.linear() = q_new.toRotationMatrix();
-  }
-
-  // §6 TEST 3: windowed-secant hand velocity + EMA smoothing, one call per
-  // tick. Pushes the raw hand pose into a history ring, then estimates the
-  // velocity over the oldest→newest span (the linear least-squares slope for
-  // constant-velocity motion, so per-sample jitter averages out — noise ÷N vs
-  // the single-tick Δ) and low-passes it so the commanded lead doesn't jitter.
-  // Runs in APPROACH too so the filter is warm the instant triggers release.
-  void update_quest_velocity(const Eigen::Vector3d &p) {
-    const rclcpp::Time now = this->now();
-    quest_hist_p_[quest_hist_head_] = p;
-    quest_hist_t_[quest_hist_head_] = now;
-    quest_hist_head_ = (quest_hist_head_ + 1) % kQuestHistN;
-    quest_hist_count_ = std::min(quest_hist_count_ + 1, kQuestHistN);
-    if (quest_hist_count_ < 2) return;   // need ≥ 2 samples for a secant
-    const size_t oldest = (quest_hist_head_ + kQuestHistN - quest_hist_count_) % kQuestHistN;
-    const double dt = (now - quest_hist_t_[oldest]).seconds();
-    if (dt < 1e-4) return;               // zero elapsed — skip this tick
-    const Eigen::Vector3d v = (p - quest_hist_p_[oldest]) / dt;
-    if (!quest_vel_seeded_) {
-      quest_vel_f_ = v;                  // first valid window: jump-start the EMA
-      quest_vel_seeded_ = true;
-    } else {
-      quest_vel_f_ += quest_vel_alpha_ * (v - quest_vel_f_);
-    }
-  }
-
-  // Every path back to SM_CONTROL does exactly this (§4 "Abort"): stop
-  // listening to the quest, re-base ee_goal_ onto the achieved pose, disarm
-  // the count.
-  //
-  // Re-base (not just freeze) is required because step_quest_interpolation's
-  // velocity feedforward (§6 TEST 3) intentionally runs ee_goal_ AHEAD of the
-  // hand/arm by v*T_lead while engaged, so "where it is" at abort time can sit
-  // measurably past where the arm actually is — worse the faster the operator
-  // was moving. The mapper's delta topic goes silent for the whole quest
-  // session (joy_hand publishes on the absolute quest_pose_pub_ topic instead),
-  // so its baseline (last_mapper_*) is still parked at the pre-engagement pose.
-  // The first post-abort SpaceMouse tick then hands the solver a goal far from
-  // that baseline; the solver's own re-base guard (kMapperRebaseDist) adopts it
-  // directly on the assumption "the arm is already there" (true for every other
-  // re-base site — ARM switch, override release, quest engage — because they
-  // all anchor on achieved_pose_map_ explicitly). Skipping this re-base breaks
-  // that assumption and the solver adopts the lead-ahead goal as-is: a real
-  // jump toward it, walked back over the next few ticks, before SpaceMouse
-  // control feels normal again.
-  void abort_to_control(const char *reason) {
-    enter_quest_state(QuestState::SM_CONTROL);
-    engage_armed_ = false;
-    hold_started_ = false;
-    if (achieved_pose_valid_) {
-      ee_goal_ = achieved_pose_map_;
-    }
-    RCLCPP_INFO(this->get_logger(),
-      "Quest override off (%s) — goal rebased to achieved, count disarmed (%s)",
-      reason, target_arm_.c_str());
-  }
-
-  // Set the new state, publish /quest/<arm>/active on the SM_CONTROL crossing,
-  // and reset the velocity window on APPROACH entry (TEST 3).
-  void enter_quest_state(QuestState s) {
-    if (quest_state_ == s) return;
-    const bool was_active = (quest_state_ != QuestState::SM_CONTROL);
-    const bool now_active = (s != QuestState::SM_CONTROL);
-    quest_state_ = s;
-    if (was_active != now_active) {
-      std_msgs::msg::Bool flag;
-      flag.data = now_active;
-      quest_active_pub_->publish(flag);
-    }
-    // §8b: publish the state on every transition so the solver's leash can
-    // follow (APPROACH → 1.5cm, TRACK → 3cm). Guarded: enter_quest_state can
-    // run from the mode callback, which is only reachable after construction.
-    if (quest_state_pub_) {
-      std_msgs::msg::String state_msg;
-      state_msg.data = quest_state_name();
-      quest_state_pub_->publish(state_msg);
-    }
-    if (s == QuestState::QUEST_APPROACH) {
-      update_quest_target();
-      // TEST 3: nothing to seed — APPROACH glides from the current ee_goal_
-      // toward the led target, so engaging never jumps the arm. Reset the
-      // velocity window so it never spans the old session; the filter re-warms
-      // during the 2 s hold, so it is converged at release.
-      quest_hist_count_ = 0;
-      quest_vel_seeded_ = false;
-      quest_vel_f_.setZero();
-    }
-  }
-
-  // One joy_hand instance only may fire notifications (the right-hand instance
-  // is launched with quest_publish_notifications=false, §7).
-  void publish_notification(const std::string &payload) {
-    if (!quest_publish_notifications_) return;
-    std_msgs::msg::String msg;
-    msg.data = payload;
-    quest_notification_pub_->publish(msg);
-  }
-
-  // Live per-arm trigger feed (quest_teleop_plan §11). Published every active
-  // quest tick; the solver only obeys it in TRACK, so APPROACH's held trigger
-  // (which is what the engage hold needs) never moves the gripper.
-  void publish_quest_trigger() {
-    if (!quest_trigger_pub_) return;
-    std_msgs::msg::Float32 msg;
-    const int hand = (target_arm_ == "right") ? 1 : 0;   // quest_analog expects 0/1 (multiplies by QUEST_RIGHT_OFFSET)
-    msg.data = static_cast<float>(quest_analog(hand, quest_trigger_analog_offset_));
-    quest_trigger_pub_->publish(msg);
-  }
-
   // ── Callbacks ───────────────────────────────────────────────────
 
   void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
@@ -1163,42 +613,10 @@ private:
       }
     }
 
-    // Left-quest grip override: runs every tick regardless of which path
-    // below fills ee_goal_ (quest-engaged or SpaceMouse joystick), so holding
-    // the grip re-levels the goal even if nothing else is moving it.
+    // Left-quest grip override: runs every tick before the joy_received_
+    // gate, so holding the grip re-levels the goal even if nothing else is
+    // moving it.
     apply_left_ctrl_yaw_roll_decay();
-
-    // ── Quest override (quest_teleop_plan §4-§7, Task 2) ──
-    // Runs every ARM tick, active or not. Its input is /quest_state, not /joy,
-    // so it runs before the joy_received_ gate below. The single-threaded
-    // executor serializes the timer and all callbacks → no new mutex needed
-    // (same pattern as precision_mode_).
-    if (quest_state_ == QuestState::SM_CONTROL) {
-      detect_engage();   // all-4-zero → 2 s hold → engage (§4)
-    }
-    if (quest_state_ != QuestState::SM_CONTROL) {
-      step_quest_state_machine();   // keep-alive / go-fast / watchdog (§4/§9)
-      if (quest_state_ == QuestState::SM_CONTROL) {
-        // Aborted: goal frozen where it is, count disarmed (§4 "Abort").
-        // Clamps still apply on the frozen goal (soft-locks + profile).
-        std::lock_guard<std::mutex> lock(ee_lock_mutex_);
-        apply_ee_locks();
-        apply_limit_profile();
-        apply_global_limit_profile();
-        publish_pose();
-        return;
-      }
-      publish_quest_trigger();   // §11: live trigger feed (gripper in TRACK)
-      step_quest_interpolation();   // slerp ee_goal_ toward quest target (§6)
-      {
-        std::lock_guard<std::mutex> lock(ee_lock_mutex_);
-        apply_ee_locks();       // soft-locks still enforced in quest mode (§6)
-        apply_limit_profile();  // profile: outer hard envelope on the whole pose
-        apply_global_limit_profile();  // global: outer envelope in an external (e.g. marker) frame
-      }
-      publish_pose(true);   // quest active → absolute-goal topic (solver pose path)
-      return;   // SpaceMouse velocity suppressed while quest is active (§7)
-    }
 
     sensor_msgs::msg::Joy joy;
     {
@@ -1310,7 +728,7 @@ private:
     publish_pose();
   }
 
-  void publish_pose(bool quest = false)
+  void publish_pose()
   {
     // Don't publish a world-frame goal until the solver's achieved pose has
     // been seen; before that, ee_goal_ is just Identity and publishing it
@@ -1328,15 +746,8 @@ private:
     msg.pose.orientation.y = q.y();
     msg.pose.orientation.z = q.z();
     msg.pose.orientation.w = q.w();
-    // quest=true → absolute-goal topic (solver's pose path); false (default) →
-    // delta topic (solver's delta path). Which function the solver runs is
-    // decided by which topic the last goal arrived on.
-    if (quest) {
-      quest_pose_pub_->publish(msg);
-    } else {
-      pose_pub_->publish(msg);
-      publish_goal_delta();  // delta stream: one per /spacemouse pose tick
-    }
+    pose_pub_->publish(msg);
+    publish_goal_delta();  // delta stream: one per /spacemouse pose tick
   }
 
   void publish_goal_delta()
@@ -1350,8 +761,7 @@ private:
     //
     // Re-base guard: mirror the solver's mapper re-base thresholds
     // (kMapperRebaseDist 0.03 m / kMapperRebaseAng 0.1 rad). A jump that size
-    // is a re-base (arm switch, override release, first achieved pose, quest
-    // engage/abort), not a command -- the solver adopts the new pose as a
+    // is a re-base (arm switch, override release, first achieved pose), not a command -- the solver adopts the new pose as a
     // baseline and never integrates it, so emit an all-zero delta and re-seed.
     constexpr double kRebaseDist = 0.03;
     constexpr double kRebaseAng = 0.1;
@@ -1397,14 +807,8 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr resync_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr pose_changed_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr quest_state_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr quest_pose_pub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr delta_pub_;  // /spacemouse/<arm>/ee_target_delta (deltas out)
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr quest_active_pub_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr quest_notification_pub_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr quest_state_pub_;  // /quest/<arm>/state (§8b)
-  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr quest_trigger_pub_;  // /quest/<arm>/trigger (§11)
   rclcpp::TimerBase::SharedPtr control_timer_;
 
   std::string target_arm_;
@@ -1416,7 +820,6 @@ private:
   // ── World-frame re-base state (quest_teleop_plan §11, Task 1) ──
   Eigen::Isometry3d achieved_pose_map_ {Eigen::Isometry3d::Identity()};
   bool achieved_pose_valid_ {false};
-  rclcpp::Time achieved_pose_received_time_;
   // Set on machine-state resync; achieved-pose messages stamped before it are
   // stale pre-sync poses and must not anchor the re-base (epoch = no resync
   // yet, every message passes).
@@ -1486,59 +889,6 @@ private:
   std::string ee_goal_frame_;  // assumed native frame of ee_goal_; from param "ee_goal_frame"
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-
-  // ── Quest override state (quest_teleop_plan §4-§10, Task 2) ──
-  QuestState quest_state_ {QuestState::SM_CONTROL};   // quest_active_ ⇔ != SM_CONTROL
-  bool engage_armed_ {false};      // §4: count arms only from all-four-zero
-  bool hold_started_ {false};
-  rclcpp::Time hold_start_time_;
-  rclcpp::Time quest_last_msg_time_;      // §9 arrival watchdog
-  std::vector<float> quest_data_;         // cached /quest_state flat array
-  bool quest_data_valid_ {false};
-  bool quest_debug_engage_ {false};       // §4 debug: log detect_engage edges
-  std::string last_debug_engage_label_;   // transition-only printing
-  double last_debug_progress_s_ {-1.0};   // §4 debug: HOLDING countdown tick
-  double last_debug_live_s_ {-1.0};       // §4 debug: LIVE value stream throttle
-  bool quest_debug_error_ {false};        // §10 debug: print APPROACH error budget
-  double last_debug_error_s_ {-1.0};      // §10 debug: error print throttle
-  Eigen::Isometry3d quest_target_ {Eigen::Isometry3d::Identity()};  // live interpolation target
-
-  // Cached quest parameters
-  std::string quest_state_topic_ {"/quest_state"};
-  std::string quest_active_topic_;
-  std::string quest_state_pub_topic_;   // /quest/<arm>/state — per-state leash feed (§8b)
-  std::string quest_trigger_pub_topic_;   // /quest/<arm>/trigger — gripper feed (§11)
-  std::string quest_notification_topic_ {"/ffw_control/notification"};
-  bool quest_publish_notifications_ {true};
-  double quest_hold_engage_s_ {2.0};
-  double quest_release_min_ {0.1};
-  int quest_thumb_analog_offset_ {7};
-  int quest_trigger_analog_offset_ {6};
-  double quest_thumb_engage_min_ {0.5};
-  double quest_trigger_engage_min_ {0.5};
-  double quest_w_slow_ {0.15};
-  double quest_approach_pos_m_ {0.05};
-  double quest_approach_ang_rad_ {0.10};
-  double quest_timeout_s_ {0.5};
-  double quest_achieved_max_age_s_ {0.5};
-  double quest_hold_hysteresis_ {0.05};
-  Eigen::Isometry3d quest_frame_rot_ {Eigen::Isometry3d::Identity()};  // optional alignment
-  double quest_pos_scale_ {1.0};
-  double quest_xy_scale_ {3.0};
-  double quest_lead_t_ {0.25};     // §6 TEST 3: lead distance = hand velocity × T_lead
-  double quest_vel_alpha_ {0.2};   // §6 TEST 3: EMA factor on the smoothed velocity
-
-  // §6 TEST 3: hand-velocity history for the feedforward lead. Parallel ring
-  // buffers of (time, position); the windowed secant over the N samples equals
-  // the least-squares slope for constant-velocity motion, so the estimate is
-  // far steadier than the per-tick Δh.
-  static constexpr size_t kQuestHistN = 5;
-  std::array<rclcpp::Time, kQuestHistN> quest_hist_t_;
-  std::array<Eigen::Vector3d, kQuestHistN> quest_hist_p_;
-  size_t quest_hist_head_ {0};
-  size_t quest_hist_count_ {0};
-  Eigen::Vector3d quest_vel_f_ {Eigen::Vector3d::Zero()};  // EMA-smoothed velocity (m/s)
-  bool quest_vel_seeded_ {false};
 };
 
 int main(int argc, char * argv[])

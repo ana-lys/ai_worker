@@ -234,29 +234,18 @@ def launch_setup(context):
             launch_arguments={
                 'target_arm': 'left',
                 'device_id': left_id,
-                'quest_debug_engage': LaunchConfiguration('quest_debug_engage'),
-                'quest_debug_error': LaunchConfiguration('quest_debug_error'),
-                'quest_thumb_engage_min': LaunchConfiguration('quest_thumb_engage_min'),
-                'quest_trigger_engage_min': LaunchConfiguration('quest_trigger_engage_min'),
                 'left_ctrl_override_enabled': LaunchConfiguration('left_ctrl_override_enabled'),
             }.items()
         )
     )
 
-    # Right SpaceMouse Mapper (includes joy_node) — quest_publish_notifications
-    # false: only the left instance fires /ffw_control/notification; both still
-    # publish their own /quest/<arm>/active (quest_teleop_plan §7).
+    # Right SpaceMouse Mapper (includes joy_node)
     nodes.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(mapper_launch_file),
             launch_arguments={
                 'target_arm': 'right',
                 'device_id': right_id,
-                'quest_publish_notifications': 'false',
-                'quest_debug_engage': LaunchConfiguration('quest_debug_engage'),
-                'quest_debug_error': LaunchConfiguration('quest_debug_error'),
-                'quest_thumb_engage_min': LaunchConfiguration('quest_thumb_engage_min'),
-                'quest_trigger_engage_min': LaunchConfiguration('quest_trigger_engage_min'),
                 'left_ctrl_override_enabled': LaunchConfiguration('left_ctrl_override_enabled'),
             }.items()
         )
@@ -429,22 +418,10 @@ def generate_launch_description():
             description='SDL device index for Logitech (auto-detect if -1).'),
         DeclareLaunchArgument(
             'use_quest', default_value='true',
-            description='Enable Quest controller ARM override (runs quest_to_ros2.py bridge + forwards quest params to joy_hand). Defaults on so the unified launch is the one entry point -- pass use_quest:=false to fall back to spacemouse-only.'),
+            description='Enable Quest controller ARM override (runs the quest_to_ros2.py bridge). Defaults on so the unified launch is the one entry point -- pass use_quest:=false to fall back to spacemouse-only.'),
         DeclareLaunchArgument(
             'quest_device', default_value='9500',
             description='Port the Quest stream arrives on (passed to quest_to_ros2.py --port).'),
-        DeclareLaunchArgument(
-            'quest_debug_engage', default_value='false',
-            description='Forward to joy_hand: log each quest engage edge (arm/hold/disarm) for diagnostics.'),
-        DeclareLaunchArgument(
-            'quest_debug_error', default_value='false',
-            description='Forward to joy_hand: print the APPROACH error budget (ep/er + position distances) for slow->fast diagnostics.'),
-        DeclareLaunchArgument(
-            'quest_thumb_engage_min', default_value='0.5',
-            description='Forward to joy_hand: thumb/grip analog must be >= this for the 4-way engage hold.'),
-        DeclareLaunchArgument(
-            'quest_trigger_engage_min', default_value='0.5',
-            description='Forward to joy_hand: trigger analog must be >= this for the 4-way engage hold.'),
         DeclareLaunchArgument(
             'quest_debug_solver', default_value='false',
             description='Forward to ffw_ik_solver_teleop: print the pre-clip target vs achieved pose + solveStep result for quest slow->fast diagnostics.'),
