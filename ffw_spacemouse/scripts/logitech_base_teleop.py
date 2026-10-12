@@ -23,6 +23,19 @@ via the same z^3*0.001 formula the SpaceMouse uses.
 
 Only affects BASE mode — ARM mode is unchanged.
 
+use_teleop_core:=true (MARKER_TELEOP_PLAN 0c): teleop_core merges this with
+the SpaceMouse, so there is no take-over: in BASE mode the stick/twist always
+goes to /teleop_core/base/logitech (teleop_core passes it while the
+SpaceMouse is idle), the hat to /teleop_core/head/logitech and the elevation
+buttons to /teleop_core/lift/logitech as -0.10 / +0.15 m lift targets. (The
+legacy /left/joy elevation pulses carry no buttons, which the IK solver's
+joy_callback_l drops, so they never moved the lift.)
+
+The head always steps from the measured head position (/joint_states)
+unless this node commanded it within the last second, and each step is
+timed at head_speed (the servos track ~0.4 rad/s), so the first hat press no
+longer jumps the head from (0, 0).
+
 Usage (standalone):
     ros2 launch ffw_spacemouse logitech_teleop.launch.py
 
@@ -34,7 +47,8 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Bool, String
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, Float64, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
@@ -76,6 +90,10 @@ class LogitechBaseTeleop(Node):
         self.declare_parameter('elevation_goal_b', 0.15)   # raise both EEs by 15 cm
         self.declare_parameter('btn_goal_a', 5)
         self.declare_parameter('btn_goal_b', 6)
+        self.declare_parameter('use_teleop_core', False)
+        self.declare_parameter('joint_state_topic', '/joint_states')
+        self.declare_parameter('head_speed', 0.4)   # rad/s the head servos track
+        self.use_core = self.get_parameter('use_teleop_core').value
 
         # ── State ───────────────────────────────────────────────────────
         self.active = False
@@ -83,8 +101,10 @@ class LogitechBaseTeleop(Node):
         self.mode = 'BASE'
         self._was_active = False
 
-        # Head integrated position (tilt, pan)
+        # Head integrated position (tilt, pan); seeded from /joint_states
         self.current_head_pos = [0.0, 0.0]
+        self.measured_head_pos = None
+        self.last_head_cmd_time = None
 
         # Edge detection for hat (prevents continuous integration at 100 Hz)
         self._prev_hat_x = 0.0
@@ -95,16 +115,23 @@ class LogitechBaseTeleop(Node):
             Joy, self.get_parameter('joy_topic').value, self.joy_cb, 10)
         self.mode_sub = self.create_subscription(
             String, self.get_parameter('mode_topic').value, self.mode_cb, 10)
+        self.joint_sub = self.create_subscription(
+            JointState, self.get_parameter('joint_state_topic').value, self.joint_cb, 20)
 
         # ── Publishers ──────────────────────────────────────────────────
-        self.cmd_vel_pub = self.create_publisher(
-            Twist, self.get_parameter('cmd_vel_topic').value, 10)
-        self.active_pub = self.create_publisher(
-            Bool, self.get_parameter('active_topic').value, 10)
-        self.head_pub = self.create_publisher(
-            JointTrajectory, self.get_parameter('head_topic').value, 10)
-        self.elevation_pub = self.create_publisher(
-            Joy, self.get_parameter('elevation_joy_topic').value, 10)
+        if self.use_core:
+            self.cmd_vel_pub = self.create_publisher(Twist, '/teleop_core/base/logitech', 10)
+            self.head_pub = self.create_publisher(JointTrajectory, '/teleop_core/head/logitech', 10)
+            self.lift_pub = self.create_publisher(Float64, '/teleop_core/lift/logitech', 10)
+        else:
+            self.cmd_vel_pub = self.create_publisher(
+                Twist, self.get_parameter('cmd_vel_topic').value, 10)
+            self.active_pub = self.create_publisher(
+                Bool, self.get_parameter('active_topic').value, 10)
+            self.head_pub = self.create_publisher(
+                JointTrajectory, self.get_parameter('head_topic').value, 10)
+            self.elevation_pub = self.create_publisher(
+                Joy, self.get_parameter('elevation_joy_topic').value, 10)
 
         self.get_logger().info(
             'Logitech Base Teleop started — hold Trigger+Thumb 2s to toggle, '
@@ -115,7 +142,20 @@ class LogitechBaseTeleop(Node):
     def mode_cb(self, msg: String):
         self.mode = msg.data
 
+    def joint_cb(self, msg: JointState):
+        pos = dict(zip(msg.name, msg.position))
+        if 'head_joint1' in pos and 'head_joint2' in pos:
+            self.measured_head_pos = [pos['head_joint1'], pos['head_joint2']]
+
     def joy_cb(self, msg: Joy):
+        if self.use_core:
+            # No take-over: teleop_core decides when the Logitech drives.
+            if self.mode == 'BASE':
+                self._publish_cmd_vel(msg)
+                self._process_head(msg)
+                self._process_elevation(msg)
+            return
+
         buttons = msg.buttons
         now = self.get_clock().now().nanoseconds / 1e9
 
@@ -209,6 +249,19 @@ class LogitechBaseTeleop(Node):
         head_step = self.get_parameter('head_step').value
 
         publish_needed = False
+        pressed = (self._is_hat_pressed(self._prev_hat_y, hat_y) or
+                   self._is_hat_pressed(self._prev_hat_x, hat_x))
+        if pressed:
+            now = self.get_clock().now().nanoseconds / 1e9
+            recent = (self.last_head_cmd_time is not None and
+                      now - self.last_head_cmd_time < 1.0)
+            if not recent:
+                if self.measured_head_pos is None:
+                    self.get_logger().warn('Hat ignored: no head position on /joint_states yet')
+                    self._prev_hat_x, self._prev_hat_y = hat_x, hat_y
+                    return
+                self.current_head_pos = list(self.measured_head_pos)
+            self.last_head_cmd_time = now
 
         # ── Hat Y edge: head_joint1 (tilt) — NEGATE for correct direction ─
         if self._is_hat_pressed(self._prev_hat_y, hat_y):
@@ -230,7 +283,10 @@ class LogitechBaseTeleop(Node):
             traj = JointTrajectory()
             traj.joint_names = ['head_joint1', 'head_joint2']
             pt = JointTrajectoryPoint()
-            pt.time_from_start.nanosec = 50000000  # 50 ms
+            # duration the servos can track (~head_speed), never under 50 ms
+            dur = max(0.05, head_step / max(self.get_parameter('head_speed').value, 1e-3))
+            pt.time_from_start.sec = int(dur)
+            pt.time_from_start.nanosec = int((dur - int(dur)) * 1e9)
             pt.positions = [self.current_head_pos[0], self.current_head_pos[1]]
             pt.velocities = [0.0, 0.0]
             traj.points.append(pt)
@@ -289,7 +345,9 @@ class LogitechBaseTeleop(Node):
         self._prev_goal_a = a_pressed
         self._prev_goal_b = b_pressed
 
-        if target_z is not None:
+        if target_z is not None and self.use_core:
+            self.lift_pub.publish(Float64(data=float(target_z)))
+        elif target_z is not None:
             # Solve: z^3 * 0.001 = target_z  →  z = (target_z * 1000)^(1/3)
             # Handle negative base: Python float ** float returns complex for negatives
             z = abs(target_z * 1000.0) ** (1.0 / 3.0)

@@ -13,6 +13,7 @@
 #   clamp           teleop_core base clamp, closed loop
 #   lift_head       teleop_core lift ramp + head relay
 #   joy_base        joy_base (use_teleop_core) -> teleop_core: twist, lift, head
+#   logitech        logitech_base_teleop (use_teleop_core) -> teleop_core
 #   all             everything above
 D=$(cd "$(dirname "$0")" && pwd)
 LOG=${LOG_DIR:-/tmp/ffw_teleop_provisional}; mkdir -p "$LOG"
@@ -59,7 +60,11 @@ case "${1:-all}" in
                    > "$LOG/joy_base.log" 2>&1 & JB=$!
                  run joy_base_regress.py "-p marker_health:=false" - | expect joy_base
                  kill $JB 2>/dev/null; wait 2>/dev/null ;;
-  all) for t in joy_hand joy_hand_core marker marker_core base health clamp lift_head joy_base; do
+  logitech)      $LIB/logitech_base_teleop.py --ros-args -p use_teleop_core:=true \
+                   > "$LOG/logitech.log" 2>&1 & LG=$!
+                 run logitech_regress.py "-p marker_health:=false" - | expect logitech
+                 kill $LG 2>/dev/null; wait 2>/dev/null ;;
+  all) for t in joy_hand joy_hand_core marker marker_core base health clamp lift_head joy_base logitech; do
          echo "== $t"; "$0" "$t"; done ;;
   *) echo "unknown test $1"; exit 2 ;;
 esac

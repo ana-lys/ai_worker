@@ -1,0 +1,17 @@
+{
+ "cmd_x_no_takeover": 0.131,
+ "head_duration_s": 0.125,
+ "head_first_press": [
+  0.15,
+  -0.1
+ ],
+ "head_second_press": [
+  0.1,
+  -0.1
+ ],
+ "lift_target_z": 0.9,
+ "sm_wins": [
+  0.0,
+  0.2
+ ]
+}
