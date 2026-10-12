@@ -4,7 +4,7 @@ from pathlib import Path
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 import launch_ros.parameter_descriptions
 from ament_index_python.packages import get_package_share_directory
@@ -22,6 +22,12 @@ def generate_launch_description():
     target_arm_arg = DeclareLaunchArgument('target_arm', default_value='right', description='Target arm: left or right')
     device_id_arg = DeclareLaunchArgument('device_id', default_value='0', description='Device ID integer (e.g., 0 for /dev/input/js0)')
 
+    use_teleop_core_arg = DeclareLaunchArgument(
+        'use_teleop_core', default_value='false',
+        description='Send the EE goal (native frame) to teleop_core instead of the solver.')
+    teleop_frame_arg = DeclareLaunchArgument(
+        'teleop_frame', default_value='base_link',
+        description='EE goal frame: base_link (joy_hand) or marker_frame (joy_hand_marker).')
     left_ctrl_override_enabled_arg = DeclareLaunchArgument(
         'left_ctrl_override_enabled', default_value='false',
         description='Enable the left-controller continuous override on the right arm: '
@@ -33,6 +39,8 @@ def generate_launch_description():
         target_arm_arg,
         device_id_arg,
         left_ctrl_override_enabled_arg,
+        use_teleop_core_arg,
+        teleop_frame_arg,
         Node(
             package='joy',
             executable='joy_node',
@@ -46,7 +54,9 @@ def generate_launch_description():
         ),
         Node(
             package='ffw_spacemouse',
-            executable='joy_hand',
+            executable=PythonExpression(
+                ["'joy_hand_marker' if '", LaunchConfiguration('teleop_frame'),
+                 "' == 'marker_frame' else 'joy_hand'"]),
             name='joy_hand',
             namespace=LaunchConfiguration('target_arm'),
             output='screen',
@@ -71,6 +81,7 @@ def generate_launch_description():
                 'invert_pitch': False,
                 'invert_yaw': False,
                 'ee_orientation_slack_deg': 1.0,
+                'use_teleop_core': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('use_teleop_core'), value_type=bool),
                 'left_ctrl_override_enabled': launch_ros.parameter_descriptions.ParameterValue(LaunchConfiguration('left_ctrl_override_enabled'), value_type=bool),
                 **joint_limits,
             }]

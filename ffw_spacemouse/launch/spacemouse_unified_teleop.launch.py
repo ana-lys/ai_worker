@@ -219,6 +219,17 @@ def launch_setup(context):
     use_quest = use_quest_str.lower() in ('true', '1', 'yes')
     quest_device = LaunchConfiguration('quest_device').perform(context)
 
+    # teleop_core (MARKER_TELEOP_PLAN phase 0): the only publisher of arm goals
+    # and /cmd_vel; joy_base / Logitech / mappers feed it. teleop_frame
+    # marker_frame anchors the EE goals on the board (joy_hand_marker) and
+    # turns on the marker health gate + base clamp; it implies teleop_core.
+    teleop_frame = LaunchConfiguration('teleop_frame').perform(context)
+    if teleop_frame not in ('base_link', 'marker_frame'):
+        raise RuntimeError(f"teleop_frame must be base_link or marker_frame, got '{teleop_frame}'")
+    use_teleop_core = (teleop_frame == 'marker_frame' or
+                       LaunchConfiguration('use_teleop_core').perform(context).lower() in ('true', '1', 'yes'))
+    core_str = 'true' if use_teleop_core else 'false'
+
     if left_id == '0' and right_id == '1':
         auto_left, auto_right = _detect_spacemice(kinds, sdl_map)
         if auto_left is not None:
@@ -234,6 +245,8 @@ def launch_setup(context):
             launch_arguments={
                 'target_arm': 'left',
                 'device_id': left_id,
+                'use_teleop_core': core_str,
+                'teleop_frame': teleop_frame,
                 'left_ctrl_override_enabled': LaunchConfiguration('left_ctrl_override_enabled'),
             }.items()
         )
@@ -246,6 +259,8 @@ def launch_setup(context):
             launch_arguments={
                 'target_arm': 'right',
                 'device_id': right_id,
+                'use_teleop_core': core_str,
+                'teleop_frame': teleop_frame,
                 'left_ctrl_override_enabled': LaunchConfiguration('left_ctrl_override_enabled'),
             }.items()
         )
@@ -277,9 +292,24 @@ def launch_setup(context):
             'invert_pitch': False,
             'invert_head_pan': False,
             'hardware_mode': hardware_mode,
+            'use_teleop_core': use_teleop_core,
         }]
     )
     nodes.append(base_teleop_node)
+
+    if use_teleop_core:
+        nodes.append(
+            Node(
+                package='ffw_spacemouse',
+                executable='teleop_core',
+                name='teleop_core',
+                output='screen',
+                parameters=[{
+                    'marker_health': teleop_frame == 'marker_frame',
+                    'head_topic': '/leader/joystick_controller_left/joint_trajectory',
+                }]
+            )
+        )
 
     # IK Solver Teleop Node
     quest_debug_solver_str = LaunchConfiguration('quest_debug_solver').perform(context)
@@ -301,6 +331,8 @@ def launch_setup(context):
                 'ik_scene': ('scene_inverse_kinematic_no_finger.xml' if no_finger
                              else 'scene_inverse_kinematic.xml'),
                 'collision_scale': collision_scale,
+                # teleop_core applies the BASE-mode lift itself (D7)
+                'joy_lift': not use_teleop_core,
             }]
         )
     )
@@ -344,6 +376,7 @@ def launch_setup(context):
                     'head_step': '0.05',
                     'elevation_goal_a': '-0.1',
                     'elevation_goal_b': '0.15',
+                    'use_teleop_core': core_str,
                 }.items()
             )
         )
@@ -390,6 +423,16 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'robot_model', default_value='bg2',
             description='Robot model variant: bg2 (RH-P12-RN-A grippers) or smtm (XM430 right gripper).'),
+        DeclareLaunchArgument(
+            'use_teleop_core', default_value='false',
+            description='Route arm goals, /cmd_vel, lift and head through teleop_core '
+                        '(SpaceMouse-first merge with the Logitech, no 2 s take-over). '
+                        'Off until validated on the robot.'),
+        DeclareLaunchArgument(
+            'teleop_frame', default_value='base_link',
+            description='EE goal frame: base_link, or marker_frame (goals anchored on the '
+                        'AprilTag board; implies use_teleop_core, marker health gate + base '
+                        'clamp; see marker_frame_teleop.launch.py).'),
         DeclareLaunchArgument(
             'collision_scale', default_value='0.5',
             description='IK solver collision safety-distance scale, clamped to [0.2, 1.0]: every '

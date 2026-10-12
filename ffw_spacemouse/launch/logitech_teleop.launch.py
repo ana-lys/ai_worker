@@ -109,6 +109,7 @@ def launch_setup(context):
     head_step = float(LaunchConfiguration('head_step').perform(context))
     elevation_goal_a = float(LaunchConfiguration('elevation_goal_a').perform(context))
     elevation_goal_b = float(LaunchConfiguration('elevation_goal_b').perform(context))
+    use_teleop_core = LaunchConfiguration('use_teleop_core').perform(context).lower() in ('true', '1', 'yes')
 
     if device_id is None:
         print('[logitech_teleop] ERROR: Logitech Extreme 3D Pro not detected — '
@@ -147,6 +148,7 @@ def launch_setup(context):
                 'head_step': head_step,
                 'elevation_goal_a': elevation_goal_a,
                 'elevation_goal_b': elevation_goal_b,
+                'use_teleop_core': use_teleop_core,
             }],
         ),
     ]
@@ -172,5 +174,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'elevation_goal_b', default_value='0.15',
             description='EE Z offset goal B (meters, button Top-5).'),
+        DeclareLaunchArgument(
+            'use_teleop_core', default_value='false',
+            description='Send base/head/lift to teleop_core (no 2 s take-over).'),
         OpaqueFunction(function=launch_setup),
     ])
