@@ -72,21 +72,26 @@ def main():
     h.mode.publish(String(data='ARM')); h.pump(0.1)
     h.lift_lg.publish(Float64(data=0.1)); h.pump(0.5)
     r['arm_mode_lift_ignored'] = len(h.take('left')) == 0
-    # BASE: logitech -0.10 then spacemouse +0.04 -> net -0.06, ramped
+    # BASE: logitech targets queue (-0.10 + 0.04 -> -0.06), ramped
     h.mode.publish(String(data='BASE')); h.pump(0.2); h.take('right')
-    h.lift_lg.publish(Float64(data=-0.10)); h.lift_sm.publish(Float64(data=0.04))
+    h.lift_lg.publish(Float64(data=-0.10)); h.lift_lg.publish(Float64(data=0.04))
     h.pump(2.0)
     gl, gr = h.take('left'), h.take('right')
     zl = [g[2] for g in gl]
     r['left_z_final'] = round(zl[-1], 4)                                  # 0.94
-    r['left_max_step_mm'] = round(max(abs(b - a) for a, b in zip([1.0] + zl, zl)) * 1000, 3)  # <= 0.5
+    r['left_max_step_mm'] = round(max(abs(b - a) for a, b in zip([1.0] + zl, zl)) * 1000, 3)  # <= 1.0
     r['right_z_final'] = round(gr[-1][2], 4)                              # 0.94
     # anchored right still follows the board after the lift
     h.tx = 1.1; h.pump(0.3)
     gr = h.take('right')
     r['right_follows_board'] = [round(v, 4) for v in gr[-1]]              # [0.3, -0.3, 0.94]
+    # spacemouse lift is a rate input: one big request moves one step, no backlog
+    h.take('left')
+    h.lift_sm.publish(Float64(data=0.04)); h.pump(0.5)
+    gl = h.take('left'); h.take('right')
+    r['sm_single_request_mm'] = round((gl[-1][2] - 0.94) * 1000, 2) if gl else None   # 1.0
     # reach box z (right max 1.60): +1.0 stops at 1.60 for both
-    h.lift_sm.publish(Float64(data=1.0)); h.pump(14.0)
+    h.lift_lg.publish(Float64(data=1.0)); h.pump(8.0)
     r['right_z_box_stop'] = round(h.take('right')[-1][2], 4)              # 1.6
     r['left_z_box_stop'] = round(h.take('left')[-1][2], 4)                # 1.6 (stops with the anchored one)
     # head relay: spacemouse passes; logitech blocked within 0.3 s of it, passes after

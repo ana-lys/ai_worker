@@ -10,7 +10,7 @@
    0.6
   ]
  ],
- "left_max_step_mm": 0.5,
+ "left_max_step_mm": 1.0,
  "left_z_box_stop": 1.6,
  "left_z_final": 0.94,
  "right_follows_board": [
@@ -19,5 +19,6 @@
   0.94
  ],
  "right_z_box_stop": 1.6,
- "right_z_final": 0.94
+ "right_z_final": 0.94,
+ "sm_single_request_mm": 1.0
 }

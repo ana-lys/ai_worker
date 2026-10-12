@@ -37,8 +37,12 @@
 //     back under 1 cm / 1.5 deg.
 //
 // Lift (D7, BASE mode only, like the solver's /left/joy lift): dz requests
-// (m) on /teleop_core/lift/{spacemouse,logitech} add up and are applied at
-// <= lift_max_speed, shifting every stored goal vertically in the base frame
+// (m) on /teleop_core/lift/{spacemouse,logitech}, applied at <=
+// lift_max_speed (0.1 m/s, the solver's own SpaceMouse lift rate). The
+// SpaceMouse is a rate input: what arrives in a tick is applied up to that
+// step and the excess dropped (no backlog after release). Logitech requests
+// are targets: queued and ramped while the SpaceMouse lift is idle. The
+// shift moves every stored goal vertically in the base frame
 // (anchored goals stay stored in marker_frame) so the EEs ride the lift; the
 // ramp keeps each step under the solver's 3 cm re-base threshold. Anchored
 // goals never leave their reach box in z.
@@ -178,11 +182,11 @@ public:
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-    lift_max_speed_ = this->declare_parameter("lift_max_speed", 0.05);
+    lift_max_speed_ = this->declare_parameter("lift_max_speed", 0.10);
     mode_sub_ = this->create_subscription<std_msgs::msg::String>(
       "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
         mode_ = msg->data;
-        if (mode_ != "BASE") pending_lift_ = 0.0;
+        if (mode_ != "BASE") pending_lift_sm_ = pending_lift_lg_ = 0.0;
       });
     for (const std::string src : {"spacemouse", "logitech"}) {
       lift_subs_.push_back(this->create_subscription<std_msgs::msg::Float64>(
@@ -192,7 +196,7 @@ public:
               "Lift from %s ignored (%s)", src.c_str(), halted_ ? "halted" : "ARM mode");
             return;
           }
-          pending_lift_ += msg->data;
+          (src == "spacemouse" ? pending_lift_sm_ : pending_lift_lg_) += msg->data;
         }));
     }
     head_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
@@ -486,11 +490,16 @@ private:
   // One ramp step of the pending lift. Anchored goals need this tick's TF.
   void step_lift(bool any_anchored, bool tf_ok, const Eigen::Isometry3d &T_bm)
   {
-    if (halted_) pending_lift_ = 0.0;
-    if (pending_lift_ == 0.0) return;
-    if (any_anchored && !tf_ok) return;   // keep it pending until the board is back
+    if (halted_) pending_lift_sm_ = pending_lift_lg_ = 0.0;
+    if (pending_lift_sm_ == 0.0 && pending_lift_lg_ == 0.0) return;
+    if (any_anchored && !tf_ok) {   // no board: drop the rate input, keep targets
+      pending_lift_sm_ = 0.0;
+      return;
+    }
     const double max_step = lift_max_speed_ * tick_dt_;
-    double dz = std::clamp(pending_lift_, -max_step, max_step);
+    const bool from_sm = pending_lift_sm_ != 0.0;
+    double dz = std::clamp(from_sm ? pending_lift_sm_ : pending_lift_lg_, -max_step, max_step);
+    pending_lift_sm_ = 0.0;
     // Anchored goals stay inside their reach box in z (no further outside).
     for (const Arm &arm : arms_) {
       if (!(arm.valid && arm.anchored && !arm.held)) continue;
@@ -499,12 +508,15 @@ private:
       else dz = std::max(dz, std::min(0.0, arm.box_min.z() - z));
     }
     if (dz == 0.0) {
-      RCLCPP_WARN(this->get_logger(), "Lift stopped: an anchored goal is at its reach box z limit");
-      pending_lift_ = 0.0;
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "Lift stopped: an anchored goal is at its reach box z limit");
+      pending_lift_lg_ = 0.0;
       return;
     }
-    pending_lift_ -= dz;
-    if (std::abs(pending_lift_) < 1e-9) pending_lift_ = 0.0;
+    if (!from_sm) {
+      pending_lift_lg_ -= dz;
+      if (std::abs(pending_lift_lg_) < 1e-9) pending_lift_lg_ = 0.0;
+    }
     Eigen::Isometry3d up = Eigen::Isometry3d::Identity();
     up.translation().z() = dz;
     for (Arm &arm : arms_) {
@@ -718,8 +730,9 @@ private:
 
   // ── Lift (D7) + head ──
   std::string mode_ {"ARM"};
-  double lift_max_speed_ {0.05};
-  double pending_lift_ {0.0};
+  double lift_max_speed_ {0.10};
+  double pending_lift_sm_ {0.0};   // SpaceMouse rate input, this tick only
+  double pending_lift_lg_ {0.0};   // Logitech targets, ramped out
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr> lift_subs_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_pub_;
