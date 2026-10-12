@@ -67,6 +67,8 @@ public:
     // ── Logitech active topic
     // ──────────────────────────────────────────────────────────
     this->declare_parameter("logitech_active_topic", "/logitech/base_active");
+    // /teleop_core/base/spacemouse when teleop_core owns /cmd_vel.
+    this->declare_parameter("cmd_vel_topic", "/cmd_vel");
 
     // ── Joint topics
     // ──────────────────────────────────────────────────────────
@@ -113,7 +115,8 @@ public:
     // ── Publishers
     // ────────────────────────────────────────────────────────────
     cmd_vel_pub_ =
-        this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+        this->create_publisher<geometry_msgs::msg::Twist>(
+            this->get_parameter("cmd_vel_topic").as_string(), 10);
     head_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         this->get_parameter("head_topic").as_string(), 10);
     mode_pub_ =

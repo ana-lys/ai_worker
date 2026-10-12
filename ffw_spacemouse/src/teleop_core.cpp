@@ -10,13 +10,24 @@
 //     stay fixed on the board while the base moves -- in BASE mode too,
 //     where joy_hand is silent.
 // /spacemouse/<arm>/external_hold silences an arm exactly like joy_hand.
+//
+// Base: the only publisher of /cmd_vel. joy_base and the Logitech send their
+// twists to /teleop_core/base/{spacemouse,logitech}. The SpaceMouse has
+// priority; the Logitech passes only once the SpaceMouse twist has been zero
+// (inside its deadband) or absent for spacemouse_idle_s (D6). While any goal
+// is anchored the whole twist is scaled by ONE factor to the anchored speed
+// cap (one factor keeps the swerve steering targets fixed). No fresh input:
+// one zero, then silence, so other /cmd_vel users are not fought.
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 
 #include <Eigen/Dense>
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -73,6 +84,24 @@ public:
     marker_max_age_s_ = this->declare_parameter("marker_max_age_s", 0.3);
     external_hold_timeout_s_ = this->declare_parameter("external_hold_timeout_s", 1.0);
     const double rate = std::max(1.0, this->declare_parameter("rate_hz", 100.0));
+    base_cmd_timeout_s_ = this->declare_parameter("base_cmd_timeout_s", 0.3);
+    spacemouse_idle_s_ = this->declare_parameter("spacemouse_idle_s", 0.3);
+    anchored_max_linear_ = this->declare_parameter("anchored_max_linear_vel", 0.10);
+    anchored_max_angular_ = this->declare_parameter("anchored_max_angular_vel", 0.20);
+
+    sources_[kSpaceMouse].name = "spacemouse";
+    sources_[kLogitech].name = "logitech";
+    for (BaseSource &src : sources_) {
+      src.sub = this->create_subscription<geometry_msgs::msg::Twist>(
+        "/teleop_core/base/" + src.name, 10,
+        [this, &src](const geometry_msgs::msg::Twist::SharedPtr msg) {
+          src.twist = *msg;
+          src.stamp = this->now();
+          src.received = true;
+        });
+    }
+    cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
+      this->declare_parameter("cmd_vel_topic", "/cmd_vel"), 10);
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -126,6 +155,16 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_sub;
   };
+
+  struct BaseSource
+  {
+    std::string name;
+    geometry_msgs::msg::Twist twist;
+    rclcpp::Time stamp;
+    bool received {false};
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub;
+  };
+  enum { kSpaceMouse = 0, kLogitech = 1 };
 
   void on_goal(Arm &arm, const geometry_msgs::msg::PoseStamped &msg)
   {
@@ -184,13 +223,72 @@ private:
     for (Arm &arm : arms_) {
       if (arm.valid && arm.anchored && !hold_active(arm)) any_anchored = true;
     }
-    if (!any_anchored) return;
-
     Eigen::Isometry3d T_base_marker;
-    if (!lookup_base_from_marker(T_base_marker)) return;
-    for (Arm &arm : arms_) {
-      if (arm.valid && arm.anchored && !arm.held) publish_goal(arm, T_base_marker * arm.goal);
+    if (any_anchored && lookup_base_from_marker(T_base_marker)) {
+      for (Arm &arm : arms_) {
+        if (arm.valid && arm.anchored && !arm.held) publish_goal(arm, T_base_marker * arm.goal);
+      }
     }
+    step_base(any_anchored);
+  }
+
+  static bool is_zero(const geometry_msgs::msg::Twist &t)
+  {
+    return t.linear.x == 0.0 && t.linear.y == 0.0 && t.linear.z == 0.0 &&
+           t.angular.x == 0.0 && t.angular.y == 0.0 && t.angular.z == 0.0;
+  }
+
+  bool fresh(const BaseSource &src, const rclcpp::Time &now) const
+  {
+    return src.received && (now - src.stamp).seconds() <= base_cmd_timeout_s_;
+  }
+
+  void step_base(bool any_anchored)
+  {
+    const rclcpp::Time now = this->now();
+    const BaseSource &sm = sources_[kSpaceMouse];
+    const BaseSource &lg = sources_[kLogitech];
+    const bool sm_fresh = fresh(sm, now);
+    if (sm_fresh && !is_zero(sm.twist)) {
+      sm_last_active_ = now;
+      sm_ever_active_ = true;
+    }
+    const bool sm_recent =
+      sm_ever_active_ && (now - sm_last_active_).seconds() < spacemouse_idle_s_;
+
+    const geometry_msgs::msg::Twist *in = nullptr;
+    if (sm_fresh && sm_recent) in = &sm.twist;       // SpaceMouse driving (or just stopped)
+    else if (fresh(lg, now)) in = &lg.twist;          // SpaceMouse idle >= spacemouse_idle_s
+    else if (sm_fresh) in = &sm.twist;                // idle SpaceMouse zeros
+
+    if (in == nullptr) {
+      if (base_output_active_) {
+        cmd_vel_pub_->publish(geometry_msgs::msg::Twist());   // stop once, then silence
+        base_output_active_ = false;
+      }
+      return;
+    }
+
+    geometry_msgs::msg::Twist out = *in;
+    if (any_anchored) scale_twist(out, anchored_max_linear_, anchored_max_angular_);
+    cmd_vel_pub_->publish(out);
+    base_output_active_ = true;
+  }
+
+  // Scale the WHOLE twist by one factor so |v_xy| <= max_lin, |w_z| <= max_ang.
+  static void scale_twist(geometry_msgs::msg::Twist &t, double max_lin, double max_ang)
+  {
+    const double v = std::hypot(t.linear.x, t.linear.y);
+    const double w = std::abs(t.angular.z);
+    double s = 1.0;
+    if (v > max_lin) s = std::min(s, max_lin / v);
+    if (w > max_ang) s = std::min(s, max_ang / w);
+    t.linear.x *= s;
+    t.linear.y *= s;
+    t.linear.z *= s;
+    t.angular.x *= s;
+    t.angular.y *= s;
+    t.angular.z *= s;
   }
 
   void publish_goal(Arm &arm, const Eigen::Isometry3d &goal_base)
@@ -207,6 +305,16 @@ private:
   double marker_max_age_s_ {0.3};
   double external_hold_timeout_s_ {1.0};
   std::array<Arm, 2> arms_;
+
+  double base_cmd_timeout_s_ {0.3};
+  double spacemouse_idle_s_ {0.3};
+  double anchored_max_linear_ {0.10};
+  double anchored_max_angular_ {0.20};
+  std::array<BaseSource, 2> sources_;
+  rclcpp::Time sm_last_active_;
+  bool sm_ever_active_ {false};
+  bool base_output_active_ {false};
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::TimerBase::SharedPtr timer_;
