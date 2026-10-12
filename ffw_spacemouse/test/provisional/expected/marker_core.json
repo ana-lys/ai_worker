@@ -1,0 +1,29 @@
+{
+ "anchor_mm": [
+  0.0,
+  0.0,
+  0.0
+ ],
+ "base_mode_anchor_err_mm": [
+  0.0,
+  -0.0,
+  0.0
+ ],
+ "base_move_err_mm": [
+  -0.0,
+  0.0,
+  0.0
+ ],
+ "marker_x_dir_base": [
+  0.0,
+  1.0,
+  0.0
+ ],
+ "outage_goals": 0,
+ "recover_err_mm": [
+  0.0,
+  0.0,
+  0.0
+ ],
+ "stale_goals": 0
+}

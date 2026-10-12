@@ -1,0 +1,26 @@
+{
+ "anchor_mm": [
+  0.0,
+  0.0,
+  0.0
+ ],
+ "cmd_capped": 0.1,
+ "halt_on_detection_loss": true,
+ "halt_on_jump": true,
+ "halted_cmd_zero": true,
+ "halted_goals_moving": false,
+ "no_goals_while_suspended": true,
+ "reanchored_follow_err_mm": [
+  0.0,
+  -0.0,
+  0.0
+ ],
+ "resume_goal_minus_achieved_mm": [
+  -0.0,
+  0.0,
+  0.0
+ ],
+ "resumed": true,
+ "resumed_after_loss": true,
+ "starts_halted": true
+}

@@ -1,0 +1,29 @@
+{
+ "after_arm_switch": [
+  0.25,
+  -0.25,
+  1.05
+ ],
+ "after_release": [
+  0.35,
+  -0.15,
+  0.95
+ ],
+ "base_goals": 0,
+ "base_mode_goals": 0,
+ "delta_msgs>0": true,
+ "frame": "map",
+ "held_goals": 0,
+ "idle_last": [
+  0.3,
+  -0.2,
+  1.0
+ ],
+ "idle_n>0": true,
+ "limit_x_final": 0.35,
+ "quest_topic_msgs": 0,
+ "x_step_median_mm": 2.1094,
+ "yaw_lock_dev_le_1.2deg": true,
+ "yaw_lock_spread_deg": 0.0,
+ "yaw_step_median_mrad": 3.125
+}

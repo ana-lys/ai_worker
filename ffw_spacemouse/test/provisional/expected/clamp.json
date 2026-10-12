@@ -1,0 +1,13 @@
+{
+ "cmd_at_limit": [
+  -0.0002,
+  0.0,
+  0.0
+ ],
+ "forward_passes": 0.1,
+ "goal_x_after_reverse": 0.7499,
+ "goal_x_inside": 0.569,
+ "released_cmd": -0.1,
+ "tripped_away_max": 0.0,
+ "tripped_toward_max": 0.1
+}
