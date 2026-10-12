@@ -447,11 +447,32 @@ protected:
   // (the solver holds its last target).
   virtual bool lookup_base_from_native(Eigen::Isometry3d &T_base_native) = 0;
 
+  // Hand-rolled TransformStamped -> Eigen::Isometry3d, consistent with this
+  // file's existing hand-rolled quaternion/rotation-matrix style (avoids
+  // adding a tf2_eigen dependency for one conversion).
+  static Eigen::Isometry3d transform_to_eigen(const geometry_msgs::msg::TransformStamped &t) {
+    Eigen::Isometry3d out = Eigen::Isometry3d::Identity();
+    out.translation() = Eigen::Vector3d(
+      t.transform.translation.x, t.transform.translation.y, t.transform.translation.z);
+    Eigen::Quaterniond q(t.transform.rotation.w, t.transform.rotation.x,
+                         t.transform.rotation.y, t.transform.rotation.z);
+    out.linear() = q.normalized().toRotationMatrix();
+    return out;
+  }
+
+  std::string ee_goal_frame_;  // native frame of ee_goal_; from param "ee_goal_frame"
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+
 private:
   // ee_goal_ := the solver's achieved pose (base frame), in the native frame.
+  // If the native frame is unavailable now, the first tick that has it again
+  // re-bases instead (native_ok_).
   bool rebase_goal_to_achieved() {
     Eigen::Isometry3d T_base_native;
-    if (!lookup_base_from_native(T_base_native)) return false;
+    if (!lookup_base_from_native(T_base_native)) {
+      native_ok_ = false;
+      return false;
+    }
     ee_goal_ = T_base_native.inverse() * achieved_pose_map_;
     return true;
   }
@@ -471,19 +492,6 @@ private:
     return Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()).toRotationMatrix() *
            Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() *
            Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  }
-
-  // Hand-rolled TransformStamped -> Eigen::Isometry3d, consistent with this
-  // file's existing hand-rolled quaternion/rotation-matrix style (avoids
-  // adding a tf2_eigen dependency for one conversion).
-  static Eigen::Isometry3d transform_to_eigen(const geometry_msgs::msg::TransformStamped &t) {
-    Eigen::Isometry3d out = Eigen::Isometry3d::Identity();
-    out.translation() = Eigen::Vector3d(
-      t.transform.translation.x, t.transform.translation.y, t.transform.translation.z);
-    Eigen::Quaterniond q(t.transform.rotation.w, t.transform.rotation.x,
-                         t.transform.rotation.y, t.transform.rotation.z);
-    out.linear() = q.normalized().toRotationMatrix();
-    return out;
   }
 
   // ── Manual limit profile (CLI-created per-arm position+orientation box) ──
@@ -632,7 +640,19 @@ private:
     }
 
     Eigen::Isometry3d T_base_native;
-    if (!lookup_base_from_native(T_base_native)) return;
+    if (!lookup_base_from_native(T_base_native)) {
+      native_ok_ = false;
+      return;   // publish nothing: the solver holds its last target
+    }
+    if (!native_ok_) {
+      native_ok_ = true;
+      if (achieved_pose_valid_) {
+        ee_goal_ = T_base_native.inverse() * achieved_pose_map_;
+        RCLCPP_INFO(this->get_logger(),
+          "%s back — ee_goal_ re-based to achieved pose (%s)",
+          ee_goal_frame_.c_str(), target_arm_.c_str());
+      }
+    }
 
     // Left-quest grip override: runs every tick before the joy_received_
     // gate, so holding the grip re-levels the goal even if nothing else is
@@ -910,7 +930,8 @@ private:
   // ── Global limit profile (CLI-created; frame from an external TF source,
   // e.g. an AprilTag marker board via ffw_odom's marker_frame_broadcaster) ──
   GlobalLimitProfile global_limit_profile_;
-  std::string ee_goal_frame_;  // assumed native frame of ee_goal_; from param "ee_goal_frame"
-  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  // false while the native frame is unavailable; the tick that gets it back
+  // re-bases ee_goal_ onto the achieved pose (no jump from base motion meanwhile).
+  bool native_ok_ {true};
 };

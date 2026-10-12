@@ -44,15 +44,18 @@ endif()
 find_package(ffw_collision_checker REQUIRED)
 
 # Build Arm teleop node (maps joystick → EE target pose for IK)
-add_executable(joy_hand src/joy_hand.cpp)
-target_include_directories(joy_hand PRIVATE include)
-ament_target_dependencies(joy_hand rclcpp sensor_msgs geometry_msgs trajectory_msgs joy ament_index_cpp ffw_collision_checker ffw_spacemouse_msgs tf2 tf2_ros tf2_geometry_msgs)
-target_link_libraries(joy_hand Eigen3::Eigen)
-if(TARGET ffw_collision_checker::ffw_ik_solver_lib)
-  target_link_libraries(joy_hand ffw_collision_checker::ffw_ik_solver_lib)
-else()
-  target_link_libraries(joy_hand ffw_ik_solver_lib)
-endif()
+# joy_hand: goals in base_link; joy_hand_marker: goals anchored in marker_frame
+foreach(arm_teleop joy_hand joy_hand_marker)
+  add_executable(${arm_teleop} src/${arm_teleop}.cpp)
+  target_include_directories(${arm_teleop} PRIVATE include)
+  ament_target_dependencies(${arm_teleop} rclcpp sensor_msgs geometry_msgs trajectory_msgs joy ament_index_cpp ffw_collision_checker ffw_spacemouse_msgs tf2 tf2_ros tf2_geometry_msgs)
+  target_link_libraries(${arm_teleop} Eigen3::Eigen)
+  if(TARGET ffw_collision_checker::ffw_ik_solver_lib)
+    target_link_libraries(${arm_teleop} ffw_collision_checker::ffw_ik_solver_lib)
+  else()
+    target_link_libraries(${arm_teleop} ffw_ik_solver_lib)
+  endif()
+endforeach()
 
 # Build Base teleop node (maps joystick → cmd_vel + head)
 add_executable(joy_base src/joy_base.cpp)
@@ -61,6 +64,7 @@ ament_target_dependencies(joy_base rclcpp sensor_msgs geometry_msgs trajectory_m
 # Install C++ executable
 install(TARGETS
   joy_hand
+  joy_hand_marker
   joy_base
   DESTINATION lib/${PROJECT_NAME}
 )
