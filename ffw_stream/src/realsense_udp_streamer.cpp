@@ -19,6 +19,11 @@
 //   [fps=30] [max_depth_m=1.0] [--enable-d405s|--disable-d405s]
 //   [--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] [--disable-left-d405]
 //   [--color-exposure <microseconds>] [--d435-fps <n>]
+//   [--no-d435-imu] [--d435-imu-gyro-hz <n>] [--d435-imu-accel-hz <n>]
+//
+// A D435i also publishes its IMU (gyro 200 Hz, accel 250 Hz by default; the
+// nearest rates the unit offers) on /d435/{imu,gyro/sample,accel/sample}, in
+// the color optical frame -- see start_d435_imu. --no-d435-imu turns it off.
 //
 // The head D435/D435i is identified by USB product ID (or model name), not
 // serial, so any unit works; it always streams 1280x720 RGB at --d435-fps
@@ -59,6 +64,7 @@
 // (transient_local) QoS — same pattern as the OAK-D streamer's /oakd/camera_info.
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 
 // AprilTag 25h9 board-pose tap on the D435 head stream (own thread).
 #include "ffw_stream/board_pose_detector.hpp"
@@ -193,11 +199,156 @@ void destroy_gst_stream(GstEncoder &enc) {
   }
 }
 
+// ── D435i IMU (BMI055) ──────────────────────────────────────────────
+//
+// The motion sensor is opened through the sensor API with its own callback,
+// independent of the color pipeline (a pipeline mixing 200 Hz motion frames
+// into the color wait_for_frames loop would hand it framesets with no color).
+// Samples are rotated into the COLOR optical frame "d435_camera" (the frame
+// of /d435/camera_info and /head_camera/marker_board_pose_camera_frame) with
+// the factory accel/gyro -> color extrinsics, so gravity can be compared with
+// the board pose directly. Units: m/s^2, rad/s (librealsense native).
+//   /d435/accel/sample  sensor_msgs/Imu, linear_acceleration only
+//   /d435/gyro/sample   sensor_msgs/Imu, angular_velocity only
+//   /d435/imu           at the gyro rate, newest accel copied in
+// (field covariance[0] = -1 marks a field the message does not carry, as
+// realsense2_camera does). SensorDataQoS (best effort).
+struct D435Imu {
+  rs2::sensor sensor;
+  bool running = false;
+};
+
+static rs2::stream_profile pick_motion_profile(const std::vector<rs2::stream_profile> &all,
+                                               rs2_stream type, int want_hz) {
+  rs2::stream_profile best;
+  int best_err = 1 << 30;
+  for (const auto &p : all) {
+    if (p.stream_type() != type || p.format() != RS2_FORMAT_MOTION_XYZ32F) continue;
+    int err = std::abs(p.fps() - want_hz);
+    if (err < best_err) { best = p; best_err = err; }
+  }
+  return best;
+}
+
+std::unique_ptr<D435Imu> start_d435_imu(const std::string &serial, rs2::device dev,
+                                        const rs2::stream_profile &color_profile,
+                                        rclcpp::Node::SharedPtr node,
+                                        int gyro_hz, int accel_hz) {
+  rs2::sensor motion;
+  for (auto &s : dev.query_sensors()) {
+    if (s.is<rs2::motion_sensor>()) { motion = s; break; }
+  }
+  if (!motion) {
+    log("CAM RGB " + serial + " : no motion sensor (plain D435, not D435i) -- IMU off");
+    return nullptr;
+  }
+  auto all = motion.get_stream_profiles();
+  rs2::stream_profile gp = pick_motion_profile(all, RS2_STREAM_GYRO, gyro_hz);
+  rs2::stream_profile ap = pick_motion_profile(all, RS2_STREAM_ACCEL, accel_hz);
+  if (!gp || !ap) {
+    log("CAM RGB " + serial + " : motion sensor has no gyro/accel XYZ32F profile -- IMU off");
+    return nullptr;
+  }
+
+  // Rotation only (a direction/rate vector has no translation part).
+  // rs2_extrinsics.rotation is column-major, as rs2_transform_point_to_point.
+  struct Rot { float r[9]; };
+  auto rot_to_color = [&](const rs2::stream_profile &p) {
+    Rot R;
+    rs2_extrinsics e = p.get_extrinsics_to(color_profile);
+    std::copy(e.rotation, e.rotation + 9, R.r);
+    return R;
+  };
+  const Rot Rg = rot_to_color(gp), Ra = rot_to_color(ap);
+  auto apply = [](const Rot &R, const rs2_vector &v, double out[3]) {
+    out[0] = R.r[0] * v.x + R.r[3] * v.y + R.r[6] * v.z;
+    out[1] = R.r[1] * v.x + R.r[4] * v.y + R.r[7] * v.z;
+    out[2] = R.r[2] * v.x + R.r[5] * v.y + R.r[8] * v.z;
+  };
+
+  auto qos = rclcpp::SensorDataQoS();
+  auto pub_g = node->create_publisher<sensor_msgs::msg::Imu>("/d435/gyro/sample", qos);
+  auto pub_a = node->create_publisher<sensor_msgs::msg::Imu>("/d435/accel/sample", qos);
+  auto pub_i = node->create_publisher<sensor_msgs::msg::Imu>("/d435/imu", qos);
+
+  auto blank = [](sensor_msgs::msg::Imu &m) {
+    m.header.frame_id = "d435_camera";
+    m.orientation_covariance[0] = -1.0;     // no orientation estimate, ever
+  };
+  // Capture time on the system clock: GLOBAL/SYSTEM-domain timestamps are
+  // host epoch ms; any other domain falls back to arrival (as the color tap).
+  auto stamp_of = [node](const rs2::frame &f) {
+    auto dom = f.get_frame_timestamp_domain();
+    if (dom == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME || dom == RS2_TIMESTAMP_DOMAIN_SYSTEM_TIME) {
+      int64_t ns = static_cast<int64_t>(f.get_timestamp() * 1e6);
+      return rclcpp::Time(ns, RCL_SYSTEM_TIME);
+    }
+    return node->now();
+  };
+
+  auto accel_mtx = std::make_shared<std::mutex>();
+  auto last_accel = std::make_shared<std::array<double, 3>>();
+  auto have_accel = std::make_shared<std::atomic<bool>>(false);
+
+  auto imu = std::make_unique<D435Imu>();
+  imu->sensor = motion;
+  motion.open({gp, ap});
+  motion.start([=](rs2::frame f) {
+    auto mf = f.as<rs2::motion_frame>();
+    if (!mf) return;
+    double v[3];
+    sensor_msgs::msg::Imu m;
+    blank(m);
+    m.header.stamp = stamp_of(f);
+    if (mf.get_profile().stream_type() == RS2_STREAM_ACCEL) {
+      apply(Ra, mf.get_motion_data(), v);
+      {
+        std::lock_guard<std::mutex> l(*accel_mtx);
+        std::copy(v, v + 3, last_accel->begin());
+      }
+      have_accel->store(true);
+      m.linear_acceleration.x = v[0]; m.linear_acceleration.y = v[1]; m.linear_acceleration.z = v[2];
+      m.angular_velocity_covariance[0] = -1.0;
+      pub_a->publish(m);
+      return;
+    }
+    apply(Rg, mf.get_motion_data(), v);
+    m.angular_velocity.x = v[0]; m.angular_velocity.y = v[1]; m.angular_velocity.z = v[2];
+    sensor_msgs::msg::Imu g = m;
+    g.linear_acceleration_covariance[0] = -1.0;
+    pub_g->publish(g);
+    if (!have_accel->load()) return;
+    {
+      std::lock_guard<std::mutex> l(*accel_mtx);
+      m.linear_acceleration.x = (*last_accel)[0];
+      m.linear_acceleration.y = (*last_accel)[1];
+      m.linear_acceleration.z = (*last_accel)[2];
+    }
+    pub_i->publish(m);
+  });
+  imu->running = true;
+  log("CAM RGB " + serial + " : D435i IMU on, gyro " + std::to_string(gp.fps()) + " Hz, accel " +
+      std::to_string(ap.fps()) + " Hz -> /d435/{imu,gyro/sample,accel/sample} (frame d435_camera)");
+  return imu;
+}
+
+void stop_d435_imu(std::unique_ptr<D435Imu> &imu) {
+  if (!imu || !imu->running) return;
+  try {
+    imu->sensor.stop();
+    imu->sensor.close();
+  } catch (const rs2::error &e) {
+    log("D435i IMU stop: " + std::string(e.what()));
+  }
+  imu->running = false;
+}
+
 void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, int port,
                        int width, int height, int fps, bool mjpeg,
                        rclcpp::Node::SharedPtr node,
                        rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub,
-                       bool apriltag, int bitrate_kbps, double apriltag_hz) {
+                       bool apriltag, int bitrate_kbps, double apriltag_hz,
+                       bool imu_enabled, int imu_gyro_hz, int imu_accel_hz) {
   // Camera-neutral copy of the intrinsics, next to the /head_camera/* board
   // topics (the OAK-D streamer publishes the same name for its own camera).
   auto head_info_pub = node->create_publisher<sensor_msgs::msg::CameraInfo>(
@@ -225,12 +376,22 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
     std::unique_lock<std::mutex> init_lock(g_rs_init_mutex);
     log("CAM RGB " + serial + " : starting (camera init serialized)");
     rs2::pipeline_profile profile = pipe.start(cfg);
-    init_lock.unlock();
-
     // Publish the color intrinsics with zero latency: transient_local + reliable
     // latches K so a late-joining consumer sees it immediately, refreshed at ~1 Hz.
     // Same pattern as /oakd/camera_info (see depthai_720p_raw_streamer.cpp).
     auto color_profile = profile.get_stream(RS2_STREAM_COLOR).as<rs2::video_stream_profile>();
+    std::unique_ptr<D435Imu> imu;
+    if (imu_enabled) {
+      try {
+        imu = start_d435_imu(serial, profile.get_device(), color_profile, node,
+                             imu_gyro_hz, imu_accel_hz);
+      } catch (const rs2::error &e) {
+        log("CAM RGB " + serial + " : D435i IMU failed to start (" + std::string(e.what()) +
+            ") -- streaming RGB without it");
+      }
+    }
+    init_lock.unlock();
+
     rs2_intrinsics intr = color_profile.get_intrinsics();
     auto ci = std::make_shared<sensor_msgs::msg::CameraInfo>();
     ci->header.frame_id = "d435_camera";
@@ -350,6 +511,7 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       }
     }
 
+    stop_d435_imu(imu);
     pipe.stop();
   } catch (const rs2::error &e) {
     log("CAM RGB FAILED (rs2::error): " + std::string(e.what()));
@@ -624,6 +786,7 @@ int main(int argc, char **argv) {
                  "[--color-exposure <us>] "
                  "[--color-wb <K>] [--d435-fps <n>] [--d435-codec mjpeg|h264] [--d435-bitrate <kbps>] "
                  "[--d435-apriltag-hz <hz>] [--no-d435-apriltag] "
+                 "[--no-d435-imu] [--d435-imu-gyro-hz <n>] [--d435-imu-accel-hz <n>] "
                  "[--h264|--mjpeg] (default H264)"
               << std::endl;
     return 1;
@@ -634,6 +797,9 @@ int main(int argc, char **argv) {
   bool d435_rgb_enabled = true;
   bool d435_apriltag = true;   // --no-d435-apriltag turns the board tap off
   double d435_apriltag_hz = 15.0;  // detection passes/s (capped by the D435 fps)
+  bool d435_imu = true;        // D435i motion sensor (skipped on a plain D435)
+  int d435_imu_gyro_hz = 200;  // nearest offered rate is used (BMI055: 200/400)
+  int d435_imu_accel_hz = 250; // (63/250, or 100/200 on newer firmware)
   bool dual_rgb_no_depth = false;  // profile: both D405s stream RGB, depth off
   bool disable_left_d405 = false;  // skip the left D405 (cam_idx 0) entirely
   int d435_fps = 0;            // 0 = follow the shared fps
@@ -674,6 +840,16 @@ int main(int argc, char **argv) {
       }
     } else if (arg == "--no-d435-apriltag") {
       d435_apriltag = false;
+    } else if (arg == "--no-d435-imu") {
+      d435_imu = false;
+    } else if (arg == "--d435-imu-gyro-hz") {
+      if (i + 1 < argc) {
+        d435_imu_gyro_hz = std::atoi(argv[++i]);
+      }
+    } else if (arg == "--d435-imu-accel-hz") {
+      if (i + 1 < argc) {
+        d435_imu_accel_hz = std::atoi(argv[++i]);
+      }
     } else if (arg == "--d435-codec") {
       if (i + 1 < argc) {
         d435_mjpeg = std::string(argv[++i]) != "h264";
@@ -776,6 +952,7 @@ int main(int argc, char **argv) {
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
       "  d435_fps=" + std::to_string(d435_fps) +
       "  d435_codec=" + std::string(d435_mjpeg ? "mjpeg" : "h264") +
+      "  d435_imu=" + std::string(d435_imu ? "on" : "off") +
       "  dual_rgb_no_depth=" + std::string(dual_rgb_no_depth ? "on" : "off") +
       "  disable_left_d405=" + std::string(disable_left_d405 ? "on" : "off") +
       "  color_exposure_us=" + std::to_string(color_exposure_us) +
@@ -791,7 +968,8 @@ int main(int argc, char **argv) {
         frames_captured["RGB"];
         threads.emplace_back(stream_camera_rgb, serials[i], dest_ip, rgb_port,
                              1280, 720, d435_fps, d435_mjpeg, node, cam_info_pub, d435_apriltag,
-                             d435_bitrate_kbps, d435_apriltag_hz);
+                             d435_bitrate_kbps, d435_apriltag_hz,
+                             d435_imu, d435_imu_gyro_hz, d435_imu_accel_hz);
       } else {
         log("CAM RGB " + serials[i] + " (D435): --no-d435-rgb -- not opened");
       }
