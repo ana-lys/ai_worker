@@ -29,11 +29,24 @@ CAPTURE (default)
   carries the arms -- make sure they have room to move down. Everything is
   returned to its start pose at the end.
 
+  Each sample also waits for the D435i gyro to be still (--imu-still-s window:
+  |mean| < --imu-still-dps and peak < --imu-peak-dps; lets the ~1 deg head play
+  settle; a timeout skips the step) and records the IMU mean (accel/gyro, d435_camera
+  frame) and base_link -> head_link1/head_link2 (joint pivots + axes).
+  Detection passes whose frame the gyro saw turning (--det-still-dps over
+  --det-motion-pre-s before the capture stamp) are dropped and replaced by later
+  passes, so no smeared detection reaches a sample.
+
 SOLVE
   --solve FILE.jsonl: bundle-style fit of the mount M (6 DOF) plus one board
   pose per base placement, minimising the reprojection of every recorded tag
-  corner (robust soft-L1, 1 px). Prints M as static_transform_publisher args,
-  per-axis 1-sigma, and per-group / worst-sample residuals.
+  corner (robust soft-L1, 1 px). Samples with head_links get per-sample head
+  play (tilt about head_link1 y, pan about head_link2 z, through the pivots;
+  prior --play-sigma-deg). Samples with a still IMU add gravity residuals and
+  solve the IMU->camera rotation correction + floor tilt (soft priors). Prints M
+  as static_transform_publisher args, per-axis 1-sigma, per-group / worst-sample
+  residuals, and writes <input>_solve.json (mount + IMU terms) for
+  head_camera_tf_bridge's runtime IMU tilt correction.
 
     ros2 run ffw_depthai head_cam_calib_capture.py --plan-only
     ros2 run ffw_depthai head_cam_calib_capture.py            # capture
@@ -41,9 +54,12 @@ SOLVE
     ros2 run ffw_depthai head_cam_calib_capture.py --solve ~/head_cam_calib_*.jsonl
 """
 import argparse
+import collections
+import itertools
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -79,6 +95,10 @@ BOARD_LAYOUT = [
     (32, 0.015, 0.09416774058800953, -0.2862785785077211, 0.01,
      -0.022274917428141635, -0.013421948142595262, -0.017686629412183158),
 ]
+
+class NotStill(RuntimeError):
+    """wait_still timed out; walk/grid samples skip the step instead of aborting."""
+
 
 HEAD_TILT_LIMITS = (-0.2317, 0.6951)   # head_joint1, +about y = nose down
 HEAD_PAN_LIMITS = (-0.35, 0.35)        # head_joint2, +about z = look left
@@ -152,8 +172,10 @@ def capture(a):
     from control_msgs.action import FollowJointTrajectory
     from geometry_msgs.msg import TransformStamped, Twist
     from nav_msgs.msg import Odometry
-    from sensor_msgs.msg import CameraInfo, JointState
-    from std_msgs.msg import String
+    from rclpy.qos import qos_profile_sensor_data
+    from sensor_msgs.msg import CameraInfo, Imu, JointState
+    from std_msgs.msg import Bool, String
+    from std_srvs.srv import Trigger
     from trajectory_msgs.msg import JointTrajectoryPoint
     import tf2_ros
 
@@ -169,6 +191,9 @@ def capture(a):
             self.cam_tf = None
             self.dets = []          # (recv_mono, dict)
             self.cmd_vel_others = 0
+            self.acc = collections.deque(maxlen=2000)   # (stamp_s, x, y, z) D435i, d435_camera frame
+            self.gyr = collections.deque(maxlen=2000)
+            self.motion_drops = set()                   # id() of passes dropped for camera motion
             be = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
             latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -178,11 +203,26 @@ def capture(a):
             self.create_subscription(TransformStamped, '/head_camera_tf', self.on_tf, latched)
             self.create_subscription(String, f'{a.ns}/apriltag_detections', self.on_det, be)
             self.create_subscription(Twist, '/cmd_vel', self.on_cmd_vel, 10)
+            self.imu_subs = [
+                self.create_subscription(Imu, a.imu_ns + '/accel/sample', self.on_acc, qos_profile_sensor_data),
+                self.create_subscription(Imu, a.imu_ns + '/gyro/sample', self.on_gyr, qos_profile_sensor_data)]
             self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
             self.head_ac = ActionClient(self, FollowJointTrajectory,
                                         '/head_controller/follow_joint_trajectory')
             self.lift_ac = ActionClient(self, FollowJointTrajectory,
                                         '/lift_controller/follow_joint_trajectory')
+            # lift through ffw_ik_solver_teleop (it streams the lift itself, overriding
+            # lift_controller goals): its qpos rail, as ik_solver_cli / ee_handover_episodes
+            self.goal_source_pub = self.create_publisher(String, '/teleop_goal_source', 10)
+            self.rail_pub = self.create_publisher(JointState, '/qpos_rail', 10)
+            self.locks_pub = self.create_publisher(String, '/teleop_locks', 10)
+            self.hold_pubs = [self.create_publisher(Bool, f'/spacemouse/{n}/external_hold', 10)
+                              for n in ('left', 'right')]
+            self.list_joints = self.create_client(Trigger, '/ik_solver/list_joints')
+            # claim the base from joy_base (SpaceMouse) the way the Logitech base
+            # teleop does: it stays silent on /cmd_vel while this is true
+            self.base_claim_pub = self.create_publisher(Bool, '/logitech/base_active', 10)
+            self.base_claimed = False
             self.tfbuf = tf2_ros.Buffer()
             self.tfl = tf2_ros.TransformListener(self.tfbuf, self)
             self.publishing = False
@@ -223,6 +263,49 @@ def capture(a):
                 self.dets.append((time.monotonic(), d))
                 self.dets = self.dets[-200:]
 
+        def on_acc(self, m):
+            v = m.linear_acceleration
+            with self.lock:
+                self.acc.append((m.header.stamp.sec + m.header.stamp.nanosec * 1e-9, v.x, v.y, v.z))
+
+        def on_gyr(self, m):
+            v = m.angular_velocity
+            with self.lock:
+                self.gyr.append((m.header.stamp.sec + m.header.stamp.nanosec * 1e-9, v.x, v.y, v.z))
+
+        def imu_window(self, secs):
+            """Mean accel / gyro over the newest `secs` (None if no fresh IMU data)."""
+            # newest samples only: copying the whole 2000-sample deques at 50 Hz
+            # starved the executor (0.3 s stalls -> "odom stale" abort, 2026-10-12)
+            n = int(secs * 300) + 20
+            with self.lock:
+                acc = list(itertools.islice(reversed(self.acc), n))[::-1]
+                gyr = list(itertools.islice(reversed(self.gyr), n))[::-1]
+            if not acc or not gyr or time.time() - acc[-1][0] > 0.5:
+                return None
+            t_end = acc[-1][0]
+            A = np.array([r[1:] for r in acc if r[0] >= t_end - secs])
+            G = np.array([r[1:] for r in gyr if r[0] >= t_end - secs])
+            if len(A) < 10 or len(G) < 10:
+                return None
+            return dict(accel=A.mean(0).tolist(), accel_sd=A.std(0).tolist(), gyro=G.mean(0).tolist(),
+                        gyro_peak_dps=float(np.degrees(np.linalg.norm(G, axis=1).max())),
+                        gyro_mean_dps=float(np.degrees(np.linalg.norm(G.mean(0)))),
+                        n_accel=len(A), n_gyro=len(G), window_s=secs, t_end=t_end)
+
+        def gyro_peak(self, t0, t1):
+            """Peak |gyro| [deg/s] over stamps [t0, t1]; None when the IMU does not cover t1."""
+            with self.lock:
+                if not self.gyr or self.gyr[-1][0] < t1:
+                    return None
+                gyr = []
+                for r in reversed(self.gyr):          # newest first; stop past t0
+                    if r[0] < t0:
+                        break
+                    gyr.append(r)
+            w = [math.sqrt(r[1] * r[1] + r[2] * r[2] + r[3] * r[3]) for r in gyr if r[0] <= t1]
+            return float(np.degrees(max(w))) if w else None
+
         def on_cmd_vel(self, m):
             if not self.publishing:
                 self.cmd_vel_others += 1
@@ -261,7 +344,17 @@ def capture(a):
 
     def shutdown():
         # stop the executor thread before tearing rclpy down -- exiting with it
-        # still spinning aborts the interpreter
+        # still spinning aborts the interpreter. The 200+ Hz IMU subscriptions go
+        # first and in-flight callbacks get a moment to drain; otherwise teardown
+        # raced them ("cannot use Destroyable because destruction was requested").
+        if node.base_claimed:
+            for _ in range(5):
+                node.base_claim_pub.publish(Bool(data=False))
+                time.sleep(0.02)
+            node.base_claimed = False
+        for sub in node.imu_subs:
+            node.destroy_subscription(sub)
+        time.sleep(0.2)
         ex.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
@@ -323,9 +416,137 @@ def capture(a):
         send_traj(node.head_ac, ['head_joint1', 'head_joint2'], [tilt, pan],
                   max(a.head_min_s, d / a.head_vmax))
 
+    class LiftRail:
+        """Lift via ffw_ik_solver_teleop's qpos rail while it runs: every solver joint
+        streamed at its position when the capture started (arms frozen in joint space,
+        so the upper body rides the lift as in SpaceMouse BASE mode), only lift_joint
+        ramped at --lift-vmax; SpaceMouse external hold on. stop() restores goal source
+        "ee", releases the hold and puts back a lift lock it removed."""
+        DT = 0.01
+
+        def __init__(self):
+            self.on, self.relock, self.timer = False, False, None
+            self.mtx = threading.Lock()
+
+        def solver_joints(self, timeout=3.0):
+            if not node.list_joints.wait_for_service(timeout_sec=timeout):
+                return None
+            fut = node.list_joints.call_async(Trigger.Request())
+            t0 = time.monotonic()
+            while not fut.done() and time.monotonic() - t0 < timeout:
+                time.sleep(0.01)
+            if not fut.done():
+                return None
+            out = {}
+            for line in fut.result().message.splitlines():
+                m = re.match(r'\s*\[\d+\]\s*\[(.*?)\]\s*(\S+)\s*$', line)
+                if m:
+                    out[m.group(2)] = m.group(1).strip() == 'LOCKED'
+            return out
+
+        def start(self):
+            st = self.solver_joints()
+            if not st or 'lift_joint' not in st:
+                log('lift: no ffw_ik_solver_teleop (/ik_solver/list_joints) -- lift_controller action')
+                return False
+            js = node.snap()['js']
+            missing = [n for n in st if n not in js]
+            if missing:
+                raise RuntimeError(f'lift rail: no joint state for {missing}')
+            if st['lift_joint']:
+                node.locks_pub.publish(String(data='lift_joint'))     # toggles
+                for _ in range(40):
+                    time.sleep(0.05)
+                    st2 = self.solver_joints()
+                    if st2 and not st2['lift_joint']:
+                        break
+                else:
+                    raise RuntimeError('lift rail: could not unlock lift_joint in the IK solver')
+                self.relock = True
+            self.hold = {n: float(js[n]) for n in st}
+            self.sp = self.target = self.hold['lift_joint']
+            self.last_hold = 0.0
+            self._send()
+            node.goal_source_pub.publish(String(data='rail'))
+            self.timer = node.create_timer(self.DT, self._tick)
+            self.on = True
+            log(f'lift: IK solver qpos rail ({len(self.hold)} joints held, lift '
+                f'{"unlocked for the run" if self.relock else "already unlocked"})')
+            return True
+
+        def _send(self):
+            m = JointState()
+            m.header.stamp = node.get_clock().now().to_msg()
+            m.name = list(self.hold)
+            m.position = list(self.hold.values())
+            node.rail_pub.publish(m)
+
+        def _tick(self):
+            with self.mtx:
+                step = a.lift_vmax * self.DT
+                self.sp += max(-step, min(step, self.target - self.sp))
+                self.hold['lift_joint'] = self.sp
+            self._send()
+            now = time.monotonic()
+            if now - self.last_hold >= 0.2:
+                for p in node.hold_pubs:
+                    p.publish(Bool(data=True))
+                self.last_hold = now
+
+        def set(self, z):
+            with self.mtx:
+                self.target = float(min(LIFT_LIMITS[1], max(LIFT_LIMITS[0], z)))
+
+        def wait(self, tol=0.003, timeout=None):
+            """Until the ramp is done and the REAL lift is within tol; False on timeout."""
+            dist = abs(self.target - self.sp)
+            t_end = time.monotonic() + (timeout or dist / a.lift_vmax + 5.0)
+            while time.monotonic() < t_end:
+                cur = node.snap()['js'].get('lift_joint')
+                if self.sp == self.target and cur is not None and abs(cur - self.target) < tol:
+                    return True
+                time.sleep(0.02)
+            return False
+
+        def stop(self):
+            if not self.on:
+                return
+            if self.timer is not None:
+                node.destroy_timer(self.timer)
+            node.goal_source_pub.publish(String(data='ee'))
+            for p in node.hold_pubs:
+                p.publish(Bool(data=False))
+            time.sleep(1.0)                                  # solver resyncs to the real joints
+            if self.relock:
+                node.locks_pub.publish(String(data='lift_joint'))
+            self.on = False
+            log('lift: rail released (goal source ee' + (', lift re-locked)' if self.relock else ')'))
+
+    rail = LiftRail()
+
     def move_lift(z):
+        if rail.on:
+            rail.set(z)
+            if not rail.wait():
+                raise RuntimeError(f'lift did not reach {z:+.3f} (at {node.snap()["js"].get("lift_joint")})')
+            return
         cur = node.snap()['js'].get('lift_joint', z)
         send_traj(node.lift_ac, ['lift_joint'], [z], max(0.8, abs(z - cur) / a.lift_vmax))
+
+    def imu_still():
+        """Camera still per the D435i gyro over --imu-still-s (True when there is no IMU)."""
+        w = node.imu_window(a.imu_still_s)
+        return w is None or (w['gyro_mean_dps'] < a.imu_still_dps and w['gyro_peak_dps'] < a.imu_peak_dps)
+
+    def imu_record():
+        w = node.imu_window(a.imu_still_s)
+        if w is not None and not (w['gyro_mean_dps'] < a.imu_still_dps and w['gyro_peak_dps'] < a.imu_peak_dps):
+            w['moving'] = True
+        return w
+
+    def head_links():
+        """base_link -> head_link1 / head_link2 (joint pivots + axes for the play model)."""
+        return {k: node.lookup('base_link', k)[0] for k in ('head_link1', 'head_link2')}
 
     def wait_still(use_base):
         t_still = None
@@ -341,29 +562,49 @@ def capture(a):
                 t_still = None
             elif t_still is None:
                 t_still = time.monotonic()
-            elif time.monotonic() - t_still >= a.still_s:
+            elif time.monotonic() - t_still >= a.still_s and imu_still():
                 # (monotonic, wall) -- wall time is compared with the detector's
                 # cap_stamp (frame capture time on the system clock)
                 return time.monotonic(), time.time()
             time.sleep(0.02)
-        raise RuntimeError('robot never came to rest')
+        w = node.imu_window(a.imu_still_s)
+        imu = (f'; gyro mean {w["gyro_mean_dps"]:.2f} peak {w["gyro_peak_dps"]:.2f} deg/s' if w else '')
+        raise NotStill(f'robot never came to rest in 15 s (joints/odom moving: {moving}{imu})')
 
     def passes_after(t_min, n, timeout):
         """n detection passes whose FRAME was captured after t_min = (mono, wall):
-        by cap_stamp when the detector provides it, else by receive time."""
+        by cap_stamp when the detector provides it, else by receive time.
+        A pass whose frame the gyro saw moving (peak >= --det-still-dps over
+        cap_stamp - --det-motion-pre-s .. cap_stamp + 0.02 s) is dropped; one the
+        IMU does not cover yet waits for it (kept if it never does: no IMU)."""
         mono, wall = t_min if isinstance(t_min, tuple) else (t_min, None)
+
+        def moved(d, tr):
+            cs = d.get('cap_stamp')
+            if not cs:
+                return False
+            if 'cap_gyro_dps' not in d:
+                pk = node.gyro_peak(cs - a.det_motion_pre_s, cs + 0.02)
+                if pk is None and time.monotonic() - tr < 0.5:
+                    return True                 # IMU not there yet: not counted for now
+                d['cap_gyro_dps'] = pk
+            pk = d['cap_gyro_dps']
+            return pk is not None and pk >= a.det_still_dps
 
         def fresh_list():
             with node.lock:
-                out = []
-                for tr, d in node.dets:
-                    cs = d.get('cap_stamp')
-                    if cs and wall is not None:
-                        if cs > wall:
-                            out.append(d)
-                    elif tr > mono:
-                        out.append(d)
-                return out
+                dets = list(node.dets)
+            out = []
+            for tr, d in dets:
+                cs = d.get('cap_stamp')
+                if not (cs > wall if cs and wall is not None else tr > mono):
+                    continue
+                if moved(d, tr):
+                    if d.get('cap_gyro_dps') is not None:
+                        node.motion_drops.add(id(d))
+                    continue
+                out.append(d)
+            return out
         t0 = time.monotonic()
         while time.monotonic() - t0 < timeout:
             fresh = fresh_list()
@@ -387,6 +628,26 @@ def capture(a):
             if d.get('pose'):
                 return d
         return None
+
+    def walk_target(pose, rng):
+        """Walk image target for the board centre: the principal point (camera looking
+        straight at the board) plus a uniform random offset, +-R_u in u and +-R_v in v
+        with R_v = R_u * H / W (tilt range smaller than pan by the 1280:720 aspect).
+        R_u = --walk-aim-frac of the room the board has around the centre before it
+        leaves the --edge-margin; R_v is also clipped to that room."""
+        ci = node.cam_info
+        W, H = ci['w'], ci['h']
+        K = np.array(ci['K']).reshape(3, 3)
+        u0, v0 = K[0, 2], K[1, 2]
+        c, uv, _ = board_px(pose)
+        half_u = max(c[0] - uv[:, 0].min(), uv[:, 0].max() - c[0])
+        half_v = max(c[1] - uv[:, 1].min(), uv[:, 1].max() - c[1])
+        mu, mv = a.edge_margin * W, a.edge_margin * H
+        room_u = max(0.0, min(u0 - (mu + half_u), (W - mu - half_u) - u0))
+        room_v = max(0.0, min(v0 - (mv + half_v), (H - mv - half_v) - v0))
+        r_u = a.walk_aim_frac * room_u
+        r_v = min(r_u * H / W, room_v)
+        return u0 + rng.uniform(-r_u, r_u), v0 + rng.uniform(-r_v, r_v)
 
     def targets_for(pose):
         """Image targets for the board centre, fitted so the whole board stays
@@ -476,8 +737,13 @@ def capture(a):
         return None
 
     def capture_sample():
+        reason = 'no attempt'
         for attempt in range(2):
-            t_rest = wait_still(use_base)
+            try:
+                t_rest = wait_still(use_base)
+            except NotStill as e:
+                reason = str(e)
+                continue
             ps = passes_after(t_rest, a.passes, a.passes / 5.0 + 2.0)
             good = [d for d in ps if d.get('pose') and d['num_tags'] >= a.min_tags
                     and 0 <= d['reproj_px'] <= a.max_reproj and board_in_margin(d['pose'])]
@@ -513,8 +779,12 @@ def capture(a):
         try:
             while True:
                 s = node.snap()
-                if s['odom_age'] is None or s['odom_age'] > 0.3:
-                    raise RuntimeError('odom stale during base motion')
+                if s['odom_age'] is None or s['odom_age'] > 1.0:
+                    # 1 s = the swerve controller's own cmd_vel_timeout; shorter gaps
+                    # are this process stalling, not odom (bag showed none > 0.06 s)
+                    raise RuntimeError(f'odom stale during base motion ({s["odom_age"]} s)')
+                if s['odom_age'] > 0.3:
+                    log(f'  (odom {s["odom_age"]:.2f} s old -- capture process stalled)')
                 o = s['odom']
                 if math.hypot(gx - o['x'], gy - o['y']) > limit:
                     raise RuntimeError('base overshoot guard tripped')
@@ -526,13 +796,17 @@ def capture(a):
                     raise RuntimeError('base move timed out')
                 c, s_ = math.cos(o['yaw']), math.sin(o['yaw'])
                 ex_b, ey_b = c * ex_w + s_ * ey_w, -s_ * ex_w + c * ey_w
-                v = np.array([ex_b, ey_b]) * gain
-                n = np.linalg.norm(v)
-                if n > a.base_vmax:
-                    v *= a.base_vmax / n
+                # ONE scale for translation and rotation: the twist keeps the
+                # error's x:y:yaw ratio, so both finish together and every swerve
+                # module's steering angle (set by that ratio) stays put. Separate
+                # P loops drift the ratio, the steering targets swing, and the
+                # controller zeroes all wheels until every module realigns
+                # (0.57 deg when slow) -- a stop/steer/go tail on every step.
+                k = min(gain, a.base_vmax / max(math.hypot(ex_b, ey_b), 1e-9),
+                        a.base_wmax / max(abs(eyaw), 1e-9))
                 tw = Twist()
-                tw.linear.x, tw.linear.y = float(v[0]), float(v[1])
-                tw.angular.z = float(max(-a.base_wmax, min(a.base_wmax, 1.25 * gain * eyaw)))
+                tw.linear.x, tw.linear.y = float(k * ex_b), float(k * ey_b)
+                tw.angular.z = float(k * eyaw)
                 node.cmd_pub.publish(tw)
                 time.sleep(0.05)
         finally:
@@ -563,13 +837,24 @@ def capture(a):
     s0 = node.snap()
     use_base = not a.no_base
     if use_base:
+        if not a.plan_only:
+            for _ in range(5):
+                node.base_claim_pub.publish(Bool(data=True))
+                time.sleep(0.02)
+            node.base_claimed = True
+            time.sleep(0.3)
+            node.cmd_vel_others = 0              # count only what is still publishing
         time.sleep(1.0)
         s0 = node.snap()
         if not s0['odom'] or s0['odom_age'] > 0.5:
             bail('no live /odom (swerve_drive_controller active?) -- use --no-base')
-        if node.cmd_vel_others:
+        if node.cmd_vel_others and a.plan_only:
+            log(f'note: {node.cmd_vel_others} /cmd_vel msgs/s from another node (a real run silences '
+                'joy_base via /logitech/base_active)')
+        elif node.cmd_vel_others:
             bail(f'{node.cmd_vel_others} /cmd_vel msgs from another node in the last '
-                     'second -- stop that teleop first (or --no-base)')
+                     'second -- stop that teleop first (or --no-base); joy_base is silenced '
+                     'via /logitech/base_active, so this is something else')
     d0 = latest_pose(0, timeout=3.0)
     if d0 is None:
         bail(f'no board pose on {a.ns}/apriltag_detections -- board in view?')
@@ -649,7 +934,8 @@ def capture(a):
     def walk():
         """Medium random steps of base + lift + head together (~0.5 s), one
         still capture after each. The head re-aim compensates the predicted
-        board-bearing change of the base/lift step, plus a random image target."""
+        board-bearing change of the base/lift step, aims the board at the image
+        centre and adds a random offset (walk_target: tilt range = pan range x H/W)."""
         nonlocal n_ok, t_last
         rng = np.random.default_rng(a.seed)
         lo, hi = (float(x) for x in a.walk_lift_range.split(','))
@@ -698,8 +984,7 @@ def capture(a):
             c, _, _ = board_px(pose)
             goal = None
             for _try in range(6):
-                tgts = targets_for(pose)
-                tu, tv = tgts[rng.integers(len(tgts))] if tgts else (c[0], c[1])
+                tu, tv = walk_target(pose, rng)
                 if _try == 5:
                     tu, tv = c[0], c[1]       # last resort: just keep the board where it is
                 d_pan = (az1 - az0) + (math.atan((tu - cx) / fx) - math.atan((c[0] - cx) / fx))
@@ -714,24 +999,50 @@ def capture(a):
                 # head can't follow this base/lift step: undo it, keep head
                 nxt, n_lift, goal = cur.copy(), lift, head0
             # move everything at once
+            ev = {}                                     # wall-clock event times of this step
+
+            def mark(k):
+                ev[k] = time.time()
             t_mv = time.monotonic()
             dh = float(np.max(np.abs(goal - head0)))
-            hh = send_traj(node.head_ac, ['head_joint1', 'head_joint2'], list(goal),
-                           max(a.head_min_s, dh / a.head_vmax), wait=False)
-            hl = send_traj(node.lift_ac, ['lift_joint'], [n_lift],
-                           max(a.head_min_s, abs(n_lift - lift) / a.lift_vmax), wait=False)
+            head_dur = max(a.head_min_s, dh / a.head_vmax)
+            lift_dur = max(a.head_min_s, abs(n_lift - lift) / a.lift_vmax)
+            mark('head_send')
+            hh = send_traj(node.head_ac, ['head_joint1', 'head_joint2'], list(goal), head_dur, wait=False)
+            mark('head_accepted')
+            if rail.on:
+                rail.set(n_lift)
+                hl = None
+            else:
+                hl = send_traj(node.lift_ac, ['lift_joint'], [n_lift], lift_dur, wait=False)
+            mark('lift_accepted')
             if use_base and np.any(nxt != cur):
+                mark('base_start')
                 drive_to(start_odom, nxt[0], nxt[1], nxt[2], gain=a.walk_gain,
                          tol_m=a.walk_tol_m, tol_deg=a.walk_tol_deg)
+                mark('base_done')
             wait_traj(hh)
-            wait_traj(hl)
+            mark('head_result')
+            if hl is not None:
+                wait_traj(hl)
+            elif not rail.wait():
+                raise RuntimeError(f'lift did not follow the rail to {n_lift:+.3f} '
+                                   f'(at {node.snap()["js"].get("lift_joint")})')
+            mark('lift_result')
             t_cap = time.monotonic()
             cur, lift = nxt, n_lift
             good, stab, why = capture_sample()
+            mark('capture_done')
+            write(dict(type='event', mode='walk', step=step, events=ev,
+                       head_goal=[float(g) for g in goal], head_start=[float(h) for h in head0], head_dur=head_dur,
+                       lift_goal=n_lift, lift_dur=lift_dur, base_goal=nxt.tolist(), ok=good is not None))
             t_done = time.monotonic()
             if good is None:
                 # likely drifted out of the margin: re-centre from a fresh pose, retry once
-                d = latest_pose(wait_still(use_base))
+                try:
+                    d = latest_pose(wait_still(use_base))
+                except NotStill as e:
+                    d, why = None, str(e)
                 if d is not None:
                     js = node.snap()['js']
                     if aim(d['pose'], (js['head_joint1'], js['head_joint2']), (cx, cy)) is None:
@@ -747,7 +1058,8 @@ def capture(a):
             write(dict(type='sample', mode='walk', time=time.time(), group='walk', step=step,
                        base_rel=cur.tolist(), lift_target=lift, target_px=[0, 0],
                        odom=snap['odom'], joints=snap['js'], head_camera_tf=snap['cam_tf'],
-                       base_to_calib=calib, tf_err=terr, stability=stab, passes=good))
+                       base_to_calib=calib, tf_err=terr, stability=stab, passes=good,
+                       imu=imu_record(), head_links=head_links()))
             n_ok += 1
             pose = good[-1]['pose']
             Tbi = board_in_base(pose)
@@ -764,6 +1076,7 @@ def capture(a):
             t_last = time.monotonic()
 
     try:
+      rail.start()
       if not a.grid_mode:
         walk()
       else:
@@ -804,7 +1117,8 @@ def capture(a):
                     write(dict(type='sample', time=time.time(), group=g,
                                placement=[dx, dy, dyaw], lift_target=z, target_px=tgt,
                                odom=snap['odom'], joints=snap['js'], head_camera_tf=snap['cam_tf'],
-                               base_to_calib=calib, tf_err=terr, stability=stab, passes=good))
+                               base_to_calib=calib, tf_err=terr, stability=stab, passes=good,
+                               imu=imu_record(), head_links=head_links()))
                     n_ok += 1
                     pose = good[-1]['pose']
                     head0 = (snap['js']['head_joint1'], snap['js']['head_joint2'])
@@ -818,7 +1132,8 @@ def capture(a):
         log('interrupted')
     finally:
         stop_base()
-        log(f'{n_ok} samples written to {out}; returning to start pose')
+        log(f'{n_ok} samples written to {out} ({len(node.motion_drops)} detection passes dropped '
+            f'for camera motion); returning to start pose')
         try:
             move_head(*start_head)
             if start_lift is not None:
@@ -835,6 +1150,10 @@ def capture(a):
         except Exception as e:  # noqa: BLE001
             log(f'return to start failed: {e}')
         stop_base()
+        try:
+            rail.stop()
+        except Exception as e:  # noqa: BLE001
+            log(f'lift rail release failed: {e} -- publish "ee" to /teleop_goal_source')
         f.close()
         shutdown()
 
@@ -867,17 +1186,9 @@ def solve(paths, args):
 
     groups = sorted({s['group'] for s in samples})
     gidx = {g: i for i, g in enumerate(groups)}
+    N, G_ = len(samples), len(groups)
     obs = []  # (sample i, group, 3D board pt, observed uv)
-    A = []    # T_base_calib per sample
     for i, s in enumerate(samples):
-        b = s['base_to_calib']
-        Ai = T_from(quat_to_R(*b['q']), b['t'])
-        if s.get('mode') == 'walk':
-            # walk: the base moves every sample, so the board is fixed in odom
-            # (one pose per run) and odometry carries the base motion
-            o = s['odom']
-            Ai = planar_T(o['x'], o['y'], o['yaw']) @ Ai
-        A.append(Ai)
         for p in s['passes']:
             for tag in p['tags']:
                 tid = int(tag[0])
@@ -887,44 +1198,109 @@ def solve(paths, args):
                 for k in range(4):
                     obs.append((i, gidx[s['group']], BOARD[tid][k], uv[k]))
     si = np.array([o[0] for o in obs])
-    idx_of = [np.flatnonzero(si == i) for i in range(len(samples))]
+    idx_of = [np.flatnonzero(si == i) for i in range(N)]
     gi = np.array([o[1] for o in obs])
     Xb = np.array([o[2] for o in obs])
     UV = np.array([o[3] for o in obs])
-    A = np.array(A)
+    Xh = np.hstack([Xb, np.ones((len(Xb), 1))])
+    n_obs = 2 * len(obs)
+
+    # Per sample: Abc = base_link -> camera_calibration_link (TF, joint-predicted),
+    # Od = planar odom pose for walk samples (the board is fixed in odom there), else I.
+    Abc = np.array([T_from(quat_to_R(*s['base_to_calib']['q']), s['base_to_calib']['t']) for s in samples])
+    Od = np.array([planar_T(s['odom']['x'], s['odom']['y'], s['odom']['yaw']) if s.get('mode') == 'walk'
+                   else np.eye(4) for s in samples])
+    walk_idx = [i for i, s in enumerate(samples) if s.get('mode') == 'walk']
+    walk_arr = np.array(walk_idx, dtype=int)
+    g_of_sample = np.array([gidx[s['group']] for s in samples])
+
+    # Head play (backlash): samples that recorded base_link -> head_link1/2 get a small
+    # rotation about each head joint's axis through its pivot (tilt: head_link1 y, pan:
+    # head_link2 z), soft prior --play-sigma-deg. The board fixes the camera's full pose
+    # per sample, so the play is observable; without it the play leaks into the mount.
+    play_idx = [i for i, s in enumerate(samples)
+                if not args.no_play and s.get('head_links') and all(s['head_links'].get(k) for k in ('head_link1', 'head_link2'))]
+    play_arr = np.array(play_idx, dtype=int)
+    if play_idx:
+        def link(i, k):
+            h = samples[i]['head_links'][k]
+            return quat_to_R(*h['q']), np.array(h['t'])
+        P1 = np.array([link(i, 'head_link1')[1] for i in play_idx])
+        A1 = np.array([link(i, 'head_link1')[0][:, 1] for i in play_idx])
+        P2 = np.array([link(i, 'head_link2')[1] for i in play_idx])
+        A2 = np.array([link(i, 'head_link2')[0][:, 2] for i in play_idx])
+
+    # Gravity: samples with a still IMU window. Measured up (accel direction) is in the
+    # D435i's d435_camera frame == head_camera_frame (factory IMU->color extrinsics);
+    # an IMU->camera rotation correction Ric (3, prior --ic-sigma-deg) and a floor tilt
+    # (2, prior --floor-sigma-deg; up in the samples' frame: odom for walk, base_link
+    # otherwise) are solved with it.
+    grav_idx = [i for i, s in enumerate(samples)
+                if not args.no_imu and s.get('imu') and not s['imu'].get('moving')]
+    grav_arr = np.array(grav_idx, dtype=int)
+    use_imu = len(grav_idx) >= 3
+    if use_imu:
+        U_meas = np.array([np.array(samples[i]['imu']['accel']) / np.linalg.norm(samples[i]['imu']['accel'])
+                           for i in grav_idx])
+        g_norm = np.array([np.linalg.norm(samples[i]['imu']['accel']) for i in grav_idx])
 
     m0 = header.get('mount_calib_to_head_camera')
-    if m0:
-        M0 = T_from(quat_to_R(*m0['q']), m0['t'])
-    else:
-        M0 = np.eye(4)
+    M0 = T_from(quat_to_R(*m0['q']), m0['t']) if m0 else np.eye(4)
 
-    # initial board pose per group: median over its samples of A @ M0 @ T_cam_board
     def T_cam_board(p):
         return T_from(quat_to_R(*p['pose']['q']), p['pose']['t'])
-    x0 = [*M0[:3, 3], *R_to_rotvec(M0[:3, :3])]
-    for g in groups:
-        Ts = [A[i] @ M0 @ T_cam_board(s['passes'][0]) for i, s in enumerate(samples) if s['group'] == g]
-        x0 += [*np.median([T[:3, 3] for T in Ts], axis=0), *R_to_rotvec(Ts[0][:3, :3])]
-    x0 = np.array(x0)
 
-    walk_idx = [i for i, s in enumerate(samples) if s.get('mode') == 'walk']
+    # parameter layout
+    o_B = 6
+    nb = 6 + 6 * G_
+    o_ic = nb
+    o_fl = nb + 3
+    n_glob = nb + (5 if use_imu else 0)
+    o_pl = n_glob
+    o_wc = o_pl + 2 * len(play_idx)
+    n_x = o_wc + 3 * len(walk_idx)
+    play_pos = {i: k for k, i in enumerate(play_idx)}
     walk_pos = {i: k for k, i in enumerate(walk_idx)}
-    A_base = [None] * len(samples)    # walk: odom @ base_to_calib split for corrections
-    for i in walk_idx:
-        o = samples[i]['odom']
-        b = samples[i]['base_to_calib']
-        A_base[i] = (planar_T(o['x'], o['y'], o['yaw']), T_from(quat_to_R(*b['q']), b['t']))
 
-    # Vectorised: every sample's camera pose in one batched op, every corner
-    # projected at once (was a Python loop over samples).
-    A_stack = np.array(A)
-    walk_arr = np.array(walk_idx, dtype=int)
-    if walk_idx:
-        Od_st = np.array([A_base[i][0] for i in walk_idx])
-        Abc_st = np.array([A_base[i][1] for i in walk_idx])
-    g_of_sample = np.array([gidx[s['group']] for s in samples])
-    Xh = np.hstack([Xb, np.ones((len(Xb), 1))])
+    # initial values: mount from the recorded TF, boards from the median detection,
+    # walk corrections anchored at each run's first walk sample (as before)
+    x0 = np.zeros(n_x)
+    x0[0:3], x0[3:6] = M0[:3, 3], R_to_rotvec(M0[:3, :3])
+    A0 = Od @ Abc
+    for g in groups:
+        Ts = [A0[i] @ M0 @ T_cam_board(s['passes'][0]) for i, s in enumerate(samples) if s['group'] == g]
+        k = gidx[g]
+        x0[o_B + 6 * k:o_B + 6 * k + 3] = np.median([T[:3, 3] for T in Ts], axis=0)
+        x0[o_B + 6 * k + 3:o_B + 6 * k + 6] = R_to_rotvec(Ts[0][:3, :3])
+    anchor = {}
+    for k, i in enumerate(walk_idx):
+        T_base_board = Abc[i] @ M0 @ T_cam_board(samples[i]['passes'][0])
+        g = samples[i]['group']
+        if g not in anchor:
+            anchor[g] = Od[i] @ T_base_board            # board in odom
+        C = np.linalg.inv(Od[i]) @ anchor[g] @ np.linalg.inv(T_base_board)
+        x0[o_wc + 3 * k:o_wc + 3 * k + 3] = [C[0, 3], C[1, 3], math.atan2(C[1, 0], C[0, 0])]
+    for g, Tb0 in anchor.items():
+        k = gidx[g]
+        x0[o_B + 6 * k:o_B + 6 * k + 3] = Tb0[:3, 3]
+        x0[o_B + 6 * k + 3:o_B + 6 * k + 6] = R_to_rotvec(Tb0[:3, :3])
+
+    def rot_batch(ax, th):
+        """Rodrigues for N unit axes (N,3) and angles (N,) -> (N,3,3)."""
+        K = np.zeros((len(ax), 3, 3))
+        K[:, 0, 1], K[:, 0, 2], K[:, 1, 2] = -ax[:, 2], ax[:, 1], -ax[:, 0]
+        K[:, 1, 0], K[:, 2, 0], K[:, 2, 1] = ax[:, 2], -ax[:, 1], ax[:, 0]
+        s_, c_ = np.sin(th)[:, None, None], np.cos(th)[:, None, None]
+        return np.eye(3)[None] + s_ * K + (1 - c_) * (K @ K)
+
+    def rot_at(p, ax, th):
+        """(N,4,4): rotation by th about the axis ax through point p."""
+        T = np.zeros((len(ax), 4, 4))
+        R = rot_batch(ax, th)
+        T[:, :3, :3] = R
+        T[:, :3, 3] = p - np.einsum('nij,nj->ni', R, p)
+        T[:, 3, 3] = 1.0
+        return T
 
     def planar_batch(c):
         cy, sy = np.cos(c[:, 2]), np.sin(c[:, 2])
@@ -934,100 +1310,131 @@ def solve(paths, args):
         T[:, 2, 2] = T[:, 3, 3] = 1.0
         return T
 
-    def residual_core(x, wc=None):
+    def cam_poses(x):
+        """(N,4,4) camera_calibration_link in each sample's group frame, and M."""
         M = T_from(rotvec_to_R(x[3:6]), x[0:3])
-        Tb = np.array([T_from(rotvec_to_R(x[6 + 6 * k + 3:6 + 6 * k + 6]), x[6 + 6 * k:6 + 6 * k + 3])
-                       for k in range(len(groups))])
-        As = A_stack
-        if wc is not None and walk_idx:
-            As = A_stack.copy()
-            As[walk_arr] = Od_st @ planar_batch(wc.reshape(-1, 3)) @ Abc_st
-        T = np.linalg.inv(As @ M) @ Tb[g_of_sample]          # (N, 4, 4) T_cam_board
-        P = np.einsum('oij,oj->oi', T[si, :3, :], Xh)        # (O, 3)
-        uv = (P[:, :2] / P[:, 2:3]) * K[[0, 1], [0, 1]] + K[[0, 1], [2, 2]]
-        return (uv - UV).ravel()
+        Ab = Abc
+        if play_idx:
+            d = x[o_pl:o_wc].reshape(-1, 2)
+            Ab = Abc.copy()
+            Ab[play_arr] = rot_at(P1, A1, d[:, 0]) @ rot_at(P2, A2, d[:, 1]) @ Abc[play_arr]
+        Odx = Od
+        if walk_idx:
+            Odx = Od.copy()
+            Odx[walk_arr] = Od[walk_arr] @ planar_batch(x[o_wc:].reshape(-1, 3))
+        return Odx @ Ab, M
+
+    sig_g = math.radians(args.grav_sigma_deg)
 
     def residual(x):
-        return residual_core(x)
+        A, M = cam_poses(x)
+        Tb = np.array([T_from(rotvec_to_R(x[o_B + 6 * k + 3:o_B + 6 * k + 6]), x[o_B + 6 * k:o_B + 6 * k + 3])
+                       for k in range(G_)])
+        AM = A @ M
+        T = np.linalg.inv(AM) @ Tb[g_of_sample]                  # (N,4,4) T_cam_board
+        P = np.einsum('oij,oj->oi', T[si, :3, :], Xh)
+        uv = (P[:, :2] / P[:, 2:3]) * K[[0, 1], [0, 1]] + K[[0, 1], [2, 2]]
+        out = [(uv - UV).ravel()]
+        if walk_idx:
+            out.append(x[o_wc:].reshape(-1, 3)[:, :2].ravel() / args.odom_sigma_m)
+        if play_idx:
+            out.append(x[o_pl:o_wc] / math.radians(args.play_sigma_deg))
+        if use_imu:
+            out.append(x[o_ic:o_ic + 3] / math.radians(args.ic_sigma_deg))
+            out.append(x[o_fl:o_fl + 2] / math.radians(args.floor_sigma_deg))
+            up = rotvec_to_R([x[o_fl], x[o_fl + 1], 0.0]) @ np.array([0.0, 0.0, 1.0])
+            Rc = AM[grav_arr, :3, :3]
+            pred = np.einsum('nji,j->ni', Rc, up)                    # up in the camera
+            meas = U_meas @ rotvec_to_R(x[o_ic:o_ic + 3]).T
+            out.append((pred - meas).ravel() / sig_g)
+        return np.concatenate(out)
 
-    r0 = residual(x0) if not walk_idx else None
+    # Jacobian sparsity
+    from scipy.sparse import lil_matrix
+    n_res = residual(x0).size
+    sp = lil_matrix((n_res, n_x), dtype=int)
+    for i in range(N):
+        rows = np.concatenate([2 * idx_of[i], 2 * idx_of[i] + 1])
+        sp[rows, 0:6] = 1
+        k = g_of_sample[i]
+        sp[rows, o_B + 6 * k:o_B + 6 * k + 6] = 1
+        if i in play_pos:
+            sp[rows, o_pl + 2 * play_pos[i]:o_pl + 2 * play_pos[i] + 2] = 1
+        if i in walk_pos:
+            sp[rows, o_wc + 3 * walk_pos[i]:o_wc + 3 * walk_pos[i] + 3] = 1
+    r_ = n_obs
+    for k in range(len(walk_idx)):
+        sp[r_ + 2 * k, o_wc + 3 * k] = 1
+        sp[r_ + 2 * k + 1, o_wc + 3 * k + 1] = 1
+    r_ += 2 * len(walk_idx)
+    for k in range(2 * len(play_idx)):
+        sp[r_ + k, o_pl + k] = 1
+    r_ += 2 * len(play_idx)
+    if use_imu:
+        for k in range(5):
+            sp[r_ + k, o_ic + k] = 1
+        r_ += 5
+        for k, i in enumerate(grav_idx):
+            rows = np.arange(r_ + 3 * k, r_ + 3 * k + 3)
+            sp[rows, 3:6] = 1
+            sp[rows, o_ic:o_ic + 5] = 1
+            if i in play_pos:
+                sp[rows, o_pl + 2 * play_pos[i]:o_pl + 2 * play_pos[i] + 2] = 1
+            if i in walk_pos:
+                sp[rows, o_wc + 3 * walk_pos[i]:o_wc + 3 * walk_pos[i] + 3] = 1
+
+    rr0 = residual(x0)
+    r0 = rr0[:n_obs]
+    # tolerances: 1e-6 relative is ~0.01 mm / 0.001 deg on the mount
+    res = least_squares(residual, x0, loss='soft_l1', f_scale=1.0, max_nfev=300,
+                        jac_sparsity=sp, x_scale='jac', ftol=args.tol, xtol=args.tol, gtol=args.tol)
+    xs = res.x
+    J = res.jac
+    s2 = float(np.sum(res.fun[:n_obs] ** 2) / max(1, n_obs - n_x))
+    try:
+        JTJ = J.T @ J
+        JTJ = JTJ.toarray() if hasattr(JTJ, 'toarray') else JTJ
+        cov = np.linalg.pinv(JTJ) * s2
+        sd_all = np.sqrt(np.abs(np.diag(cov)))
+    except np.linalg.LinAlgError:
+        sd_all = np.full(n_x, np.nan)
+    sd = sd_all[:6]
     if walk_idx:
-        # Walk samples: odometry yaw drifts (2026-10-09: ~14 deg over a 300-step
-        # run), so every walk sample gets its own planar base correction
-        # (dx, dy, dyaw) on top of odom -- yaw free, x/y with a soft prior.
-        nb = 6 + 6 * len(groups)
-        # initial corrections from vision, anchored at each run's first walk
-        # sample (odom is exact there): base pose that puts the board where
-        # that first sample saw it
-        wc0 = np.zeros(3 * len(walk_idx))
-        anchor = {}
-        for k, i in enumerate(walk_idx):
-            Odom, Abc = A_base[i]
-            T_base_board = Abc @ M0 @ T_cam_board(samples[i]['passes'][0])
-            g = samples[i]['group']
-            if g not in anchor:
-                anchor[g] = Odom @ T_base_board            # board in odom
-            T_odom_base = anchor[g] @ np.linalg.inv(T_base_board)
-            C = np.linalg.inv(Odom) @ T_odom_base
-            wc0[3 * k:3 * k + 3] = [C[0, 3], C[1, 3], math.atan2(C[1, 0], C[0, 0])]
-        for g, Tb0 in anchor.items():
-            k = gidx[g]
-            x0[6 + 6 * k:6 + 6 * k + 3] = Tb0[:3, 3]
-            x0[6 + 6 * k + 3:6 + 6 * k + 6] = R_to_rotvec(Tb0[:3, :3])
-        x0w = np.concatenate([x0, wc0])
-
-        def residual_w(x):
-            r = residual_core(x[:nb], x[nb:])
-            prior = x[nb:].reshape(-1, 3)[:, :2].ravel() / args.odom_sigma_m
-            return np.concatenate([r, prior])
-        from scipy.sparse import lil_matrix
-        n_obs = 2 * len(obs)
-        sp = lil_matrix((n_obs + 2 * len(walk_idx), x0w.size), dtype=int)
-        sp[:, :nb] = 1
-        for k, i in enumerate(walk_idx):
-            rows = np.concatenate([2 * idx_of[i], 2 * idx_of[i] + 1])
-            for c in range(3):
-                sp[rows, nb + 3 * k + c] = 1
-            sp[n_obs + 2 * k, nb + 3 * k] = 1
-            sp[n_obs + 2 * k + 1, nb + 3 * k + 1] = 1
-        r0 = residual_w(x0w)[:n_obs]
-        # tolerances: 1e-6 relative is ~0.01 mm / 0.001 deg on the mount --
-        # the 1e-8 defaults spent ~300 iterations polishing far below that
-        res = least_squares(residual_w, x0w, loss='soft_l1', f_scale=1.0, max_nfev=300,
-                            jac_sparsity=sp, x_scale='jac',
-                            ftol=args.tol, xtol=args.tol, gtol=args.tol)
-        # mount covariance with the per-sample base unknowns marginalised
-        J = res.jac          # sparse: never densify the full (obs x params) matrix
-        dof_w = max(1, n_obs - res.x.size)
-        s2w = float(np.sum(res.fun[:n_obs] ** 2) / dof_w)
-        try:
-            JTJ = J.T @ J
-            JTJ = JTJ.toarray() if hasattr(JTJ, 'toarray') else JTJ
-            cov_w = np.linalg.pinv(JTJ) * s2w
-            sd_override = np.sqrt(np.diag(cov_w)[:6])
-        except np.linalg.LinAlgError:
-            sd_override = None
-        wcs = res.x[nb:].reshape(-1, 3)
+        wcs = xs[o_wc:].reshape(-1, 3)
         print(f'walk base corrections vs odom: |xy| median {1000 * np.median(np.hypot(wcs[:, 0], wcs[:, 1])):.0f} mm, '
               f'yaw range {math.degrees(wcs[:, 2].min()):+.1f}..{math.degrees(wcs[:, 2].max()):+.1f} deg')
-        res.fun = res.fun[:n_obs]
-        Jm = J[:n_obs, :nb]
-        res.jac = Jm.toarray() if hasattr(Jm, 'toarray') else Jm
-        res.x = res.x[:nb]
+    if play_idx:
+        d = np.degrees(xs[o_pl:o_wc].reshape(-1, 2))
+        print(f'head play over {len(play_idx)} samples (prior {args.play_sigma_deg} deg): '
+              f'tilt {d[:, 0].min():+.3f}..{d[:, 0].max():+.3f} (rms {np.sqrt(np.mean(d[:, 0] ** 2)):.3f}), '
+              f'pan {d[:, 1].min():+.3f}..{d[:, 1].max():+.3f} (rms {np.sqrt(np.mean(d[:, 1] ** 2)):.3f}) deg')
     else:
-        sd_override = None
-        res = least_squares(residual, x0, loss='soft_l1', f_scale=1.0, max_nfev=200)
+        print('head play: not modelled (no head_link1/2 in the samples, or --no-play)')
+    imu_out = None
+    if use_imu:
+        ic = xs[o_ic:o_ic + 3]
+        fl = xs[o_fl:o_fl + 2]
+        rg = res.fun[-3 * len(grav_idx):].reshape(-1, 3) * sig_g
+        rg0 = rr0[-3 * len(grav_idx):].reshape(-1, 3) * sig_g
+        ang = lambda r: np.degrees(np.linalg.norm(r, axis=1))
+        print(f'IMU: {len(grav_idx)} gravity samples, |a| {g_norm.min():.3f}..{g_norm.max():.3f} m/s^2; '
+              f'gravity residual {np.sqrt(np.mean(ang(rg0) ** 2)):.3f} -> {np.sqrt(np.mean(ang(rg) ** 2)):.3f} deg rms '
+              f'(max {ang(rg).max():.3f})')
+        print(f'  IMU -> camera correction rotvec {np.degrees(ic).round(3)} deg '
+              f'(|{math.degrees(np.linalg.norm(ic)):.3f}|, 1-sigma {np.degrees(sd_all[o_ic:o_ic + 3]).round(3)})')
+        print(f'  floor tilt (up in the sample frame) rotvec x {math.degrees(fl[0]):+.3f} y {math.degrees(fl[1]):+.3f} deg '
+              f'(1-sigma {np.degrees(sd_all[o_fl:o_fl + 2]).round(3)})')
+        imu_out = dict(imu_cam_rotvec=ic.tolist(), floor_up_rotvec=[float(fl[0]), float(fl[1]), 0.0],
+                       imu_cam_sigma=sd_all[o_ic:o_ic + 3].tolist(), floor_sigma=sd_all[o_fl:o_fl + 2].tolist(),
+                       n_gravity=len(grav_idx),
+                       gravity_rms_deg=float(np.sqrt(np.mean(ang(rg) ** 2))))
+    else:
+        print('IMU: not used (fewer than 3 still IMU samples, or --no-imu)')
+    res.fun = res.fun[:n_obs]
+    res.x = xs
+
     r = res.fun.reshape(-1, 2)
     px = np.linalg.norm(r, axis=1)
-    dof = max(1, r.size - res.x.size)
-    s2 = float(np.sum(res.fun ** 2) / dof)
-    try:
-        cov = np.linalg.inv(res.jac.T @ res.jac) * s2
-        sd = np.sqrt(np.diag(cov)[:6])
-    except np.linalg.LinAlgError:
-        sd = np.full(6, np.nan)
-    if sd_override is not None:
-        sd = sd_override
     M = T_from(rotvec_to_R(res.x[3:6]), res.x[0:3])
     # static_transform_publisher roll/pitch/yaw: R = Rz(yaw) Ry(pitch) Rx(roll)
     R = M[:3, :3]
@@ -1063,6 +1470,16 @@ def solve(paths, args):
         s = samples[i]
         print(f'  {v:6.2f}  #{i}  g{s["group"]}  lift {s["lift_target"]:+.2f}  '
               f'({s["target_px"][0]:.0f},{s["target_px"][1]:.0f})')
+    out_path = os.path.expanduser(args.solve_out) if args.solve_out else         os.path.splitext(os.path.expanduser(paths[0]))[0] + '_solve.json'
+    with open(out_path, 'w') as fh:
+        json.dump(dict(inputs=list(paths), time=time.time(), mount=dict(
+            t=M[:3, 3].tolist(), roll=roll, pitch=pitch, yaw=yaw,
+            sigma_mm=(sd[:3] * 1000).tolist(), sigma_deg=np.degrees(sd[3:6]).tolist()),
+            reproj_rms_px=float(np.sqrt(np.mean(px ** 2))), imu=imu_out,
+            play_deg=(np.degrees(res.x[o_pl:o_wc]).reshape(-1, 2).tolist() if play_idx else None),
+            play_sample_index=play_idx), fh, indent=1)
+    print(f'saved {out_path}' + ('' if imu_out is None else
+          '  (head_camera_tf_bridge imu_calib_file: the runtime IMU tilt correction reads it)'))
 
 
 def main():
@@ -1070,6 +1487,14 @@ def main():
     ap.add_argument('--tol', type=float, default=1e-6, help='solve: ftol/xtol/gtol')
     ap.add_argument('--odom-sigma-m', type=float, default=0.03,
                     help='solve: soft prior on walk samples\' x/y odometry (yaw is free)')
+    ap.add_argument('--no-play', action='store_true', help='solve: no per-sample head play unknowns')
+    ap.add_argument('--play-sigma-deg', type=float, default=0.5,
+                    help='solve: prior on the per-sample tilt/pan play (2026-10-12: ~1 deg tilt, ~0.5 pan)')
+    ap.add_argument('--no-imu', action='store_true', help='solve: ignore the IMU gravity')
+    ap.add_argument('--grav-sigma-deg', type=float, default=0.05, help='solve: gravity direction noise')
+    ap.add_argument('--ic-sigma-deg', type=float, default=1.0, help='solve: prior on the IMU->camera correction')
+    ap.add_argument('--floor-sigma-deg', type=float, default=1.0, help='solve: prior on the floor tilt')
+    ap.add_argument('--solve-out', default='', help='solve: result json (default <first input>_solve.json)')
     ap.add_argument('--solve', metavar='JSONL', nargs='+',
                     help='solve one or more capture files instead of capturing')
     ap.add_argument('--ns', default='/head_camera',
@@ -1109,6 +1534,9 @@ def main():
     ap.add_argument('--head-vmax', type=float, default=0.8)
     ap.add_argument('--head-min-s', type=float, default=0.25, help='shortest head move [s]')
     ap.add_argument('--grid', type=int, default=5, help='NxN board-centre image targets')
+    ap.add_argument('--walk-aim-frac', type=float, default=0.6,
+                    help='walk: random board-centre offset around the principal point, as a fraction '
+                         'of the room before the board leaves --edge-margin (tilt range = pan range x H/W)')
     ap.add_argument('--grid-span', type=float, default=0.6,
                     help='fraction of the board-fits-in-margin range the grid spans (1 = edge to edge)')
     ap.add_argument('--edge-margin', type=float, default=0.08,
@@ -1120,6 +1548,18 @@ def main():
     ap.add_argument('--servo-gain', type=float, default=0.9)
     ap.add_argument('--joint-margin', type=float, default=0.03, help='rad off head limits')
     ap.add_argument('--still-s', type=float, default=0.15)
+    ap.add_argument('--imu-ns', default='/d435', help='D435i IMU topics: <ns>/{accel,gyro}/sample')
+    ap.add_argument('--imu-still-s', type=float, default=0.5,
+                    help='capture: gyro window that must be still (head play settles) [s]')
+    ap.add_argument('--imu-still-dps', type=float, default=0.3,
+                    help='capture: |mean gyro| over --imu-still-s below [deg/s] (residual bias ~0.14 at rest)')
+    ap.add_argument('--imu-peak-dps', type=float, default=5.0,
+                    help='capture: gyro peak over --imu-still-s below [deg/s] (noise spikes reach ~3.4 at rest)')
+    ap.add_argument('--det-still-dps', type=float, default=1.0,
+                    help='capture: drop a detection pass whose frame saw a gyro peak above this '
+                         '[deg/s] (1 deg/s ~ 0.5 px blur at 30 ms exposure)')
+    ap.add_argument('--det-motion-pre-s', type=float, default=0.1,
+                    help='capture: gyro window before the frame capture stamp (exposure + readout) [s]')
     ap.add_argument('--still-joint-vel', type=float, default=0.005)
     ap.add_argument('--passes', type=int, default=2)
     ap.add_argument('--min-tags', type=int, default=4,

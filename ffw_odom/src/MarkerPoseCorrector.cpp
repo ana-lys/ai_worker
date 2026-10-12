@@ -13,6 +13,14 @@
 //      the EKF's pose input wants "base_link's pose expressed in the world
 //      (marker_frame) frame", not "the marker's pose expressed in base_link".
 //
+// Motion de-weighting (gyro_topic non-empty, default the head D435i gyro): a
+// detection taken while the camera turns is smeared and composed with a
+// /head_camera_tf from a slightly different moment, so it is still used but
+// with inflated covariance. err = peak |gyro| over the motion_window_s before
+// the detection stamp (the stamp is detection end; the window spans exposure
+// + detection latency) x motion_dt_s; added variance: yaw/roll/pitch err^2,
+// position (|board range| x err)^2. Missing / stale gyro = nominal covariance.
+//
 // This node does NOT broadcast any TF itself -- the ekf_node it feeds does
 // that (publish_tf: true in marker_ekf.yaml), producing a smooth, high-rate
 // marker_frame <-> base_link transform instead of a jerky 4-5 Hz relay.
@@ -20,8 +28,13 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
+
+#include <cmath>
+#include <deque>
+#include <utility>
 
 class MarkerPoseCorrectorNode : public rclcpp::Node {
 public:
@@ -34,6 +47,20 @@ public:
     position_stddev_m_ = declare_parameter<double>("position_stddev_m", 0.02);
     yaw_stddev_rad_ = declare_parameter<double>("yaw_stddev_rad", 0.05);
     orientation_stddev_rad_ = declare_parameter<double>("orientation_stddev_rad", 0.1);
+    gyro_topic_ = declare_parameter<std::string>("gyro_topic", "/d435/gyro/sample");
+    motion_window_s_ = declare_parameter<double>("motion_window_s", 0.25);
+    motion_dt_s_ = declare_parameter<double>("motion_dt_s", 0.1);
+
+    if (!gyro_topic_.empty()) {
+      gyro_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+        gyro_topic_, rclcpp::SensorDataQoS(),
+        [this](const sensor_msgs::msg::Imu::SharedPtr m) {
+          const auto &w = m->angular_velocity;
+          double t = rclcpp::Time(m->header.stamp).seconds();
+          gyro_.emplace_back(t, std::sqrt(w.x * w.x + w.y * w.y + w.z * w.z));
+          while (!gyro_.empty() && gyro_.front().first < t - 2.0) gyro_.pop_front();
+        });
+    }
 
     pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       output_topic_, rclcpp::QoS(5));
@@ -46,9 +73,22 @@ public:
       "marker_pose_corrector: %s -> %s, yaw_offset=%.3f rad, sub=%s pub=%s",
       source_frame_.c_str(), child_frame_.c_str(), yaw_offset_,
       input_topic_.c_str(), output_topic_.c_str());
+    RCLCPP_INFO(get_logger(), "motion de-weighting: gyro=%s window=%.2f s dt=%.3f s",
+      gyro_topic_.empty() ? "(off)" : gyro_topic_.c_str(), motion_window_s_, motion_dt_s_);
   }
 
 private:
+  // Peak |gyro| [rad/s] over (t - motion_window_s, t]; < 0 when unknown (no
+  // samples there, or the newest is older than t - motion_window_s).
+  double peakRate(double t) const {
+    if (gyro_.empty() || gyro_.back().first < t - motion_window_s_) return -1.0;
+    double peak = -1.0;
+    for (auto it = gyro_.rbegin(); it != gyro_.rend() && it->first > t - motion_window_s_; ++it) {
+      if (it->first <= t) peak = std::max(peak, it->second);
+    }
+    return peak;
+  }
+
   void poseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
     if (msg->header.frame_id != source_frame_) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
@@ -100,11 +140,32 @@ private:
     out.pose.covariance[28] = ang_var;  // pitch
     out.pose.covariance[35] = yaw_var;  // yaw
 
+    // Motion de-weighting (see header).
+    const double w = peakRate(rclcpp::Time(msg->header.stamp).seconds());
+    if (w > 0.0) {
+      const double err = w * motion_dt_s_;
+      const double range = std::sqrt(msg->pose.position.x * msg->pose.position.x +
+                                     msg->pose.position.y * msg->pose.position.y +
+                                     msg->pose.position.z * msg->pose.position.z);
+      const double dpos = (range * err) * (range * err);
+      for (int i : {0, 7, 14}) out.pose.covariance[i] += dpos;
+      for (int i : {21, 28, 35}) out.pose.covariance[i] += err * err;
+      if (std::sqrt(dpos) > position_stddev_m_) {
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+          "camera moving (%.1f deg/s): marker position stddev %.3f -> %.3f m",
+          w * 180.0 / M_PI, position_stddev_m_, std::sqrt(pos_var + dpos));
+      }
+    }
+
     pose_pub_->publish(out);
   }
 
   std::string source_frame_, child_frame_, input_topic_, output_topic_;
   double yaw_offset_, position_stddev_m_, yaw_stddev_rad_, orientation_stddev_rad_;
+  std::string gyro_topic_;
+  double motion_window_s_, motion_dt_s_;
+  std::deque<std::pair<double, double>> gyro_;  // (stamp s, |w| rad/s), last 2 s
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr gyro_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
 };

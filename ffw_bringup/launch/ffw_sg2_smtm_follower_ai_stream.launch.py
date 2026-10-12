@@ -59,14 +59,20 @@ def _detect_head_camera_label():
 # D435 mount relative to camera_calibration_link (an OPTICAL frame: x right,
 # y down, z forward, at the old ZED-M centre). Nominal was the RGB lens centred
 # there, pitched 15 deg nose-down = roll -15 deg about optical x.
-# Calibrated 2026-10-09 with ffw_depthai head_cam_calib_capture.py --solve over
-# 452 still samples: 155 grid samples (7 base placements x 3 lift heights x
-# head grid) + a 297-step walk (base/lift/head stepping together, base pose
-# per sample free since odom yaw drifted ~14 deg), every tag corner, 1.89 px
-# RMS. Camera ~32 mm forward, ~17 mm left, 15.8 deg down, ~1 deg yaw; the
-# grid-only solve agreed to < 0.1 deg and 6-9 mm sideways/vertical.
-D435_HEAD_CAM_TF = ['--x', '-0.016554', '--y', '0.003038', '--z', '0.031490',
-                    '--roll', '-0.275189', '--pitch', '-0.010889', '--yaw', '0.016625']
+# Calibrated 2026-10-12 (camera re-seated after its IMU calibration) with
+# ffw_depthai head_cam_calib_capture.py --solve over 418 still samples: 120 grid
+# samples (7 base placements x 3 lift heights x 3x3 head grid; fixed-base head
+# sweeps pin the translation) + a 298-step walk (lift +-10 cm through the IK
+# solver's qpos rail), every tag corner, per-sample head play modelled (tilt
+# about head_joint1 / pan about head_joint2 through their pivots) and D435i
+# gravity: 0.77 px RMS. Variants (no IMU / grid only) agree within ~5 mm and
+# ~0.3 deg; without the play model pitch/yaw move ~1 deg and RMS is 1.86 px.
+# The mount is the average pose: per-pose head play (tilt ~1 deg) remains.
+# Solve: ~/head_cam_calib/head_cam_calib_20261012_grid_walk_imu_solve.json
+# (previous, 2026-10-09: x -0.016554 y 0.003038 z 0.031490, roll -0.275189
+# pitch -0.010889 yaw 0.016625).
+D435_HEAD_CAM_TF = ['--x', '-0.025010', '--y', '0.014366', '--z', '0.027202',
+                    '--roll', '-0.250984', '--pitch', '0.007043', '--yaw', '0.032441']
 
 
 def generate_launch_description():
@@ -81,6 +87,9 @@ def generate_launch_description():
                               description='Enable mock sensor commands.'),
         DeclareLaunchArgument('port_name', default_value='/dev/follower',
                               description='Port name for hardware connection.'),
+        DeclareLaunchArgument('head_cam_imu_calib', default_value='',
+                              description='Mount solve json (head_cam_calib_capture.py --solve) '
+                                          'enabling the IMU head-tilt correction of /head_camera_tf'),
         DeclareLaunchArgument('launch_cameras', default_value='true',
                               description='Whether to launch cameras.'),
         DeclareLaunchArgument('launch_lidar', default_value='true',
@@ -458,6 +467,9 @@ def generate_launch_description():
             'control_frame': 'base_link',
             'camera_frame': 'head_camera_frame',
             'update_rate': 30.0,
+            # head_cam_calib_capture.py --solve *_solve.json: IMU tilt correction of
+            # /head_camera_tf for the head play ('' = off)
+            'imu_calib_file': LaunchConfiguration('head_cam_imu_calib'),
         }],
         output='screen',
         condition=IfCondition(launch_cameras),

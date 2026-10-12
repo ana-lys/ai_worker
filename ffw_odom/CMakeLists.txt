@@ -118,6 +118,7 @@ add_executable(marker_pose_corrector
 ament_target_dependencies(marker_pose_corrector
   rclcpp
   geometry_msgs
+  sensor_msgs
   tf2
 )
 
