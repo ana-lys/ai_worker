@@ -59,7 +59,7 @@ endforeach()
 
 # teleop_core: the only publisher of arm goals to the solver (MARKER_TELEOP_PLAN 0b)
 add_executable(teleop_core src/teleop_core.cpp)
-ament_target_dependencies(teleop_core rclcpp geometry_msgs std_msgs tf2 tf2_ros)
+ament_target_dependencies(teleop_core rclcpp geometry_msgs std_msgs trajectory_msgs tf2 tf2_ros)
 target_link_libraries(teleop_core Eigen3::Eigen)
 
 # Build Base teleop node (maps joystick → cmd_vel + head)

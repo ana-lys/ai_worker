@@ -35,6 +35,17 @@
 //   reactive: if an arm's achieved EE is > 2 cm / 3 deg from its goal while
 //     the base moves, only error-reducing twists pass until both arms are
 //     back under 1 cm / 1.5 deg.
+//
+// Lift (D7, BASE mode only, like the solver's /left/joy lift): dz requests
+// (m) on /teleop_core/lift/{spacemouse,logitech} add up and are applied at
+// <= lift_max_speed, shifting every stored goal vertically in the base frame
+// (anchored goals stay stored in marker_frame) so the EEs ride the lift; the
+// ramp keeps each step under the solver's 3 cm re-base threshold. Anchored
+// goals never leave their reach box in z.
+//
+// Head: trajectories on /teleop_core/head/{spacemouse,logitech} are relayed
+// to head_topic; the Logitech's only while the SpaceMouse head has been
+// quiet for spacemouse_idle_s.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -50,6 +61,9 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/float64.hpp"
+#include "std_msgs/msg/string.hpp"
+#include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include <deque>
 #include "tf2/exceptions.h"
 #include "tf2_ros/buffer.h"
@@ -163,6 +177,39 @@ public:
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    lift_max_speed_ = this->declare_parameter("lift_max_speed", 0.05);
+    mode_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "/teleop_mode", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+        mode_ = msg->data;
+        if (mode_ != "BASE") pending_lift_ = 0.0;
+      });
+    for (const std::string src : {"spacemouse", "logitech"}) {
+      lift_subs_.push_back(this->create_subscription<std_msgs::msg::Float64>(
+        "/teleop_core/lift/" + src, 10, [this, src](const std_msgs::msg::Float64::SharedPtr msg) {
+          if (mode_ != "BASE" || halted_) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+              "Lift from %s ignored (%s)", src.c_str(), halted_ ? "halted" : "ARM mode");
+            return;
+          }
+          pending_lift_ += msg->data;
+        }));
+    }
+    head_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+      this->declare_parameter("head_topic", "/leader/joystick_controller_left/joint_trajectory"), 10);
+    head_sm_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+      "/teleop_core/head/spacemouse", 10,
+      [this](const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
+        head_sm_last_ = this->now();
+        head_sm_seen_ = true;
+        head_pub_->publish(*msg);
+      });
+    head_lg_sub_ = this->create_subscription<trajectory_msgs::msg::JointTrajectory>(
+      "/teleop_core/head/logitech", 10,
+      [this](const trajectory_msgs::msg::JointTrajectory::SharedPtr msg) {
+        if (head_sm_seen_ && (this->now() - head_sm_last_).seconds() < spacemouse_idle_s_) return;
+        head_pub_->publish(*msg);
+      });
 
     const std::array<std::string, 2> names {"left", "right"};
     const std::array<std::vector<double>, 2> boxes {box_l, box_r};
@@ -424,6 +471,8 @@ private:
       }
     }
 
+    step_lift(any_anchored, tf_ok, T_base_marker);
+
     if (tf_ok && !halted_) {
       last_good_tf_ = T_base_marker;
       have_last_good_tf_ = true;
@@ -432,6 +481,41 @@ private:
       }
     }
     step_base(any_anchored || halted_, (tf_ok && !halted_) ? &T_base_marker : nullptr);
+  }
+
+  // One ramp step of the pending lift. Anchored goals need this tick's TF.
+  void step_lift(bool any_anchored, bool tf_ok, const Eigen::Isometry3d &T_bm)
+  {
+    if (halted_) pending_lift_ = 0.0;
+    if (pending_lift_ == 0.0) return;
+    if (any_anchored && !tf_ok) return;   // keep it pending until the board is back
+    const double max_step = lift_max_speed_ * tick_dt_;
+    double dz = std::clamp(pending_lift_, -max_step, max_step);
+    // Anchored goals stay inside their reach box in z (no further outside).
+    for (const Arm &arm : arms_) {
+      if (!(arm.valid && arm.anchored && !arm.held)) continue;
+      const double z = (T_bm * arm.goal).translation().z();
+      if (dz > 0.0) dz = std::min(dz, std::max(0.0, arm.box_max.z() - z));
+      else dz = std::max(dz, std::min(0.0, arm.box_min.z() - z));
+    }
+    if (dz == 0.0) {
+      RCLCPP_WARN(this->get_logger(), "Lift stopped: an anchored goal is at its reach box z limit");
+      pending_lift_ = 0.0;
+      return;
+    }
+    pending_lift_ -= dz;
+    if (std::abs(pending_lift_) < 1e-9) pending_lift_ = 0.0;
+    Eigen::Isometry3d up = Eigen::Isometry3d::Identity();
+    up.translation().z() = dz;
+    for (Arm &arm : arms_) {
+      if (!arm.valid || arm.held) continue;
+      if (arm.anchored) {
+        arm.goal = T_bm.inverse() * up * T_bm * arm.goal;   // published below
+      } else {
+        arm.goal = up * arm.goal;
+        publish_goal(arm, arm.goal);
+      }
+    }
   }
 
   static bool is_zero(const geometry_msgs::msg::Twist &t)
@@ -631,6 +715,18 @@ private:
   double achieved_max_age_s_ {0.5};
   bool reactive_tripped_ {false};
   double tick_dt_ {0.01};   // last /cmd_vel sent (EKF jump prediction)
+
+  // ── Lift (D7) + head ──
+  std::string mode_ {"ARM"};
+  double lift_max_speed_ {0.05};
+  double pending_lift_ {0.0};
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub_;
+  std::vector<rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr> lift_subs_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_pub_;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_sm_sub_;
+  rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr head_lg_sub_;
+  rclcpp::Time head_sm_last_;
+  bool head_sm_seen_ {false};
 
   // ── Marker health (D4) ──
   bool marker_health_ {false};
