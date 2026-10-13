@@ -92,7 +92,10 @@ def main():
     targets = load_targets(TARGETS, OFFSET)
     out = f'/tmp/ffw_teleop_provisional/e2e_connector_align_{int(time.time())}.json'
     proc = subprocess.Popen(['ros2', 'run', 'ffw_spacemouse', 'connector_align_capture.py', '--placements', '2',
-                             '--seed', '3', '--out', out], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             '--seed', '3', '--out', out,
+                             # sim speed: fast arm/base, no settle wait (the sim solver stops short anyway)
+                             '--arm-vmax', '0.3', '--arm-wmax-deg', '90', '--settle-timeout', '0.2',
+                             '--base-vmax', '0.3', '--base-wmax', '0.5', '--window', '0.4'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=0)
     res = {'points': [], 'placements': []}
     buf = ''
@@ -115,11 +118,12 @@ def main():
             continue
         if buf.endswith('then Enter '):
             name = re.search(r'\[(\w+)\]', buf).group(1)
-            time.sleep(1.5)                       # "align" (sim arm is already still)
+            time.sleep(0.5)                       # "align" (sim arm is already still)
             bi = int(name[1]) - 1
             p_board, yaw_b = w.board_in_base()
             pl, _, _ = targets[name[-1]]
-            exp = np.append(Rz(yaw_b)[:2, :2] @ pl[:2] + p_board, pl[2]) + [OFFSET - STANDOFF, 0, 0]
+            mx = np.array([math.cos(yaw_b + math.pi / 2), math.sin(yaw_b + math.pi / 2), 0.0])  # marker_frame x
+            exp = np.append(Rz(yaw_b)[:2, :2] @ pl[:2] + p_board, pl[2]) + [OFFSET, 0, 0] - STANDOFF * mx
             err = (w.ach - exp) * 1000 if w.ach is not None else None
             gerr = (w.goal - exp) * 1000 if w.goal is not None else None
             res['points'].append((name, [round(float(v), 1) for v in err], [round(float(v), 1) for v in gerr]))

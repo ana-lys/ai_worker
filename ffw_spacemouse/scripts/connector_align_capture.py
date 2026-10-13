@@ -5,10 +5,11 @@ base placements.
 For each base placement (the first is where the robot stands; the rest are
 random in a box around it, measured from the board) the RIGHT arm visits the
 connector points a b c d, then d c b a:
-  approach to a stand-off -STANDOFF in base x in front of the point (script
+  approach to a stand-off -STANDOFF along marker_frame x in front of the point (script
   moves, reference orientation), hand over to the SpaceMouse with roll/pitch/
   yaw locked -> you align the translation and press Enter -> a 1 s snapshot is
-  recorded (re-record if not still) -> the script retracts -RETRACT in base x,
+  recorded (re-record if not still) -> the script retracts -RETRACT along
+  marker_frame x,
   slides to the next point and approaches again.
 Between placements the arm retracts -BASE_RETRACT, the base drives to the next
 placement, and the arm approaches the first point.
@@ -230,12 +231,16 @@ def main():
     ap.add_argument('--standoff', type=float, default=0.015, help='approach stand-off in -x [m]')
     ap.add_argument('--retract', type=float, default=0.05, help='retract between points in -x [m]')
     ap.add_argument('--base-retract', type=float, default=0.10, help='retract before a base move [m]')
+    ap.add_argument('--marker-yaw-offset-deg', type=float, default=90.0,
+                    help='marker_frame = board frame turned by this (marker_pose_corrector board_yaw_offset_rad)')
     ap.add_argument('--solver-offset', type=float, default=0.0254, help='solver frame = base_link + this x [m]')
     ap.add_argument('--reach-x', default='0.30,0.70', help='right EE x limits for a placement [m]')
     ap.add_argument('--reach-y', default='-0.55,0.10', help='right EE y limits for a placement [m]')
     ap.add_argument('--max-board-turn-deg', type=float, default=15.0,
                     help='reject placements that turn the board bearing more than this')
     ap.add_argument('--arm-vmax', type=float, default=0.05)
+    ap.add_argument('--settle-mm', type=float, default=6.0, help='arm counts as arrived within this [mm]')
+    ap.add_argument('--settle-timeout', type=float, default=4.0, help='max wait for arrival [s]')
     ap.add_argument('--arm-wmax-deg', type=float, default=15.0)
     ap.add_argument('--base-vmax', type=float, default=0.10)
     ap.add_argument('--base-wmax', type=float, default=0.15)
@@ -317,15 +322,22 @@ def main():
     rx = [float(v) for v in a.reach_x.split(',')]
     ry = [float(v) for v in a.reach_y.split(',')]
 
+    def marker_x(board_yaw):
+        """marker_frame x axis in the base frame: the approach direction (toward the
+        connector row); stand-off / retract distances are measured along it."""
+        ang = board_yaw + math.radians(a.marker_yaw_offset_deg)
+        return np.array([math.cos(ang), math.sin(ang), 0.0])
+
     def feasible(rel_start):
         """rel_start = base pose relative to START; check reach + board bearing."""
         cur = base_in_start(o0, yaw0)                       # == 0 at plan time
         rel = rel_start - cur
         tb, on, yawn = targets_in_base(o0, yaw0, rel)
+        mx = marker_x(yawn)
         for c, (p, _) in tb.items():
             for dxr in (a.standoff, a.retract, a.base_retract):
-                x = p[0] - dxr
-                if not (rx[0] <= x <= rx[1] and ry[0] <= p[1] <= ry[1]):
+                q = p - dxr * mx
+                if not (rx[0] <= q[0] <= rx[1] and ry[0] <= q[1] <= ry[1]):
                     return False
         turn = abs(math.degrees(math.atan2(on[1], on[0]) - math.atan2(o0[1], o0[0])))
         return turn <= a.max_board_turn_deg
@@ -350,7 +362,8 @@ def main():
     for i, p in enumerate(placements):
         log(f'  B{i + 1}: {p[0]:+.3f} {p[1]:+.3f} {math.degrees(p[2]):+.1f}')
     log(f'per placement: a b c d, d c b a; stand-off {a.standoff * 100:.1f} cm, retract {a.retract * 100:.0f} cm, '
-        f'base retract {a.base_retract * 100:.0f} cm; output {out}')
+        f'base retract {a.base_retract * 100:.0f} cm, all along marker_frame x '
+        f'(now {np.round(marker_x(yaw0)[:2], 3)} in base); output {out}')
     if a.plan_only:
         finish()
     if not ctl.odom:
@@ -360,7 +373,9 @@ def main():
                  'teleop_core ignores the /logitech/base_active base claim')
 
     # ── motion helpers ───────────────────────────────────────────────────────
-    def move_arm(p_goal, q_goal, settle_mm=6.0, timeout=4.0):
+    def move_arm(p_goal, q_goal, settle_mm=None, timeout=None):
+        settle_mm = a.settle_mm if settle_mm is None else settle_mm
+        timeout = a.settle_timeout if timeout is None else timeout
         ach = ctl.achieved()
         p0, q0 = ach[1], ach[2]
         if ctl.goal is not None:
@@ -504,20 +519,24 @@ def main():
             return
 
     def approach_point(c, stand_x):
+        """Target of point c, backed off `stand_x` along marker_frame -x."""
         bl = ctl.board_level()
         if bl is None:
             raise RuntimeError('board not visible')
         tb, _, _ = targets_in_base(*bl)
         p, q = tb[c]
-        return p - [stand_x, 0, 0], q
+        return p - stand_x * marker_x(bl[1]), q
 
     # ── run ──────────────────────────────────────────────────────────────────
     log('\nSAFETY: base and right arm move by themselves. E-stop in hand. Press Enter to start, Ctrl-C to abort.')
     input()
     def retract(dist):
-        """Back the right EE off by `dist` in base x from where it is now."""
+        """Back the right EE off by `dist` along marker_frame -x from where it is now."""
+        bl = ctl.board_level()
+        if bl is None:
+            raise RuntimeError('board not visible')
         p, q = ctl.goal
-        move_arm(p - [dist, 0.0, 0.0], q)
+        move_arm(p - dist * marker_x(bl[1]), q)
 
     try:
         ctl.set_hold('left', True)        # left arm stays where it is for the whole run
