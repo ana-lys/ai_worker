@@ -128,7 +128,8 @@ def load_targets(path, offset):
     data = json.load(open(path))
     pts = {}
     for name, s in data.items():
-        m = re.fullmatch(r'\d+([abcd])', name)
+        # pose_snapshot.py names (001a) or this script's own (B2_ad_c)
+        m = re.fullmatch(r'(?:\d+|B\d+_(?:ad|da)_)([abcd])', name)
         if not m or not s.get('aruco_board_in_base') or not s['ee_base'].get('right'):
             continue
         o, yaw = level_board(s['aruco_board_in_base']['position'], s['aruco_board_in_base']['quaternion_xyzw'])
@@ -140,7 +141,7 @@ def load_targets(path, offset):
         pts.setdefault(m.group(1), []).append((pl, ql))
     missing = [c for c in POINTS if c not in pts]
     if missing:
-        sys.exit(f'targets file {path} has no snapshots for points {missing} (names like 001a)')
+        sys.exit(f'targets file {path} has no snapshots for points {missing} (names like 001a or B1_ad_a)')
     return {c: (np.mean([x[0] for x in v], axis=0), quat_mean([x[1] for x in v]), len(v))
             for c, v in pts.items()}
 
@@ -318,14 +319,16 @@ class Control(Node):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--targets', default=os.path.join(DATA_DIR, 'pose_snapshots.json'))
+    # 2026-10-13 run: 4 placements x 2 passes, consistent within ~2 mm (level + offset)
+    ap.add_argument('--targets', default=os.path.join(DATA_DIR, 'connector_align_20261013_192758.json'),
+                    help='snapshots whose per-point mean is the target (pose_snapshot.py or this script)')
     ap.add_argument('--out', default=None, help='default data/connector_align_<time>.json')
     ap.add_argument('--placements', type=int, default=4, help='base placements incl. the start pose')
     ap.add_argument('--x-range', default='-0.10,0.05', help='base x box around the start [m]')
     ap.add_argument('--y-range', default='-0.10,0.10', help='base y box around the start [m]')
     ap.add_argument('--yaw-deg', type=float, default=10.0, help='base yaw box +- [deg]')
     ap.add_argument('--min-move', type=float, default=0.05, help='min distance between placements [m]')
-    ap.add_argument('--standoff', type=float, default=0.010, help='approach stand-off in -x [m]')
+    ap.add_argument('--standoff', type=float, default=0.0, help='approach stand-off in -x [m] (0 = on the point)')
     ap.add_argument('--standoff-z', type=float, default=0.005,
                     help='approach / slide poses this much above the target height [m]')
     ap.add_argument('--retract', type=float, default=0.05, help='retract between points in -x [m]')
