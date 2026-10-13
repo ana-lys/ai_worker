@@ -529,11 +529,15 @@ def main():
         time.sleep(0.3)               # joy_hand goes silent first
 
     def give_arm(lock_axes=('roll', 'pitch', 'yaw')):
-        ctl.set_hold('right', False)
-        time.sleep(0.4)               # joy_hand re-bases on the achieved pose
+        # Unlock BEFORE releasing: joy_hand re-bases on the achieved pose at
+        # release and then applies its EE locks; a lock still centred on the
+        # previous placement's orientation clamps the fresh goal and turns the
+        # gripper (seen on the robot: 3.1 deg after a 4.1 deg base turn).
         for ax in ('roll', 'pitch', 'yaw'):
             ctl.ee_lock_pub.publish(String(data=f'unlock {ax}_r'))
-        time.sleep(0.1)
+        time.sleep(0.2)
+        ctl.set_hold('right', False)
+        time.sleep(0.4)               # joy_hand re-bases on the achieved pose
         for ax in lock_axes:
             ctl.ee_lock_pub.publish(String(data=f'lock {ax}_r'))   # captures this orientation
 
