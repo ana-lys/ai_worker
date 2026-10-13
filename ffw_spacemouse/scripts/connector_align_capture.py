@@ -336,7 +336,7 @@ def main():
     ap.add_argument('--marker-yaw-offset-deg', type=float, default=90.0,
                     help='marker_frame = board frame turned by this (marker_pose_corrector board_yaw_offset_rad)')
     ap.add_argument('--solver-offset', type=float, default=0.0254, help='solver frame = base_link + this x [m]')
-    ap.add_argument('--reach-x', default='0.30,0.70', help='right EE x limits for a placement [m]')
+    ap.add_argument('--reach-x', default='0.30,0.85', help='right EE x limits for a placement [m] (operator: the arm reaches well past 0.80)')
     ap.add_argument('--reach-y', default='-0.55,0.10', help='right EE y limits for a placement [m]')
     ap.add_argument('--max-board-turn-deg', type=float, default=15.0,
                     help='reject placements that turn the board bearing more than this')
