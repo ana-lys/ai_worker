@@ -114,10 +114,20 @@ def main():
                 planned.append([float(m.group(2)), float(m.group(3)), math.radians(float(m.group(4)))])
             if 'SAFETY' in line:
                 proc.stdin.write('\n')
+            if 'retry: back off' in line:
+                res['retries'] = res.get('retries', 0) + 1
+            if line.startswith('skipped'):
+                res.setdefault('skipped', []).append(line)
             if 'LOCKED in the IK' in line or 'lift lock restored' in line:
                 res.setdefault('lift', []).append(line)
             if line.startswith('done:') or line.startswith('ABORT') or 'NOT recorded' in line:
                 res.setdefault('log', []).append(line)
+            continue
+        if buf.endswith('[q]uit? '):
+            ans = 's' if not res.get('ik_prompts') else 'a'
+            res['ik_prompts'] = res.get('ik_prompts', 0) + 1
+            proc.stdin.write(ans + '\n')
+            buf = ''
             continue
         if buf.endswith('then Enter '):
             name = re.search(r'\[(\w+)\]', buf).group(1)
@@ -146,6 +156,7 @@ def main():
         'placement_true_vs_planned': res['placements'],
         'log': res.get('log'),
         'lift': res.get('lift'),
+        'retries': res.get('retries'), 'ik_prompts': res.get('ik_prompts'), 'skipped': res.get('skipped'),
     }
     print(json.dumps(summary, indent=1))
     print('per point (name, achieved-expected mm, commanded goal-expected mm):', res['points'])

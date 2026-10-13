@@ -45,6 +45,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -67,6 +68,11 @@ from pose_snapshot import Recorder, quat_mean  # noqa: E402
 DATA_DIR = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_spacemouse/data')
 POINTS = 'abcd'
 RAIL_DT = 0.01
+# right-arm joint ranges of the IK model (ffw_bg2_large_margin_no_gripper_joint.xml)
+ARM_R_LIMITS = {'arm_r_joint1': (-2.35619, 0.78539), 'arm_r_joint2': (-3.14, 0.0),
+                'arm_r_joint3': (-1.57, 1.57), 'arm_r_joint4': (-2.61, 1.047),
+                'arm_r_joint5': (-1.57, 1.57), 'arm_r_joint6': (-1.57, 1.57),
+                'arm_r_joint7': (-1.5804, 1.8201)}
 
 
 def R_from_q(q):
@@ -332,6 +338,10 @@ def main():
     ap.add_argument('--arm-vmax', type=float, default=0.05)
     ap.add_argument('--settle-mm', type=float, default=6.0, help='arm counts as arrived within this [mm]')
     ap.add_argument('--settle-timeout', type=float, default=4.0, help='max wait for arrival [s]')
+    ap.add_argument('--handover-pos-mm', type=float, default=6.0,
+                    help='achieved pose must be this close to the goal before the hand-over [mm]')
+    ap.add_argument('--handover-rot-deg', type=float, default=1.5,
+                    help='... and this close in orientation [deg]')
     ap.add_argument('--arm-wmax-deg', type=float, default=15.0)
     ap.add_argument('--base-vmax', type=float, default=0.10)
     ap.add_argument('--base-wmax', type=float, default=0.15)
@@ -518,13 +528,13 @@ def main():
         ctl.set_hold('right', True)
         time.sleep(0.3)               # joy_hand goes silent first
 
-    def give_arm():
+    def give_arm(lock_axes=('roll', 'pitch', 'yaw')):
         ctl.set_hold('right', False)
         time.sleep(0.4)               # joy_hand re-bases on the achieved pose
         for ax in ('roll', 'pitch', 'yaw'):
             ctl.ee_lock_pub.publish(String(data=f'unlock {ax}_r'))
         time.sleep(0.1)
-        for ax in ('roll', 'pitch', 'yaw'):
+        for ax in lock_axes:
             ctl.ee_lock_pub.publish(String(data=f'lock {ax}_r'))   # captures this orientation
 
     def stop_base():
@@ -638,6 +648,60 @@ def main():
         p, q = tb[c]
         return p - stand_x * marker_x(bl[1]), q
 
+    def at_goal():
+        """(position error mm, rotation error deg) of the achieved right EE vs the goal."""
+        ach, (pg, qg) = ctl.achieved(), ctl.goal
+        dp = float(np.linalg.norm(ach[1] - pg)) * 1000
+        dr = math.degrees(2 * math.acos(min(1.0, abs(float(np.dot(ach[2], qg))))))
+        return dp, dr
+
+    def joints_at_limit(margin=0.03):
+        out = []
+        for n, (lo, hi) in ARM_R_LIMITS.items():
+            v = ctl.joint(n)
+            if v is not None and (v - lo < margin or hi - v < margin):
+                out.append(f'{n} {v:+.3f} (range {lo:+.3f}..{hi:+.3f})')
+        return out
+
+    def approach(c, from_retract):
+        """Approach point c: re-orient at the retract distance first (the arm has room
+        there), then translate to the stand-off. Before the hand-over the achieved pose
+        must match the goal; if the IK stalled (e.g. at a joint limit) back off and retry
+        once, then ask. Returns 'ok', 'skip' or 'free' (align with yaw unlocked)."""
+        p_r, q = approach_point(c, from_retract)
+        move_arm(ctl.goal[0], q)                         # rotate in place
+        move_arm(p_r, q)
+        move_arm(*approach_point(c, a.standoff))
+        for attempt in range(2):
+            dp, dr = at_goal()
+            if dp <= a.handover_pos_mm and dr <= a.handover_rot_deg:
+                return 'ok'
+            log(f'  arm off the goal by {dp:.1f} mm / {dr:.2f} deg'
+                + (f'; at a joint limit: {", ".join(joints_at_limit())}' if joints_at_limit() else ''))
+            if attempt == 0:
+                log('  retry: back off, re-orient, approach again')
+                p_r, q = approach_point(c, a.base_retract)
+                move_arm(p_r, ctl.goal[1])
+                move_arm(p_r, q)
+                move_arm(*approach_point(c, a.standoff))
+        while True:
+            ans = input('  IK did not reach the goal: [s]kip this point, [a]lign it yourself '
+                        '(yaw unlocked), [q]uit? ').strip().lower()
+            if ans in ('s', 'a', 'q'):
+                break
+        if ans == 'q':
+            raise KeyboardInterrupt
+        return 'skip' if ans == 's' else 'free'
+
+    def handle_signal(signum, frame):
+        raise KeyboardInterrupt          # terminal closed / killed: run the same cleanup
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, handle_signal)
+
+    # leftover EE locks from an earlier run that died without its cleanup
+    for ax in ('roll', 'pitch', 'yaw'):
+        ctl.ee_lock_pub.publish(String(data=f'unlock {ax}_r'))
+
     # ── run ──────────────────────────────────────────────────────────────────
     log('\nSAFETY: base and right arm move by themselves. E-stop in hand. Press Enter to start, Ctrl-C to abort.')
     input()
@@ -677,6 +741,12 @@ def main():
         ctl.set_hold('right', True)
         time.sleep(0.3)
         freeze_lift()
+        # start reference AFTER the lift is in place (a lift move shifts the board estimate)
+        time.sleep(1.0)
+        bl = ctl.board_level()
+        if bl is None:
+            raise RuntimeError('board not visible after the lift check')
+        o0, yaw0 = bl
         take_arm()
         seq = [('ad', c) for c in POINTS] + [('da', c) for c in reversed(POINTS)]
         for bi, placement in enumerate(placements):
@@ -685,16 +755,21 @@ def main():
             if bi > 0:
                 retract(a.base_retract)                     # clear the board before the base moves
                 drive_to_placement(placement)
-                move_arm(*approach_point(seq[0][1], a.base_retract))
+                from_retract = a.base_retract
             else:
                 retract(a.retract)                          # from wherever the arm starts
+                from_retract = a.retract
             for i, (pas, c) in enumerate(seq):
+                name = f'B{bi + 1}_{pas}_{c}'
                 if i > 0:
                     retract(a.retract)                      # back off the previous connector
-                move_arm(*approach_point(c, a.retract))     # slide in front of this one
-                move_arm(*approach_point(c, a.standoff))    # approach to the stand-off
-                give_arm()
-                record(f'B{bi + 1}_{pas}_{c}', placement)
+                    from_retract = a.retract
+                res = approach(c, from_retract)
+                if res == 'skip':
+                    log(f'  skipped {name}')
+                    continue
+                give_arm(('roll', 'pitch') if res == 'free' else ('roll', 'pitch', 'yaw'))
+                record(name, placement)
                 take_arm()
         log(f'\ndone: {len(data)} snapshots in {out}')
     except (KeyboardInterrupt, EOFError):
