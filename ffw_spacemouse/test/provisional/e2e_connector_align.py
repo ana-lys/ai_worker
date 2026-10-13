@@ -26,6 +26,7 @@ STANDOFF = 0.015
 BOARD_XY = np.array([0.8216, 0.0684])
 BOARD_Z = 0.7596
 BOARD_YAW = math.radians(-98.78)
+LIFT = -0.2890   # = the recorded level: the run only locks it
 
 
 def T2(x, y, yaw):
@@ -81,7 +82,7 @@ class World(Node):
             ye = math.atan2(Tm[1, 0], Tm[0, 0])
             e.pose.pose.orientation.z, e.pose.pose.orientation.w = math.sin(ye / 2), math.cos(ye / 2)
             self.ekf.publish(e)
-        j = JointState(); j.header.stamp = st; j.name = ['head_joint1', 'head_joint2']; j.position = [0.0, 0.0]
+        j = JointState(); j.header.stamp = st; j.name = ['head_joint1', 'head_joint2', 'lift_joint']; j.position = [0.0, 0.0, LIFT]
         self.js.publish(j)
 
 
@@ -113,6 +114,8 @@ def main():
                 planned.append([float(m.group(2)), float(m.group(3)), math.radians(float(m.group(4)))])
             if 'SAFETY' in line:
                 proc.stdin.write('\n')
+            if 'LOCKED in the IK' in line or 'lift lock restored' in line:
+                res.setdefault('lift', []).append(line)
             if line.startswith('done:') or line.startswith('ABORT') or 'NOT recorded' in line:
                 res.setdefault('log', []).append(line)
             continue
@@ -142,6 +145,7 @@ def main():
         'commanded_goal_vs_expected_mm_max': round(float(np.abs(gerrs).max()), 1) if len(gerrs) else None,
         'placement_true_vs_planned': res['placements'],
         'log': res.get('log'),
+        'lift': res.get('lift'),
     }
     print(json.dumps(summary, indent=1))
     print('per point (name, achieved-expected mm, commanded goal-expected mm):', res['points'])

@@ -30,7 +30,11 @@ solver frame); release re-bases joy_hand on the achieved pose. Base: claims
 /cmd_vel from joy_base through /logitech/base_active and drives closed loop on
 /odom (one scale for the whole twist). Needs the plain unified launch
 (use_teleop_core:=false): teleop_core ignores that claim.
-Ctrl-C stops the base, releases both arms, unlocks and un-claims.
+The lift stays at the recorded level: before the first motion it is moved
+there if needed (asks y/N first; solver qpos rail, both arms held) and hard-locked in the IK
+(/teleop_locks), so the arm alone reaches every target; its lock state is
+restored at the end. Ctrl-C stops the base, releases both arms, unlocks and
+un-claims.
 
     ros2 run ffw_spacemouse connector_align_capture.py --plan-only
     ros2 run ffw_spacemouse connector_align_capture.py
@@ -53,13 +57,16 @@ from nav_msgs.msg import Odometry
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from pose_snapshot import Recorder, quat_mean  # noqa: E402
 
 DATA_DIR = os.path.expanduser('~/robotis_ws/src/ai_worker/ffw_spacemouse/data')
 POINTS = 'abcd'
+RAIL_DT = 0.01
 
 
 def R_from_q(q):
@@ -149,6 +156,12 @@ class Control(Node):
         self.create_subscription(PoseStamped, '/head_camera/marker_board_pose', self._board,
                                  qos_profile_sensor_data)
         self.create_subscription(Twist, '/cmd_vel', self._cmd, 20)
+        self.js = {}
+        self.create_subscription(JointState, '/joint_states', self._js, 20)
+        self.locks_pub = self.create_publisher(String, '/teleop_locks', 10)
+        self.goal_source_pub = self.create_publisher(String, '/teleop_goal_source', 10)
+        self.rail_pub = self.create_publisher(JointState, '/qpos_rail', 10)
+        self.list_joints = self.create_client(Trigger, '/ik_solver/list_joints')
         self.goal_pub = self.create_publisher(PoseStamped, '/quest/right/ee_target_pose', 10)
         self.hold_pub = {n: self.create_publisher(Bool, f'/spacemouse/{n}/external_hold', 10)
                          for n in ('left', 'right')}
@@ -175,6 +188,84 @@ class Control(Node):
         with self.lock:
             self.board.append((time.monotonic(), [p.x, p.y, p.z], [q.x, q.y, q.z, q.w]))
             self.board = self.board[-200:]
+
+    def _js(self, m):
+        with self.lock:
+            self.js.update(zip(m.name, m.position))
+
+    def joint(self, name):
+        with self.lock:
+            return self.js.get(name)
+
+    def solver_joints(self, timeout=3.0):
+        """{joint: hard-locked} from /ik_solver/list_joints, None if no answer."""
+        if not self.list_joints.wait_for_service(timeout_sec=timeout):
+            return None
+        fut = self.list_joints.call_async(Trigger.Request())
+        t0 = time.monotonic()
+        while not fut.done() and time.monotonic() - t0 < timeout:
+            time.sleep(0.02)                  # the executor thread completes it
+        if not fut.done():
+            return None
+        out = {}
+        for line in fut.result().message.splitlines():
+            m = re.match(r'\s*\[\d+\]\s*\[(.*?)\]\s*(\S+)\s*$', line)
+            if m:
+                out[m.group(2)] = m.group(1).strip() == 'LOCKED'
+        return out
+
+    def set_locked(self, name, locked):
+        """Hard lock / unlock a joint in the IK solve (/teleop_locks toggles, so
+        publish only when the state differs). Returns the state after."""
+        st = self.solver_joints()
+        if st is None or name not in st:
+            return None
+        if st[name] != locked:
+            self.locks_pub.publish(String(data=name))
+            for _ in range(20):
+                time.sleep(0.05)
+                st = self.solver_joints()
+                if st and st.get(name) == locked:
+                    break
+        return st.get(name) if st else None
+
+    def move_lift(self, target, speed, tol):
+        """Ramp the real lift to `target` over the solver's qpos rail (every other
+        solver joint held at its current position), then back to goal source
+        "ee" (the solver resyncs to the real joints). Returns the final lift."""
+        names = list(self.solver_joints() or {})
+        with self.lock:
+            now = dict(self.js)
+        if not names or 'lift_joint' not in names or any(n not in now for n in names):
+            return None
+        hold = {n: now[n] for n in names}
+        lift0 = now['lift_joint']
+        n_steps = max(1, int(math.ceil(abs(target - lift0) / speed / RAIL_DT)))
+
+        def send(v):
+            hold['lift_joint'] = v
+            js = JointState()
+            js.header.stamp = self.get_clock().now().to_msg()
+            js.name = list(hold)
+            js.position = [float(x) for x in hold.values()]
+            self.rail_pub.publish(js)
+        try:
+            send(lift0)
+            self.goal_source_pub.publish(String(data='rail'))
+            for k in range(1, n_steps + 1):
+                send(lift0 + (target - lift0) * k / n_steps)
+                time.sleep(RAIL_DT)
+            t_end = time.monotonic() + 10.0          # until the real lift is there
+            while time.monotonic() < t_end and abs(self.joint('lift_joint') - target) > tol:
+                send(target)
+                time.sleep(RAIL_DT)
+            for _ in range(25):
+                send(target)
+                time.sleep(RAIL_DT)
+        finally:
+            self.goal_source_pub.publish(String(data='ee'))
+            time.sleep(1.0)                          # solver resyncs to the real joints
+        return self.joint('lift_joint')
 
     def _cmd(self, m):
         if not self.publishing:
@@ -250,10 +341,21 @@ def main():
     ap.add_argument('--max-ee-std-mm', type=float, default=0.5)
     ap.add_argument('--max-ee-rot-deg', type=float, default=0.1)
     ap.add_argument('--seed', type=int, default=None)
+    ap.add_argument('--lift', type=float, default=None,
+                    help='lift_joint level for the run [m]; default = mean of the targets file snapshots')
+    ap.add_argument('--lift-tol', type=float, default=0.002)
+    ap.add_argument('--lift-speed', type=float, default=0.02, help='lift ramp when it must be moved [m/s]')
     ap.add_argument('--plan-only', action='store_true', help='print targets and placements, no motion')
     a, ros_args = ap.parse_known_args()
 
     targets = load_targets(a.targets, a.solver_offset)
+    if a.lift is None:
+        lifts = [s['joint_states']['joints']['lift_joint']['position']
+                 for s in json.load(open(a.targets)).values()
+                 if (s.get('joint_states') or {}).get('joints', {}).get('lift_joint')]
+        if not lifts:
+            sys.exit('no lift_joint in the targets file -- pass --lift')
+        a.lift = float(np.mean(lifts))
     rng = np.random.default_rng(a.seed)
     out = a.out or os.path.join(DATA_DIR, f'connector_align_{datetime.now():%Y%m%d_%H%M%S}.json')
     if os.path.exists(out):
@@ -364,8 +466,17 @@ def main():
     log(f'per placement: a b c d, d c b a; stand-off {a.standoff * 100:.1f} cm, retract {a.retract * 100:.0f} cm, '
         f'base retract {a.base_retract * 100:.0f} cm, all along marker_frame x '
         f'(now {np.round(marker_x(yaw0)[:2], 3)} in base); output {out}')
+    lift_now, st = ctl.joint('lift_joint'), ctl.solver_joints()
+    lift_locked0 = None if st is None else st.get('lift_joint')
+    log(f'lift: now {lift_now if lift_now is None else round(lift_now, 4)} m, run level {a.lift:+.4f} m '
+        f'(tol {a.lift_tol * 1000:.0f} mm), {"LOCKED" if lift_locked0 else "free"} in the IK -> '
+        + ('will be locked there' if lift_now is not None and abs(lift_now - a.lift) <= a.lift_tol
+           else f'will be moved {"?" if lift_now is None else f"{(a.lift - lift_now) * 100:+.1f} cm"} '
+                f'(both arms ride along) and locked'))
     if a.plan_only:
         finish()
+    if lift_locked0 is None:
+        finish('no lift_joint lock state from /ik_solver/list_joints -- is ffw_ik_solver_teleop running?')
     if not ctl.odom:
         finish('no /odom')
     if 'teleop_core' in [n for n, _ in ctl.get_node_names_and_namespaces()]:
@@ -538,8 +649,34 @@ def main():
         p, q = ctl.goal
         move_arm(p - dist * marker_x(bl[1]), q)
 
+    def freeze_lift():
+        lift = ctl.joint('lift_joint')
+        if lift is None:
+            raise RuntimeError('no lift_joint in /joint_states')
+        if abs(lift - a.lift) > a.lift_tol:
+            zl, zr = ctl.achieved('l'), ctl.achieved('r')
+            dz = a.lift - lift
+            ans = input(f'  The lift is {dz * 100:+.1f} cm from the run level ({lift:+.4f} -> {a.lift:+.4f} m). '
+                        f'Both arms ride along: left EE z {zl[1][2] + dz:.3f}, right EE z {zr[1][2] + dz:.3f} m '
+                        f'after the move. Clear below/above the arms? Move the lift [y/N] ').strip().lower()
+            if ans != 'y':
+                raise RuntimeError('lift not moved (answer was not y)')
+            log(f'  lift {lift:+.4f} -> {a.lift:+.4f} m (qpos rail, both arms held)')
+            if ctl.set_locked('lift_joint', False) is not False:
+                raise RuntimeError('could not unlock lift_joint in the IK')
+            lift = ctl.move_lift(a.lift, a.lift_speed, a.lift_tol)
+            if lift is None or abs(lift - a.lift) > a.lift_tol:
+                ctl.set_locked('lift_joint', True)
+                raise RuntimeError(f'lift did not reach {a.lift:+.4f} (now {lift})')
+        if ctl.set_locked('lift_joint', True) is not True:
+            raise RuntimeError('could not lock lift_joint in the IK')
+        log(f'  lift {ctl.joint("lift_joint"):+.4f} m, LOCKED in the IK for the run')
+
     try:
         ctl.set_hold('left', True)        # left arm stays where it is for the whole run
+        ctl.set_hold('right', True)
+        time.sleep(0.3)
+        freeze_lift()
         take_arm()
         seq = [('ad', c) for c in POINTS] + [('da', c) for c in reversed(POINTS)]
         for bi, placement in enumerate(placements):
@@ -573,6 +710,10 @@ def main():
         for ax in ('roll', 'pitch', 'yaw'):
             ctl.ee_lock_pub.publish(String(data=f'unlock {ax}_r'))
         time.sleep(0.3)
+        if ctl.set_locked('lift_joint', lift_locked0) == lift_locked0:
+            log(f'lift lock restored ({"LOCKED" if lift_locked0 else "free"})')
+        else:
+            log('WARNING: could not restore the lift lock state -- check /ik_solver/list_joints')
         log('released both arms and the base; EE locks cleared')
         rclpy.try_shutdown()
         spinner.join(timeout=2.0)
