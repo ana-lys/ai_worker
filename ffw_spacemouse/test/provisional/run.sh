@@ -17,6 +17,7 @@
 #   e2e_marker      marker_frame_teleop.launch.py + real solver in sim (opens the
 #                   MuJoCo viewer; prints only, not part of "all")
 #   e2e_unified     default unified launch keeps the legacy wiring (opens the viewer)
+#   e2e_connector   connector_align_capture.py full run in sim (opens the viewer)
 #   all             everything above except e2e_marker
 D=$(cd "$(dirname "$0")" && pwd)
 LOG=${LOG_DIR:-/tmp/ffw_teleop_provisional}; mkdir -p "$LOG"
@@ -82,6 +83,12 @@ case "${1:-all}" in
                  echo " \"right_mapper.use_teleop_core\": \"$(ros2 param get /right/joy_hand use_teleop_core 2>/dev/null | awk '{print $NF}')\","
                  echo " \"joy_base.use_teleop_core\": \"$(ros2 param get /joy_base use_teleop_core 2>/dev/null | awk '{print $NF}')\","
                  echo " \"cmd_vel_publisher\": \"$(ros2 topic info /cmd_vel -v 2>/dev/null | awk '/Node name:/{n=$NF} /PUBLISHER/{print n}' | head -1)\"}"
+                 kill -INT -- -$LP 2>/dev/null; sleep 3; kill -- -$LP 2>/dev/null; wait 2>/dev/null ;;
+  e2e_connector) # connector_align_capture.py, plain unified launch + real solver in sim, fake base/board
+                 setsid ros2 launch ffw_spacemouse spacemouse_unified_teleop.launch.py hardware_mode:=false \
+                   use_logitech:=false use_quest:=false > "$LOG/e2e_connector_launch.log" 2>&1 & LP=$!
+                 sleep 8
+                 python3 "$D/e2e_connector_align.py" 2>/dev/null
                  kill -INT -- -$LP 2>/dev/null; sleep 3; kill -- -$LP 2>/dev/null; wait 2>/dev/null ;;
   all) for t in joy_hand joy_hand_core marker marker_core base health clamp lift_head joy_base logitech; do
          echo "== $t"; "$0" "$t"; done ;;

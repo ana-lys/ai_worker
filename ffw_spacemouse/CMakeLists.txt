@@ -77,6 +77,7 @@ install(TARGETS
 
 # Install Python scripts
 install(PROGRAMS
+  scripts/connector_align_capture.py
   scripts/explore_logitech.py
   scripts/identify_spacemice.py
   scripts/logitech_base_teleop.py
