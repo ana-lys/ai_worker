@@ -325,7 +325,9 @@ def main():
     ap.add_argument('--y-range', default='-0.10,0.10', help='base y box around the start [m]')
     ap.add_argument('--yaw-deg', type=float, default=10.0, help='base yaw box +- [deg]')
     ap.add_argument('--min-move', type=float, default=0.05, help='min distance between placements [m]')
-    ap.add_argument('--standoff', type=float, default=0.015, help='approach stand-off in -x [m]')
+    ap.add_argument('--standoff', type=float, default=0.010, help='approach stand-off in -x [m]')
+    ap.add_argument('--standoff-z', type=float, default=0.005,
+                    help='approach / slide poses this much above the target height [m]')
     ap.add_argument('--retract', type=float, default=0.05, help='retract between points in -x [m]')
     ap.add_argument('--base-retract', type=float, default=0.10, help='retract before a base move [m]')
     ap.add_argument('--marker-yaw-offset-deg', type=float, default=90.0,
@@ -473,7 +475,8 @@ def main():
     log(f'placements (relative to start, x y [m], yaw [deg]), {a.placements} total:')
     for i, p in enumerate(placements):
         log(f'  B{i + 1}: {p[0]:+.3f} {p[1]:+.3f} {math.degrees(p[2]):+.1f}')
-    log(f'per placement: a b c d, d c b a; stand-off {a.standoff * 100:.1f} cm, retract {a.retract * 100:.0f} cm, '
+    log(f'per placement: a b c d, d c b a; stand-off {a.standoff * 100:.1f} cm '
+        f'(+{a.standoff_z * 100:.1f} cm z), retract {a.retract * 100:.0f} cm, '
         f'base retract {a.base_retract * 100:.0f} cm, all along marker_frame x '
         f'(now {np.round(marker_x(yaw0)[:2], 3)} in base); output {out}')
     lift_now, st = ctl.joint('lift_joint'), ctl.solver_joints()
@@ -650,7 +653,7 @@ def main():
             raise RuntimeError('board not visible')
         tb, _, _ = targets_in_base(*bl)
         p, q = tb[c]
-        return p - stand_x * marker_x(bl[1]), q
+        return p - stand_x * marker_x(bl[1]) + [0.0, 0.0, a.standoff_z], q
 
     def at_goal():
         """(position error mm, rotation error deg) of the achieved right EE vs the goal."""
