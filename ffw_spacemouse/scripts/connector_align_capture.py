@@ -323,7 +323,7 @@ def main():
     ap.add_argument('--targets', default=os.path.join(DATA_DIR, 'connector_align_20261013_192758.json'),
                     help='snapshots whose per-point mean is the target (pose_snapshot.py or this script)')
     ap.add_argument('--out', default=None, help='default data/connector_align_<time>.json')
-    ap.add_argument('--placements', type=int, default=4, help='base placements incl. the start pose')
+    ap.add_argument('--placements', type=int, default=10, help='base placements incl. the start pose')
     ap.add_argument('--x-range', default='-0.10,0.05', help='base x box around the start [m]')
     ap.add_argument('--y-range', default='-0.10,0.10', help='base y box around the start [m]')
     ap.add_argument('--yaw-deg', type=float, default=10.0, help='base yaw box +- [deg]')
