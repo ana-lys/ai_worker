@@ -118,6 +118,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
     "srv/SaveLoadPose.srv"
     "msg/CollisionCheck.msg"
     "msg/CollisionDebug.msg"
+    "msg/GoalConstraints.msg"
 )
 
 # ---------------------------------------------------------------------------
