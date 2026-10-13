@@ -80,6 +80,7 @@ install(PROGRAMS
   scripts/explore_logitech.py
   scripts/identify_spacemice.py
   scripts/logitech_base_teleop.py
+  scripts/pose_snapshot.py
   scripts/quest_pose_watchdog.py
   scripts/quest_to_ros2.py
   scripts/receiver_quest.py
