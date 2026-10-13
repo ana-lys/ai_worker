@@ -329,7 +329,7 @@ def main():
     ap.add_argument('--yaw-deg', type=float, default=10.0, help='base yaw box +- [deg]')
     ap.add_argument('--min-move', type=float, default=0.05, help='min distance between placements [m]')
     ap.add_argument('--standoff', type=float, default=0.0, help='approach stand-off in -x [m] (0 = on the point)')
-    ap.add_argument('--standoff-z', type=float, default=0.005,
+    ap.add_argument('--standoff-z', type=float, default=0.010,
                     help='approach / slide poses this much above the target height [m]')
     ap.add_argument('--retract', type=float, default=0.05, help='retract between points in -x [m]')
     ap.add_argument('--base-retract', type=float, default=0.10, help='retract before a base move [m]')
