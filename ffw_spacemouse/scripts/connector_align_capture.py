@@ -459,17 +459,29 @@ def main():
         turn = abs(math.degrees(math.atan2(on[1], on[0]) - math.atan2(o0[1], o0[0])))
         return turn <= a.max_board_turn_deg
 
-    placements = [np.zeros(3)]
-    tries = 0
-    while len(placements) < a.placements and tries < 5000:
-        tries += 1
-        cand = np.array([rng.uniform(*xr), rng.uniform(*yr), math.radians(rng.uniform(-a.yaw_deg, a.yaw_deg))])
-        if min(np.linalg.norm(cand[:2] - p[:2]) for p in placements) < a.min_move:
-            continue
-        if feasible(cand):
-            placements.append(cand)
+    # Reach can cut the box (e.g. targets near the x limit leave little room to
+    # back up): if N placements a.min_move apart don't fit, shrink the spacing
+    # step by step down to half of it before giving up.
+    min_move = a.min_move
+    while True:
+        placements = [np.zeros(3)]
+        tries = 0
+        while len(placements) < a.placements and tries < 5000:
+            tries += 1
+            cand = np.array([rng.uniform(*xr), rng.uniform(*yr), math.radians(rng.uniform(-a.yaw_deg, a.yaw_deg))])
+            if min(np.linalg.norm(cand[:2] - p[:2]) for p in placements) < min_move:
+                continue
+            if feasible(cand):
+                placements.append(cand)
+        if len(placements) >= a.placements or min_move <= a.min_move / 2 + 1e-9:
+            break
+        min_move = max(a.min_move / 2, min_move - 0.005)
     if len(placements) < a.placements:
-        finish(f'only {len(placements)} feasible placements found -- widen the box or reach limits')
+        finish(f'only {len(placements)} reachable placements even {min_move * 100:.1f} cm apart -- '
+               f'move the robot closer to the board, widen the box or the reach limits')
+    if min_move < a.min_move:
+        log(f'note: placements only {min_move * 100:.1f} cm apart (reach limits the box; '
+            f'move the robot closer to the board for more spread)')
 
     log(f'targets from {a.targets} (level board frame, solver offset {a.solver_offset * 1000:.1f} mm):')
     tb0, _, _ = targets_in_base(o0, yaw0)
