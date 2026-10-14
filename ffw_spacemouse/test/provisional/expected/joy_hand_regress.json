@@ -9,6 +9,16 @@
   -0.15,
   0.95
  ],
+ "after_release_far_target": [
+  0.35,
+  -0.15,
+  0.95
+ ],
+ "after_release_target": [
+  0.3487,
+  -0.1491,
+  0.9535
+ ],
  "base_goals": 0,
  "base_mode_goals": 0,
  "delta_msgs>0": true,

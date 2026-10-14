@@ -117,6 +117,8 @@ class Align(Node):
         self.declare_parameter('kp', 1.0)            # 1/s
         self.declare_parameter('wmax_deg', 10.0)     # deg/s
         self.declare_parameter('leash_deg', 5.0)     # goal never runs further ahead of the arm
+        self.declare_parameter('kpos', 2.0)          # 1/s, integrator holding the arm at the press point
+        self.declare_parameter('pos_trim_max', 0.02)  # m, max goal offset that integrator may add
         self.declare_parameter('max_error_deg', 60.0)   # refuse bigger turns
         self.declare_parameter('board_timeout', 0.3)
         self.declare_parameter('marker_yaw_offset_deg', 90.0)
@@ -133,6 +135,8 @@ class Align(Node):
         self.reached = False
         self.create_subscription(Joy, g('joy_topic'), self._joy, 10)
         self.create_subscription(PoseStamped, '/ik_solver/achieved_ee_pose_r', self._ach, 20)
+        self.tgt = None             # (t, p, R) solver's held target, same frame
+        self.create_subscription(PoseStamped, '/ik_solver/target_ee_pose_r', self._tgt, 20)
         self.create_subscription(PoseStamped, '/head_camera/marker_board_pose', self._board,
                                  qos_profile_sensor_data)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -149,6 +153,10 @@ class Align(Node):
     def _ach(self, m):
         p, q = m.pose.position, m.pose.orientation
         self.ach = (time.monotonic(), np.array([p.x, p.y, p.z]), R_from_q([q.x, q.y, q.z, q.w]))
+
+    def _tgt(self, m):
+        p, q = m.pose.position, m.pose.orientation
+        self.tgt = (time.monotonic(), np.array([p.x, p.y, p.z]), R_from_q([q.x, q.y, q.z, q.w]))
 
     def _board(self, m):
         q = m.pose.orientation
@@ -191,7 +199,13 @@ class Align(Node):
             log.warn(f'ignored: {err:.0f} deg away (max {self.get_parameter("max_error_deg").value:.0f})')
             return
         self.target_rpy = t
-        self.goal = (self.ach[1].copy(), self.ach[2].copy())
+        # Start from the target the solver already holds: the IK settles a few
+        # mm off its target, so starting from the achieved pose drops the arm.
+        fresh = self.tgt is not None and time.monotonic() - self.tgt[0] < 0.5
+        src = self.tgt if fresh and np.linalg.norm(self.tgt[1] - self.ach[1]) < 0.03 else self.ach
+        self.goal = (src[1].copy(), src[2].copy())
+        self.p_start = src[1].copy()
+        self.p_hold = self.ach[1].copy()           # where the arm must stay
         self.active = which
         self.reached = False
         self.hold_pub.publish(Bool(data=True))
@@ -230,7 +244,7 @@ class Align(Node):
                 self._send()
             elif el < 0.26:
                 self.hold_pub.publish(Bool(data=False))
-            elif el > 0.66:                      # joy_hand re-based on the achieved pose
+            elif el > 0.66:                      # joy_hand re-based on the solver target
                 for ax in self.relock:
                     self.lock_pub.publish(String(data=f'lock {ax}_r'))
                 self.release_at, self.relock, self.goal = None, (), None
@@ -241,13 +255,23 @@ class Align(Node):
         Rm = self.marker_R()
         if Rm is not None and self.ach is not None:
             R_t = Rm @ R_from_rpy(*self.target_rpy)
-            e = rotvec(R_t @ self.goal[1].T)          # world-frame error of the goal
+            # closed loop on the ARM: the error is the achieved orientation's,
+            # so a steady IK offset is trimmed out instead of left in
+            e = rotvec(R_t @ self.ach[2].T)
             ang = float(np.linalg.norm(e))
             lag = math.degrees(np.linalg.norm(rotvec(self.goal[1] @ self.ach[2].T)))
+            Rg = self.goal[1]
             if ang > 1e-6 and lag < self.get_parameter('leash_deg').value:
                 step = min(self.get_parameter('kp').value * ang,
                            math.radians(self.get_parameter('wmax_deg').value)) * self.dt
-                self.goal = (self.goal[0], R_from_rotvec(e / ang * min(step, ang)) @ self.goal[1])
+                Rg = R_from_rotvec(e / ang * min(step, ang)) @ Rg
+            # position: integrate the arm's drift away from the press point
+            pg = self.goal[0] + self.get_parameter('kpos').value * self.dt * (self.p_hold - self.ach[1])
+            trim = pg - self.p_start
+            lim = self.get_parameter('pos_trim_max').value
+            if np.linalg.norm(trim) > lim:
+                pg = self.p_start + trim / np.linalg.norm(trim) * lim
+            self.goal = (pg, Rg)
             done = math.degrees(np.linalg.norm(rotvec(R_t @ self.ach[2].T))) < 0.3
             if done and not self.reached:
                 self.get_logger().info('target reached (arm within 0.3 deg)')

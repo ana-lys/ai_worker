@@ -41,6 +41,8 @@ class H(Node):
         self.lock = self.create_publisher(String, '/ik_solver/ee_lock', 10)
         self.hold = self.create_publisher(Bool, '/spacemouse/right/external_hold', 10)
         self.achieved = P0
+        self.target = None          # solver's held target, published when set
+        self.tgt = self.create_publisher(PoseStamped, '/ik_solver/target_ee_pose_r', 10)
         self.axes = [0.0] * 6
 
     def on_goal(self, m):
@@ -59,6 +61,10 @@ class H(Node):
             a.pose.position.x, a.pose.position.y, a.pose.position.z = self.achieved
             a.pose.orientation.w = 1.0
             self.ach.publish(a)
+            if self.target is not None:
+                t = PoseStamped(); t.header = a.header; t.pose.orientation.w = 1.0
+                t.pose.position.x, t.pose.position.y, t.pose.position.z = self.target
+                self.tgt.publish(t)
             rclpy.spin_once(self, timeout_sec=0.01)
 
     def take(self):
@@ -134,6 +140,24 @@ def main():
     h.hold.publish(Bool(data=False)); h.pump(0.5)
     g = h.take()
     out['after_release'] = r(g[-1][0]) if g else None
+    # with the solver target published: release re-bases onto the TARGET
+    # (the IK settles ~3.7 mm off it), not the achieved pose
+    h.target = (0.3487, -0.1491, 0.9535)
+    for _ in range(10):
+        h.hold.publish(Bool(data=True)); h.pump(0.1)
+    h.take()
+    h.hold.publish(Bool(data=False)); h.pump(0.5)
+    g = h.take()
+    out['after_release_target'] = r(g[-1][0]) if g else None      # = target
+    # a target far (> 3 cm) from the arm is not trusted: achieved again
+    h.target = (0.40, -0.15, 0.95)
+    for _ in range(10):
+        h.hold.publish(Bool(data=True)); h.pump(0.1)
+    h.take()
+    h.hold.publish(Bool(data=False)); h.pump(0.5)
+    g = h.take()
+    out['after_release_far_target'] = r(g[-1][0]) if g else None  # = achieved
+    h.target = None
     # BASE -> ARM rebases onto a new achieved pose
     h.mode.publish(String(data='BASE')); h.pump(0.3); h.take()
     h.pump(0.5)

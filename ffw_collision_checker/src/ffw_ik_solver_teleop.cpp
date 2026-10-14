@@ -583,6 +583,12 @@ public:
         "/ik_solver/achieved_ee_pose_l", 10);
     achieved_pose_pub_r_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         "/ik_solver/achieved_ee_pose_r", 10);
+    // The (clipped) target each arm chases, same frame: the mapper re-bases
+    // onto it at an external-hold release (the IK settles a few mm off it).
+    target_pose_pub_l_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/ik_solver/target_ee_pose_l", 10);
+    target_pose_pub_r_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/ik_solver/target_ee_pose_r", 10);
     // Real-robot EE vs IK-achieved EE error (m), per arm. NaN until the first
     // /joint_states; in sim-only mode (hardware_mode:=false) no publisher ever
     // exists so it stays NaN forever.
@@ -2324,6 +2330,8 @@ private:
   rclcpp::Publisher<ffw_collision_checker::msg::CollisionDebug>::SharedPtr collision_debug_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_pub_l_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr achieved_pose_pub_r_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_l_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_pub_r_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr real_ee_error_pub_l_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr real_ee_error_pub_r_;
 
@@ -2523,23 +2531,30 @@ public:
   void publish_achieved_poses(const Eigen::Isometry3d &achieved_l,
                               const Eigen::Isometry3d &achieved_r,
                               bool publish_l, bool publish_r) {
-    auto publish_one = [this](const rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr &pub,
-                              const Eigen::Isometry3d &achieved) {
-      geometry_msgs::msg::PoseStamped msg;
-      msg.header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
-      msg.header.frame_id = "map";
-      msg.pose.position.x = achieved.translation().x();
-      msg.pose.position.y = achieved.translation().y();
-      msg.pose.position.z = achieved.translation().z();
-      Eigen::Quaterniond q(achieved.linear());
-      msg.pose.orientation.x = q.x();
-      msg.pose.orientation.y = q.y();
-      msg.pose.orientation.z = q.z();
-      msg.pose.orientation.w = q.w();
-      pub->publish(msg);
-    };
-    if (publish_l) publish_one(achieved_pose_pub_l_, achieved_l);
-    if (publish_r) publish_one(achieved_pose_pub_r_, achieved_r);
+    if (publish_l) publish_map_pose(achieved_pose_pub_l_, achieved_l);
+    if (publish_r) publish_map_pose(achieved_pose_pub_r_, achieved_r);
+  }
+
+  void publish_target_poses(const Eigen::Isometry3d &target_l,
+                            const Eigen::Isometry3d &target_r) {
+    publish_map_pose(target_pose_pub_l_, target_l);
+    publish_map_pose(target_pose_pub_r_, target_r);
+  }
+
+  void publish_map_pose(const rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr &pub,
+                        const Eigen::Isometry3d &pose) {
+    geometry_msgs::msg::PoseStamped msg;
+    msg.header.stamp = rclcpp::Clock(RCL_ROS_TIME).now();
+    msg.header.frame_id = "map";
+    msg.pose.position.x = pose.translation().x();
+    msg.pose.position.y = pose.translation().y();
+    msg.pose.position.z = pose.translation().z();
+    Eigen::Quaterniond q(pose.linear());
+    msg.pose.orientation.x = q.x();
+    msg.pose.orientation.y = q.y();
+    msg.pose.orientation.z = q.z();
+    msg.pose.orientation.w = q.w();
+    pub->publish(msg);
   }
 
   // Forward-kinematics of the newest /joint_states onto a scratch mjData,
@@ -3340,6 +3355,7 @@ int main(int argc, char **argv) {
 
     // Update target variables so the viewer spheres reflect the clipped target
     node->get_targets(current_target_l, current_target_r);
+    node->publish_target_poses(current_target_l, current_target_r);
 
     // Carry this tick's achieved pose forward: it's what the wake-guard above
     // uses next time the solver has to resume from idle-sleep.

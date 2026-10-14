@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """ee_orient_align.py: hold-to-rotate the right gripper against the marker.
-This harness is the arm (achieved pose follows the /quest goal, 0.1 s lag),
+This harness is the arm: the solver target follows the /quest goal and the
+achieved pose settles OFF it like the real IK (+1.3 -0.9 -3.5 mm, 1 deg about
+x, 0.1 s lag); it publishes both,
 the ArUco board, joy_hand's latched goal constraints (yaw locked) and the
 Logitech. It starts ee_orient_align itself with a temporary preset file."""
 import json, math, os, subprocess, sys, tempfile, time
@@ -19,6 +21,8 @@ from ee_orient_align import R_from_q, q_from_R, Rz, R_from_rpy, rpy, rotvec, R_f
 BOARD_YAW = math.radians(-98.78)
 RM = Rz(BOARD_YAW + math.pi / 2)
 P0 = np.array([0.55, -0.25, 0.95])
+BIAS_P = np.array([0.0013, -0.0009, -0.0035])        # achieved - target, real robot 2026-10-14
+BIAS_R = R_from_rotvec(np.radians([1.0, 0.0, 0.0]))
 
 
 class W(Node):
@@ -26,11 +30,13 @@ class W(Node):
         super().__init__('orient_align_regress')
         self.R = RM @ R_from_rpy(*np.radians([4.0, -6.0, 8.0]))
         self.p = P0.copy()
+        self.tp, self.tR = P0 - BIAS_P, BIAS_R.T @ self.R     # target the solver holds
         self.goal = None
         self.events = []          # ('hold', bool) / ('lock', str), changes only
         self.hold = False
         self.goal_n = 0
         self.ach = self.create_publisher(PoseStamped, '/ik_solver/achieved_ee_pose_r', 20)
+        self.tgt = self.create_publisher(PoseStamped, '/ik_solver/target_ee_pose_r', 20)
         self.board = self.create_publisher(PoseStamped, '/head_camera/marker_board_pose', qos_profile_sensor_data)
         self.joy = self.create_publisher(Joy, '/joy_logitech', 10)
         gc = self.create_publisher(GoalConstraints, '/spacemouse/right/goal_constraints',
@@ -56,14 +62,16 @@ class W(Node):
 
     def step(self):
         if self.goal is not None and self.hold:
-            self.p += (self.goal[0] - self.p) * 0.2
-            self.R = R_from_rotvec(rotvec(self.goal[1] @ self.R.T) * 0.2) @ self.R
+            self.tp, self.tR = self.goal
+        self.p += (self.tp + BIAS_P - self.p) * 0.2
+        self.R = R_from_rotvec(rotvec(BIAS_R @ self.tR @ self.R.T) * 0.2) @ self.R
         st = self.get_clock().now().to_msg()
-        a = PoseStamped(); a.header.stamp = st; a.header.frame_id = 'map'
-        a.pose.position.x, a.pose.position.y, a.pose.position.z = (float(v) for v in self.p)
-        q = q_from_R(self.R)
-        a.pose.orientation.x, a.pose.orientation.y, a.pose.orientation.z, a.pose.orientation.w = (float(v) for v in q)
-        self.ach.publish(a)
+        for pub, p, R in ((self.ach, self.p, self.R), (self.tgt, self.tp, self.tR)):
+            a = PoseStamped(); a.header.stamp = st; a.header.frame_id = 'map'
+            a.pose.position.x, a.pose.position.y, a.pose.position.z = (float(v) for v in p)
+            q = q_from_R(R)
+            a.pose.orientation.x, a.pose.orientation.y, a.pose.orientation.z, a.pose.orientation.w = (float(v) for v in q)
+            pub.publish(a)
         self.k += 1
         if self.k % 5 == 0:
             b = PoseStamped(); b.header.stamp = st; b.header.frame_id = 'base_link'
@@ -82,6 +90,9 @@ class W(Node):
 
     def rel(self):
         return [round(float(v), 1) for v in np.degrees(rpy(RM.T @ self.R))]
+
+    def drift_mm(self):
+        return round(float(np.linalg.norm(self.p - P0)) * 1000, 1)
 
 
 def main():
@@ -113,7 +124,7 @@ def main():
         r['after_1s_rpy'] = w.rel()                                # partway (rate capped)
         w.press([2], 6.0)
         r['zero_rpy'] = w.rel()                                    # [0, 0, 0]
-        r['zero_pos_drift_mm'] = round(float(np.linalg.norm(w.p - P0)) * 1000, 1)
+        r['zero_pos_drift_mm'] = w.drift_mm()                     # ~0 (IK offset trimmed out)
         w.press([], 1.5)
         r['zero_events'] = w.events[:]     # hold on, unlock yaw, hold off, lock yaw
         r['released_rpy'] = w.rel()
@@ -121,6 +132,7 @@ def main():
         w.events.clear()
         w.press([4], 7.0); w.press([], 1.5)
         r['preset_rpy'] = w.rel()                                  # [4, -6, 8]
+        r['preset_pos_drift_mm'] = w.drift_mm()
         # both buttons: nothing
         w.events.clear()
         w.press([2, 4], 1.0); w.press([], 0.5)

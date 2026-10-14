@@ -1,11 +1,12 @@
 {
  "after_1s_rpy": [
-  1.7,
-  -2.3,
-  3.2
+  1.6,
+  -2.1,
+  3.0
  ],
  "both_ignored": true,
  "no_preset_refused": true,
+ "preset_pos_drift_mm": 0.0,
  "preset_rpy": [
   4.0,
   -6.0,

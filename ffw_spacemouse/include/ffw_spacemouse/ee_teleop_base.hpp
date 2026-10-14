@@ -75,6 +75,8 @@ public:
 
     this->declare_parameter("quest_achieved_pose_topic_l", "/ik_solver/achieved_ee_pose_l");
     this->declare_parameter("quest_achieved_pose_topic_r", "/ik_solver/achieved_ee_pose_r");
+    this->declare_parameter("solver_target_pose_topic_l", "/ik_solver/target_ee_pose_l");
+    this->declare_parameter("solver_target_pose_topic_r", "/ik_solver/target_ee_pose_r");
 
     // use_teleop_core: send the goal in its native frame to teleop_core, which
     // re-expresses it in the base frame and is the only publisher to the
@@ -172,6 +174,26 @@ public:
               "Rebased ee_goal_ to first achieved pose (%s)", target_arm_.c_str());
           }
         }
+      });
+
+    // ── Solver target subscription ────────────────────────────────
+    // The target the solver is holding (map frame, same as the achieved
+    // pose). The IK settles a few mm off its target (~3.7 mm, mostly down),
+    // so re-basing onto the ACHIEVED pose at a hand-over moves the target by
+    // that offset and the arm drops again: re-base onto this target instead.
+    const std::string target_topic = (target_arm_ == "right")
+        ? this->get_parameter("solver_target_pose_topic_r").as_string()
+        : this->get_parameter("solver_target_pose_topic_l").as_string();
+    target_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+      target_topic, 10,
+      [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        target_pose_map_.translation() << msg->pose.position.x,
+            msg->pose.position.y, msg->pose.position.z;
+        Eigen::Quaterniond q(msg->pose.orientation.w, msg->pose.orientation.x,
+                             msg->pose.orientation.y, msg->pose.orientation.z);
+        target_pose_map_.linear() = q.normalized().toRotationMatrix();
+        target_pose_time_ = this->now();
+        target_pose_valid_ = true;
       });
 
     // ── Machine-state resync subscription ─────────────────────────
@@ -481,13 +503,15 @@ private:
   // ee_goal_ := the solver's achieved pose (base frame), in the native frame.
   // If the native frame is unavailable now, the first tick that has it again
   // re-bases instead (native_ok_).
-  bool rebase_goal_to_achieved() {
+  bool rebase_goal_to_achieved() { return rebase_goal_to(achieved_pose_map_); }
+
+  bool rebase_goal_to(const Eigen::Isometry3d &pose_map) {
     Eigen::Isometry3d T_base_native;
     if (!lookup_base_from_native(T_base_native)) {
       native_ok_ = false;
       return false;
     }
-    ee_goal_ = T_base_native.inverse() * achieved_pose_map_;
+    ee_goal_ = T_base_native.inverse() * pose_map;
     return true;
   }
 
@@ -630,15 +654,33 @@ private:
     joy_received_ = true;
   }
 
-  // End an external hold: re-base ee_goal_ onto where the arm actually is, so
-  // the first delta after release carries no jump back to the pre-hold goal.
+  // End an external hold: re-base ee_goal_ onto the target the solver holds
+  // (what the script last commanded), so the first delta after release
+  // carries no jump back to the pre-hold goal and no IK-offset drop. Falls
+  // back to the achieved pose if the target is stale or far from the arm.
   void release_external_hold(const char *why)
   {
     external_hold_ = false;
-    if (achieved_pose_valid_) rebase_goal_to_achieved();
+    const char *onto = "nothing";
+    if (solver_target_usable() && rebase_goal_to(target_pose_map_)) {
+      onto = "solver target";
+    } else if (achieved_pose_valid_ && rebase_goal_to_achieved()) {
+      onto = "achieved pose";
+    }
     RCLCPP_INFO(this->get_logger(),
-      "External hold OFF (%s) — ee_goal_ re-based to achieved pose (%s)",
-      why, target_arm_.c_str());
+      "External hold OFF (%s) — ee_goal_ re-based to %s (%s)",
+      why, onto, target_arm_.c_str());
+  }
+
+  // Fresh (< 0.5 s) and within 3 cm / 0.1 rad of the achieved pose.
+  bool solver_target_usable()
+  {
+    if (!target_pose_valid_ || !achieved_pose_valid_) return false;
+    if ((this->now() - target_pose_time_).seconds() > 0.5) return false;
+    const double d = (target_pose_map_.translation() - achieved_pose_map_.translation()).norm();
+    const double a = Eigen::AngleAxisd(
+        target_pose_map_.linear() * achieved_pose_map_.linear().transpose()).angle();
+    return d < 0.03 && std::abs(a) < 0.1;
   }
 
   void control_timer_callback()
@@ -881,6 +923,11 @@ private:
   // ── World-frame re-base state (quest_teleop_plan §11, Task 1) ──
   Eigen::Isometry3d achieved_pose_map_ {Eigen::Isometry3d::Identity()};
   bool achieved_pose_valid_ {false};
+  // Solver's held target (map frame), for the external-hold release re-base.
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr target_pose_sub_;
+  Eigen::Isometry3d target_pose_map_ {Eigen::Isometry3d::Identity()};
+  rclcpp::Time target_pose_time_;
+  bool target_pose_valid_ {false};
   // Set on machine-state resync; achieved-pose messages stamped before it are
   // stale pre-sync poses and must not anchor the re-base (epoch = no resync
   // yet, every message passes).
