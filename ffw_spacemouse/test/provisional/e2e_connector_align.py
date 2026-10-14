@@ -41,6 +41,12 @@ class World(Node):
         self.cmd = np.zeros(3)
         self.ach = None
         self.goal = None
+        self.goal_q = None
+        self.ach_q = None
+        self.create_subscription(PoseStamped, '/quest/right/ee_target_pose',
+                                 lambda m: setattr(self, 'goal_q', m.pose.orientation), 20)
+        self.create_subscription(PoseStamped, '/ik_solver/achieved_ee_pose_r',
+                                 lambda m: setattr(self, 'ach_q', m.pose.orientation), 20)
         self.create_subscription(PoseStamped, '/quest/right/ee_target_pose',
                                  lambda m: setattr(self, 'goal', np.array([m.pose.position.x, m.pose.position.y, m.pose.position.z])), 20)
         self.create_subscription(Twist, '/cmd_vel', lambda m: setattr(self, 'cmd', np.array([m.linear.x, m.linear.y, m.angular.z])), 20)
@@ -95,8 +101,11 @@ def main():
     proc = subprocess.Popen(['ros2', 'run', 'ffw_spacemouse', 'connector_align_capture.py', '--placements', '2',
                              '--seed', '3', '--out', out,
                              # sim speed: fast arm/base, no settle wait (the sim solver stops short anyway)
-                             '--arm-vmax', '0.3', '--arm-wmax-deg', '90', '--settle-timeout', '0.2',
-                             '--base-vmax', '0.3', '--base-wmax', '0.5', '--window', '0.4'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             '--arm-vmax', '0.3', '--arm-wmax-deg', '90', '--settle-mm', '25', '--settle-timeout', '3',
+                             '--base-vmax', '0.3', '--base-wmax', '0.5', '--window', '0.4',
+                             # the sim solver stops short of these real-robot poses: loose hand-over
+                             # check so the normal path (all EE axes locked) runs at every point
+                             '--handover-pos-mm', '60', '--handover-rot-deg', '10'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=0)
     res = {'points': [], 'placements': []}
     buf = ''
@@ -114,11 +123,13 @@ def main():
                 planned.append([float(m.group(2)), float(m.group(3)), math.radians(float(m.group(4)))])
             if 'SAFETY' in line:
                 proc.stdin.write('\n')
+            if 'arm off the goal' in line:
+                res.setdefault('off_goal', []).append(line)
             if 'retry: back off' in line:
                 res['retries'] = res.get('retries', 0) + 1
             if line.startswith('skipped'):
                 res.setdefault('skipped', []).append(line)
-            if 'LOCKED in the IK' in line or 'lift lock restored' in line:
+            if 'LOCKED in the IK' in line:
                 res.setdefault('lift', []).append(line)
             if line.startswith('done:') or line.startswith('ABORT') or 'NOT recorded' in line:
                 res.setdefault('log', []).append(line)
@@ -140,6 +151,9 @@ def main():
             err = (w.ach - exp) * 1000 if w.ach is not None else None
             gerr = (w.goal - exp) * 1000 if w.goal is not None else None
             res['points'].append((name, [round(float(v), 1) for v in err], [round(float(v), 1) for v in gerr]))
+            # yaw must not move at the hand-over: achieved now vs the script's last goal
+            yw = lambda q: math.degrees(math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)))
+            res.setdefault('handover_yaw_jump_deg', []).append(round(yw(w.ach_q) - yw(w.goal_q), 2))
             if name.endswith('_ad_a'):
                 res['placements'].append((name[:2], [round(float(v), 3) for v in w.base[:2]] + [round(math.degrees(w.base[2]), 2)],
                                           [round(v, 3) for v in planned[bi][:2]] + [round(math.degrees(planned[bi][2]), 2)] if bi < len(planned) else None))
@@ -156,6 +170,8 @@ def main():
         'placement_true_vs_planned': res['placements'],
         'log': res.get('log'),
         'lift': res.get('lift'),
+        'handover_yaw_jump_deg_max': max((abs(v) for v in res.get('handover_yaw_jump_deg', [])), default=None),
+        'off_goal': (res.get('off_goal') or [])[:4],
         'retries': res.get('retries'), 'ik_prompts': res.get('ik_prompts'), 'skipped': res.get('skipped'),
     }
     print(json.dumps(summary, indent=1))

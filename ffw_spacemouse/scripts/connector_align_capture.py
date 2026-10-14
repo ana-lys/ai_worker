@@ -32,8 +32,8 @@ solver frame); release re-bases joy_hand on the achieved pose. Base: claims
 (use_teleop_core:=false): teleop_core ignores that claim.
 The lift stays at the recorded level: before the first motion it is moved
 there if needed (asks y/N first; solver qpos rail, both arms held) and hard-locked in the IK
-(/teleop_locks), so the arm alone reaches every target; its lock state is
-restored at the end. Ctrl-C stops the base, releases both arms, unlocks and
+(/teleop_locks), so the arm alone reaches every target; it is left locked
+at the end (the lift lock always stays on). Ctrl-C stops the base, releases both arms, unlocks and
 un-claims.
 
     ros2 run ffw_spacemouse connector_align_capture.py --plan-only
@@ -807,10 +807,10 @@ def main():
         for ax in ('roll', 'pitch', 'yaw'):
             ctl.ee_lock_pub.publish(String(data=f'unlock {ax}_r'))
         time.sleep(0.3)
-        if ctl.set_locked('lift_joint', lift_locked0) == lift_locked0:
-            log(f'lift lock restored ({"LOCKED" if lift_locked0 else "free"})')
+        if ctl.set_locked('lift_joint', True) is True:
+            log('lift left LOCKED in the IK')
         else:
-            log('WARNING: could not restore the lift lock state -- check /ik_solver/list_joints')
+            log('WARNING: could not lock the lift in the IK -- check /ik_solver/list_joints')
         log('released both arms and the base; EE locks cleared')
         rclpy.try_shutdown()
         spinner.join(timeout=2.0)
