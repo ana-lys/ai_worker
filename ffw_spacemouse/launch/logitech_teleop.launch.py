@@ -151,6 +151,15 @@ def launch_setup(context):
                 'use_teleop_core': use_teleop_core,
             }],
         ),
+        # hold printed button 3 / 5: right gripper to RPY 0 0 0 / the saved
+        # preset against the marker
+        Node(
+            package='ffw_spacemouse',
+            executable='ee_orient_align.py',
+            name='ee_orient_align',
+            output='screen',
+            parameters=[{'joy_topic': '/joy_logitech'}],
+        ),
     ]
 
 

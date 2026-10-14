@@ -1,0 +1,49 @@
+{
+ "after_1s_rpy": [
+  1.7,
+  -2.3,
+  3.2
+ ],
+ "both_ignored": true,
+ "no_preset_refused": true,
+ "preset_rpy": [
+  4.0,
+  -6.0,
+  8.0
+ ],
+ "released_rpy": [
+  0.0,
+  -0.0,
+  0.0
+ ],
+ "saved": true,
+ "start_rpy": [
+  4.0,
+  -6.0,
+  8.0
+ ],
+ "zero_events": [
+  [
+   "hold",
+   true
+  ],
+  [
+   "lock",
+   "unlock yaw_r"
+  ],
+  [
+   "hold",
+   false
+  ],
+  [
+   "lock",
+   "lock yaw_r"
+  ]
+ ],
+ "zero_pos_drift_mm": 0.0,
+ "zero_rpy": [
+  0.0,
+  -0.0,
+  0.0
+ ]
+}

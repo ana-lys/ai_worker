@@ -14,6 +14,7 @@
 #   lift_head       teleop_core lift ramp + head relay
 #   joy_base        joy_base (use_teleop_core) -> teleop_core: twist, lift, head
 #   logitech        logitech_base_teleop (use_teleop_core) -> teleop_core
+#   orient_align    ee_orient_align.py hold-to-rotate (harness starts the node)
 #   e2e_marker      marker_frame_teleop.launch.py + real solver in sim (opens the
 #                   MuJoCo viewer; prints only, not part of "all")
 #   e2e_unified     default unified launch keeps the legacy wiring (opens the viewer)
@@ -68,6 +69,7 @@ case "${1:-all}" in
                    > "$LOG/logitech.log" 2>&1 & LG=$!
                  run logitech_regress.py "-p marker_health:=false" - | expect logitech
                  kill $LG 2>/dev/null; wait 2>/dev/null ;;
+  orient_align)  python3 "$D/orient_align_regress.py" 2>/dev/null | expect orient_align ;;
   e2e_marker)    # real solver + full marker launch in sim; opens the MuJoCo viewer
                  setsid ros2 launch ffw_spacemouse marker_frame_teleop.launch.py hardware_mode:=false \
                    use_logitech:=false use_quest:=false > "$LOG/e2e_launch.log" 2>&1 & LP=$!
@@ -90,7 +92,7 @@ case "${1:-all}" in
                  sleep 8
                  python3 "$D/e2e_connector_align.py" 2>/dev/null
                  kill -INT -- -$LP 2>/dev/null; sleep 3; kill -- -$LP 2>/dev/null; wait 2>/dev/null ;;
-  all) for t in joy_hand joy_hand_core marker marker_core base health clamp lift_head joy_base logitech; do
+  all) for t in joy_hand joy_hand_core marker marker_core base health clamp lift_head joy_base logitech orient_align; do
          echo "== $t"; "$0" "$t"; done ;;
   *) echo "unknown test $1"; exit 2 ;;
 esac
