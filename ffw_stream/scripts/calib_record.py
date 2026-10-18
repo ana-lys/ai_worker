@@ -69,6 +69,7 @@ def main():
     ap.add_argument('--port', type=int, help='override the UDP port')
     ap.add_argument('--out', default=OUT_ROOT, help='root folder (default ~/mrcalib/data)')
     ap.add_argument('--probe-timeout', type=float, default=5.0)
+    ap.add_argument('--view', default='1920x1080', help='live view fits inside WxH (display only; saved frames stay native)')
     a = ap.parse_args()
 
     stop = threading.Event()
@@ -102,7 +103,8 @@ def main():
 
     win = f'calib_record {a.camera}'
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
-    t0, size = time.time(), None
+    vw, vh = (int(v) for v in a.view.lower().split('x'))
+    t0, size, scale = time.time(), None, 1.0
     try:
         while not stop.is_set():
             ok, frame = cap.read()
@@ -112,13 +114,14 @@ def main():
                 continue
             if size is None:
                 size = frame.shape[1::-1]
-                print(f'frame size {size[0]}x{size[1]}')
+                scale = min(vw / size[0], vh / size[1])
+                print(f'frame size {size[0]}x{size[1]}, view x{scale:.2f}')
             q.put((os.path.join(folder, f'{idx:06d}.png'), frame))
             idx += 1
-            view = frame.copy()
+            view = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST) if scale != 1.0 else frame.copy()
             n = idx - first
             cv2.putText(view, f'{a.camera} #{idx - 1:06d}  rec {n}  {n / max(time.time() - t0, 1e-3):.1f} fps  q=quit',
-                        (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                        (12, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
             cv2.imshow(win, view)
             if cv2.waitKey(1) & 0xff in (ord('q'), 27):
                 break
