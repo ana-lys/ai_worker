@@ -11,7 +11,8 @@ folder. q / Esc in the window or Ctrl+C quits.
 
 Frames are saved as the sensor sends them (NOT rotated), so they match the
 factory intrinsics' image orientation; only the live view of the D405s is
-rotated 90 deg CCW like the dashboard, and scaled to a 720 px long side. The codec
+rotated 90 deg CCW like the dashboard; every view is mirrored left-right and
+scaled to a 1080 px long side. The codec
 (H264 or MJPEG) is detected from the RTP payload type. The UDP port can only be
 read by one process: stop the dashboard receiver first."""
 import argparse, glob, os, queue, re, signal, socket, sys, threading, time
@@ -70,7 +71,7 @@ def main():
     ap.add_argument('--port', type=int, help='override the UDP port')
     ap.add_argument('--out', default=OUT_ROOT, help='root folder (default ~/mrcalib/data)')
     ap.add_argument('--probe-timeout', type=float, default=5.0)
-    ap.add_argument('--view-long', type=int, default=720, help='live view long side in px (display only; saved frames stay native)')
+    ap.add_argument('--view-long', type=int, default=1080, help='live view long side in px (display only; saved frames stay native)')
     a = ap.parse_args()
 
     stop = threading.Event()
@@ -121,10 +122,12 @@ def main():
             q.put((os.path.join(folder, f'{idx:06d}.png'), frame))
             idx += 1
             view = cv2.rotate(frame, rot) if rot is not None else frame
-            view = cv2.resize(view, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR) if scale != 1.0 else view.copy()
+            view = cv2.flip(view, 1)   # mirrored left-right (display only)
+            if scale != 1.0:
+                view = cv2.resize(view, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
             n = idx - first
             cv2.putText(view, f'{a.camera} #{idx - 1:06d}  rec {n}  {n / max(time.time() - t0, 1e-3):.1f} fps  q=quit',
-                        (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                        (10, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             cv2.imshow(win, view)
             if cv2.waitKey(1) & 0xff in (ord('q'), 27):
                 break
