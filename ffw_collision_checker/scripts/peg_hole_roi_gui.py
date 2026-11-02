@@ -13,7 +13,7 @@ Keys (window "peg-hole ROI"):
   q / Esc    quit (asks if unsaved)
 
   .venv/bin/python peg_hole_roi_gui.py                    # ROI 256 -> 128
-  .venv/bin/python peg_hole_roi_gui.py --codec mjpeg      # if the streamer runs --mjpeg
+  .venv/bin/python peg_hole_roi_gui.py --codec h264       # if the streamer runs --h264
 """
 import argparse
 import json
@@ -191,7 +191,7 @@ def main():
     ap.add_argument("--file", default=str(images.ROI_FILE))
     ap.add_argument("--size", type=int, default=2 * images.OUT, help="default ROI size, px (new ROIs only)")
     ap.add_argument("--out", type=int, default=images.OUT, help="policy image size, px")
-    ap.add_argument("--codec", default="h264", choices=("h264", "mjpeg"))
+    ap.add_argument("--codec", default="mjpeg", choices=("h264", "mjpeg"))
     ap.add_argument("--left-port", type=int, default=images.PORTS["left"])
     ap.add_argument("--right-port", type=int, default=images.PORTS["right"])
     ap.add_argument("--display-scale", type=float, default=1.5, help="camera view zoom (frames are 270x480)")

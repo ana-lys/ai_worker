@@ -5,7 +5,12 @@
 
 #include <opencv2/opencv.hpp>
 
+#include "ffw_stream/depth_curve.hpp"
+#include "ffw_stream/depth_udp.hpp"
+
 #include <iostream>
+#include <array>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -34,7 +39,20 @@ public:
     // always listened on; the dashboard shows whichever is live.
     this->declare_parameter<std::string>("rgb_source", "auto");
     this->declare_parameter<std::string>("oakd_codec", "h264");
-    this->declare_parameter<std::string>("rs_codec", "h264");
+    this->declare_parameter<std::string>("rs_codec", "mjpeg");
+    // D405 depth: "zstd" (default) / "raw" = lossless Z16 over plain UDP
+    // (depth_udp.hpp; both handled by the same loop, the codec is per frame);
+    // "mjpeg8" = legacy 8-bit curve-mapped depth decoded with rs_codec.
+    this->declare_parameter<std::string>("depth_codec", "zstd");
+    // D405 depth code -> meters (ffw_stream/depth_curve.hpp); must match the
+    // streamer's --depth-min / max_depth_m / --depth-knee / --depth-knee-frac.
+    {
+      ffw_stream::depth_curve::Params d;
+      this->declare_parameter<double>("depth_min_m", d.min_m);
+      this->declare_parameter<double>("depth_max_m", d.max_m);
+      this->declare_parameter<double>("depth_knee_m", d.knee_m);
+      this->declare_parameter<double>("depth_knee_frac", d.knee_frac);
+    }
     // D435 head stream on base_port+100: its own codec (streamer --d435-codec,
     // default mjpeg), independent of the D405s' rs_codec.
     this->declare_parameter<std::string>("d435_codec", "mjpeg");
@@ -50,12 +68,30 @@ public:
     oakd_codec_ = this->get_parameter("oakd_codec").as_string();
     rs_codec_ = this->get_parameter("rs_codec").as_string();
     d435_codec_ = this->get_parameter("d435_codec").as_string();
+    depth_codec_ = this->get_parameter("depth_codec").as_string();
+    {
+      ffw_stream::depth_curve::Params d;
+      d.min_m = this->get_parameter("depth_min_m").as_double();
+      d.max_m = this->get_parameter("depth_max_m").as_double();
+      d.knee_m = this->get_parameter("depth_knee_m").as_double();
+      d.knee_frac = this->get_parameter("depth_knee_frac").as_double();
+      ffw_stream::depth_curve::Curve curve(d);
+      depth_decode_lut_ = curve.decode_lut();
+      depth_curve_ = curve;
+      depth_max_m_ = static_cast<float>(curve.params().max_m);
+      RCLCPP_INFO(this->get_logger(), "D405 depth curve: %.3f..%.3f m, %.0f%% of codes below %.3f m (lambda=%.1f mm)",
+                  curve.params().min_m, curve.params().max_m, curve.params().knee_frac * 100.0,
+                  curve.params().knee_m, curve.lambda() * 1000.0);
+    }
 
     RCLCPP_INFO(this->get_logger(), "Starting Multi-Camera UDP Receiver (base_port=%d, num_cameras=%d)", base_port, num_cameras_);
 
     if (enable_d405s) {
       pub_ir_.resize(num_cameras_);
-      if (!dual_rgb_no_depth_) pub_depth_.resize(num_cameras_);
+      if (!dual_rgb_no_depth_) {
+        pub_depth_.resize(num_cameras_);
+        pub_depth_m_.resize(num_cameras_);
+      }
 
       for (int i = 0; i < num_cameras_; ++i) {
         if (disable_left_d405_ && i == 0) {
@@ -71,7 +107,15 @@ public:
 
         if (!dual_rgb_no_depth_) {
           pub_depth_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/depth/image_rect_raw", 10);
-          threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "Depth", depth_port, pub_depth_[i]);
+          // image_rect_raw: mono8 curve code (mjpeg8) or 16UC1 raw D405 units
+          // (zstd/raw; meters = value * depth_scale, logged on connect).
+          // Decoded metric depth (32FC1 meters, NaN = no depth; REP 118).
+          pub_depth_m_[i] = this->create_publisher<sensor_msgs::msg::Image>(ns + "/depth/image_meters", 10);
+          if (depth_codec_ == "mjpeg8") {
+            threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "Depth", depth_port, pub_depth_[i]);
+          } else {
+            threads_.emplace_back(&RealsenseUDPReceiver::depthZ16Loop, this, i, depth_port);
+          }
         }
         threads_.emplace_back(&RealsenseUDPReceiver::streamLoop, this, i, "IR", ir_port, pub_ir_[i]);
       }
@@ -208,6 +252,22 @@ private:
           sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(header, "mono8", gray).toImageMsg();
           pub->publish(*msg);
 
+          if (type == "Depth" && cam_index < static_cast<int>(pub_depth_m_.size()) &&
+              pub_depth_m_[cam_index]) {
+            // Nonlinear 8-bit code -> meters (depth_curve.hpp); invalid -> NaN.
+            cv::Mat meters(gray.size(), CV_32FC1);
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            for (int y = 0; y < gray.rows; ++y) {
+              const uint8_t *in = gray.ptr<uint8_t>(y);
+              float *out = meters.ptr<float>(y);
+              for (int x = 0; x < gray.cols; ++x) {
+                float m = depth_decode_lut_[in[x]];
+                out[x] = m > 0.0f ? m : nan;
+              }
+            }
+            pub_depth_m_[cam_index]->publish(*cv_bridge::CvImage(header, "32FC1", meters).toImageMsg());
+          }
+
           {
             std::lock_guard<std::mutex> lock(img_mutex_);
             latest_images_[feed_name] = gray.clone();
@@ -227,6 +287,103 @@ private:
         }
       }
     }
+  }
+
+  // Lossless Z16 depth (depth_udp.hpp): reassemble, publish 16UC1 raw units +
+  // 32FC1 meters, and feed the dashboard an 8-bit curve-coded copy so the
+  // existing colormap path is unchanged.
+  void depthZ16Loop(int cam_index, int port) {
+    const std::string feed_name = "Cam" + std::to_string(cam_index) + "_Depth";
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+      RCLCPP_ERROR(this->get_logger(), "[%s] socket() failed", feed_name.c_str());
+      return;
+    }
+    int rcvbuf = 8 * 1024 * 1024;  // clamped by net.core.rmem_max
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    timeval tv{0, 200000};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    while (running_ && rclcpp::ok() &&
+           bind(sock, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+      RCLCPP_WARN(this->get_logger(), "[%s] bind udp:%d failed, retrying in 2s...", feed_name.c_str(), port);
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    RCLCPP_INFO(this->get_logger(), "[%s] lossless Z16 depth on udp:%d", feed_name.c_str(), port);
+
+    ffw_stream::depth_udp::DepthReassembler rx;
+    std::vector<uint8_t> pkt(65536);
+    std::array<uint8_t, 65536> code_lut{};
+    float lut_scale = -1.0f;
+    bool announced = false;
+    std_msgs::msg::Header header;
+    header.frame_id = "camera_" + std::to_string(cam_index) + "_link";
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+
+    while (running_ && rclcpp::ok()) {
+      ssize_t n = recv(sock, pkt.data(), pkt.size(), 0);
+      if (n <= 0) continue;
+      if (!rx.push(pkt.data(), static_cast<size_t>(n))) continue;
+
+      const int w = rx.width(), h = rx.height();
+      const float scale = rx.depth_scale();
+      if (scale != lut_scale) {
+        for (int r = 0; r < 65536; ++r) code_lut[r] = depth_curve_.encode(r * double(scale));
+        code_lut[0] = 0;
+        lut_scale = scale;
+      }
+      if (!announced) {
+        RCLCPP_INFO(this->get_logger(), "[%s] first frame %dx%d, %s, depth_scale=%g m/unit, %.1f KB",
+                    feed_name.c_str(), w, h,
+                    rx.codec() == ffw_stream::depth_udp::Codec::kZstdDelta ? "zstd+delta"
+                    : rx.compressed() ? "zstd" : "raw", scale,
+                    rx.payload_size() / 1024.0);
+        announced = true;
+      }
+
+      cv::Mat z16(h, w, CV_16UC1, const_cast<uint16_t *>(rx.frame().data()));
+      cv::Mat z16r;
+      cv::rotate(z16, z16r, cv::ROTATE_90_COUNTERCLOCKWISE);
+      header.stamp = this->now();
+
+      if (cam_index < static_cast<int>(pub_depth_.size()) && pub_depth_[cam_index]) {
+        pub_depth_[cam_index]->publish(*cv_bridge::CvImage(header, "16UC1", z16r).toImageMsg());
+      }
+      cv::Mat meters(z16r.size(), CV_32FC1);
+      cv::Mat code8(z16r.size(), CV_8UC1);
+      for (int y = 0; y < z16r.rows; ++y) {
+        const uint16_t *in = z16r.ptr<uint16_t>(y);
+        float *out = meters.ptr<float>(y);
+        uint8_t *c8 = code8.ptr<uint8_t>(y);
+        for (int x = 0; x < z16r.cols; ++x) {
+          out[x] = in[x] ? in[x] * scale : nan;
+          c8[x] = code_lut[in[x]];
+        }
+      }
+      if (cam_index < static_cast<int>(pub_depth_m_.size()) && pub_depth_m_[cam_index]) {
+        pub_depth_m_[cam_index]->publish(*cv_bridge::CvImage(header, "32FC1", meters).toImageMsg());
+      }
+      {
+        std::lock_guard<std::mutex> lock(img_mutex_);
+        latest_images_[feed_name] = code8;
+      }
+
+      frames_received_[feed_name]++;
+      auto now = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(now - fps_timers_[feed_name]).count();
+      if (elapsed >= 60.0) {
+        double fps_val = (elapsed > 0.0) ? (frames_received_[feed_name] / elapsed) : 0.0;
+        RCLCPP_INFO(this->get_logger(), "[%s] %.1f fps, %.1f KB/frame, %lu incomplete frames dropped so far",
+                    feed_name.c_str(), fps_val, rx.payload_size() / 1024.0,
+                    static_cast<unsigned long>(rx.dropped()));
+        frames_received_[feed_name] = 0;
+        fps_timers_[feed_name] = now;
+      }
+    }
+    close(sock);
   }
 
   void telemetryReceiverLoop(const std::string &source, int port) {
@@ -663,7 +820,9 @@ private:
             custom_lut = cv::Mat(256, 1, CV_8UC3);
             custom_lut.at<cv::Vec3b>(0, 0) = cv::Vec3b(0, 0, 0);
             for (int i = 1; i <= 255; ++i) {
-              float x = i / 255.0f;
+              // Colour by decoded meters / max (the code itself is nonlinear).
+              float x = depth_decode_lut_[i] / depth_max_m_;
+              if (depth_decode_lut_[i] <= 0.0f) { custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(0, 0, 0); continue; }
               if (x < 0.08f) { custom_lut.at<cv::Vec3b>(i, 0) = cv::Vec3b(0, 0, 0); continue; }
               float base_b = 255.0f - (127.0f * x);
               float base_g = 255.0f * (1.0f - x);
@@ -784,6 +943,11 @@ private:
   std::string d435_codec_;
 
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_depth_;
+  std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_depth_m_;
+  std::vector<float> depth_decode_lut_ = std::vector<float>(256, 0.0f);
+  ffw_stream::depth_curve::Curve depth_curve_;
+  std::string depth_codec_ = "zstd";
+  float depth_max_m_ = 1.0f;
   std::vector<rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr> pub_ir_;
 
   std::mutex img_mutex_;

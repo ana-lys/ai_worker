@@ -55,7 +55,7 @@ class WristCameras:
     (it would own the ports). grab() -> ({cam: (out, out, 3) RGB uint8 or None}, {cam: recv
     time.time() or NaN}) with the newest frame of each camera."""
 
-    def __init__(self, roi=None, codec="h264"):
+    def __init__(self, roi=None, codec="mjpeg"):
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ffw_il_recorder"))
         from ffw_il_recorder import gst_decode

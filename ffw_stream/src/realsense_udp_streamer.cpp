@@ -2,21 +2,29 @@
 //
 // For each connected RealSense camera:
 //   - Opens Depth + IR(1) streams (D405) or RGB-only (D435).
-//   - Clamps depth to [0, max_depth_m] meters and rescales to 8-bit (0-255).
+//   - Depth (default --depth-codec zstd): raw 16-bit Z16, delta/byte-plane
+//     filter + zstd-1, lossless,
+//     over plain UDP (include/ffw_stream/depth_udp.hpp) -- exact sensor
+//     values, ~1 ms encode. --depth-codec raw sends Z16 uncompressed (62 Mbps
+//     for both D405s: too much for the robot's 100 Mbps eth0).
+//   - --depth-codec mjpeg8: legacy video path; maps depth to 8 bits with the
+//     nonlinear curve in
+//     ffw_stream/depth_curve.hpp (default 7 cm..1 m, 80% of the codes below
+//     30 cm, exponential step growth -- very fine close up, coarse far). The receiver decodes
+//     it back to meters with the same header.
 //   - IR frames are already 8-bit (Y8), copied out respecting row stride.
 //   - Encodes via GStreamer appsrc → x264enc (software libx264, ultrafast +
 //     zerolatency) → rtph264pay → udpsink. In-process, no subprocess overhead.
 //
 // NOTE on depth=0: the RealSense SDK uses raw value 0 to mean "no valid
-// depth" (sensor couldn't measure that pixel). With this mapping that also
-// comes out as 0 in the 8-bit image -- visually identical to "actual
-// distance = 0m". If you need to tell those apart downstream, special-case
-// raw==0 before scaling (e.g. force it to 255) and document the convention
-// for whoever consumes the stream.
+// depth". It is sent as code 0; valid depth starts at code 4 (codes 1-3 are a
+// guard band so MJPEG ringing around holes is not read as near-range depth).
 //
 // Usage:
 //   realsense_udp_streamer <dest_ip> <base_port> [width=480] [height=270]
-//   [fps=30] [max_depth_m=1.0] [--enable-d405s|--disable-d405s]
+//   [fps=30] [max_depth_m=1.0] [--depth-min <m>] [--depth-knee <m>]
+//   [--depth-knee-frac <0..1>] [--depth-codec zstd|raw|mjpeg8] [--depth-zstd-level <n>]
+//   [--enable-d405s|--disable-d405s]
 //   [--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] [--disable-left-d405]
 //   [--color-exposure <microseconds>] [--d435-fps <n>]
 //   [--no-d435-imu] [--d435-imu-gyro-hz <n>] [--d435-imu-accel-hz <n>]
@@ -68,6 +76,8 @@
 
 // AprilTag 25h9 board-pose tap on the D435 head stream (own thread).
 #include "ffw_stream/board_pose_detector.hpp"
+#include "ffw_stream/depth_curve.hpp"
+#include "ffw_stream/depth_udp.hpp"
 
 std::mutex cout_mutex;
 std::atomic<bool> g_running{true};
@@ -525,23 +535,36 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
 
 void stream_camera(const std::string &serial, int index,
                    const std::string &dest_ip, int depth_port, int ir_port,
-                   int width, int height, int fps, float max_depth_m,
+                   int width, int height, int fps,
+                   ffw_stream::depth_curve::Params depth_params,
                    bool mjpeg = false, bool rgb_mode = false, int color_exposure_us = -1,
-                   int color_wb = -1, bool enable_depth = true) {
+                   int color_wb = -1, bool enable_depth = true,
+                   std::string depth_codec = "zstd", int depth_zstd_level = 1) {
+  // depth_codec: "zstd" / "raw" = lossless Z16 over plain UDP (depth_udp.hpp);
+  // "mjpeg8" = 8-bit curve-mapped depth through the same GStreamer codec as RGB.
+  const bool depth_z16 = (depth_codec != "mjpeg8");
   std::ostringstream hdr;
   hdr << "\n=== CAM" << index << " " << serial << " : "
-      << (enable_depth ? ("depth->udp:" + std::to_string(depth_port) + "  ") : "depth=off  ")
+      << (enable_depth ? ("depth(" + depth_codec + ")->udp:" + std::to_string(depth_port) + "  ") : "depth=off  ")
       << (rgb_mode ? "rgb" : "ir") << "->udp:" << ir_port
       << "  gst=" << (mjpeg ? "mjpeg" : "h264") << " ===";
   log(hdr.str());
 
   GstEncoder depth_enc;
-  if (enable_depth) {
+  ffw_stream::depth_udp::DepthSender depth_sender;
+  bool depth_ok = true;
+  if (enable_depth && depth_z16) {
+    depth_ok = depth_sender.open(dest_ip, depth_port,
+                                 depth_codec == "raw" ? ffw_stream::depth_udp::Codec::kRaw
+                                                      : ffw_stream::depth_udp::Codec::kZstdDelta,
+                                 depth_zstd_level);
+  } else if (enable_depth) {
     depth_enc = create_gst_stream(dest_ip, depth_port, width, height, fps, false, mjpeg);
+    depth_ok = depth_enc.pipeline != nullptr;
   }
   GstEncoder second_enc = create_gst_stream(dest_ip, ir_port, width, height, fps, rgb_mode, mjpeg);
 
-  if ((enable_depth && !depth_enc.pipeline) || !second_enc.pipeline) {
+  if (!depth_ok || !second_enc.pipeline) {
     log("CAM" + std::to_string(index) +
         " : failed to create GStreamer pipeline(s)");
     if (depth_enc.pipeline)
@@ -582,6 +605,17 @@ void stream_camera(const std::string &serial, int index,
         profile.get_device().first<rs2::depth_sensor>().get_depth_scale();
     log("CAM" + std::to_string(index) +
         " depth_scale=" + std::to_string(depth_scale) + " m/unit");
+    // Raw Z16 -> nonlinear 8-bit code, one table lookup per pixel.
+    const ffw_stream::depth_curve::Curve depth_curve(depth_params);
+    const std::vector<uint8_t> depth_lut = depth_curve.z16_lut(depth_scale);
+    if (enable_depth) {
+      std::ostringstream dc;
+      dc << std::fixed << std::setprecision(3) << "CAM" << index << " depth curve: "
+         << depth_curve.params().min_m << ".." << depth_curve.params().max_m << " m, "
+         << depth_curve.params().knee_frac * 100.0 << "% of codes below "
+         << depth_curve.params().knee_m << " m (lambda=" << depth_curve.lambda() * 1000.0 << " mm)";
+      log(dc.str());
+    }
 
     // Fixed exposure for the right D405 color stream: disable auto-exposure and
     // pin a low exposure (us) for a sharper, less-overbright image. Also disable
@@ -688,6 +722,10 @@ void stream_camera(const std::string &serial, int index,
 
     size_t second_bpp = rgb_mode ? 3 : 1;
     std::vector<uint8_t> depth8(width * height, 0);
+    std::vector<uint16_t> depth16(depth_z16 ? width * height : 0, 0);
+    size_t z16_bytes_acc = 0;   // wire bytes since the last rate log
+    int z16_frames_acc = 0;
+    auto z16_t0 = std::chrono::steady_clock::now();
     std::vector<uint8_t> second_buf(width * height * second_bpp, 0);
     std::string cam_name = "CAM" + std::to_string(index);
 
@@ -720,19 +758,42 @@ void stream_camera(const std::string &serial, int index,
       }
       frames_captured[cam_name]++;
 
-      // Depth → 8-bit
-      if (enable_depth) {
+      // Depth → lossless Z16 over UDP
+      if (enable_depth && depth_z16) {
+        const uint16_t *draw = reinterpret_cast<const uint16_t *>(depth.get_data());
+        const uint16_t *src = draw;
+        if (depth.get_stride_in_bytes() != width * 2) {
+          int dstride = depth.get_stride_in_bytes() / 2;
+          for (int y = 0; y < height; ++y)
+            std::memcpy(depth16.data() + y * width, draw + y * dstride, width * 2);
+          src = depth16.data();
+        }
+        z16_bytes_acc += depth_sender.send(src, width, height, depth_scale,
+                                           ffw_stream::depth_udp::realtime_ns());
+        if (++z16_frames_acc >= fps * 30) {  // every ~30 s
+          double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - z16_t0).count();
+          double kb = z16_bytes_acc / 1024.0 / z16_frames_acc;
+          double raw_kb = width * height * 2 / 1024.0;
+          std::ostringstream os;
+          os << std::fixed << std::setprecision(1) << cam_name << " depth " << depth_codec << ": "
+             << kb << " KB/frame (" << raw_kb / std::max(kb, 1e-3) << "x), "
+             << z16_bytes_acc * 8.0 / 1e6 / std::max(el, 1e-3) << " Mbps";
+          log(os.str());
+          z16_bytes_acc = 0;
+          z16_frames_acc = 0;
+          z16_t0 = std::chrono::steady_clock::now();
+        }
+      }
+
+      // Depth → 8-bit (nonlinear, see depth_curve.hpp)
+      if (enable_depth && !depth_z16) {
         const uint16_t *draw = reinterpret_cast<const uint16_t *>(depth.get_data());
         int dstride = depth.get_stride_in_bytes() / 2;
+        const uint8_t *lut = depth_lut.data();
         for (int y = 0; y < height; ++y) {
           const uint16_t *row = draw + y * dstride;
           uint8_t *out_row = depth8.data() + y * width;
-          for (int x = 0; x < width; ++x) {
-            float meters = row[x] * depth_scale;
-            if (meters > max_depth_m) meters = max_depth_m;
-            if (meters < 0.0f) meters = 0.0f;
-            out_row[x] = static_cast<uint8_t>((meters / max_depth_m) * 255.0f + 0.5f);
-          }
+          for (int x = 0; x < width; ++x) out_row[x] = lut[row[x]];
         }
       }
 
@@ -754,7 +815,8 @@ void stream_camera(const std::string &serial, int index,
       }
 
       // Push frames into GStreamer pipelines
-      if (enable_depth && !gst_encoder_push_frame(depth_enc, depth8.data(), depth8.size())) {
+      if (enable_depth && !depth_z16 &&
+          !gst_encoder_push_frame(depth_enc, depth8.data(), depth8.size())) {
         log(cam_name + " : gst_encoder_push_frame(depth) failed, stopping");
         break;
       }
@@ -771,7 +833,7 @@ void stream_camera(const std::string &serial, int index,
     log("CAM" + std::to_string(index) + " EXCEPTION: " + e.what());
   }
 
-  destroy_gst_stream(depth_enc);
+  if (depth_enc.pipeline) destroy_gst_stream(depth_enc);
   destroy_gst_stream(second_enc);
   log("=== CAM" + std::to_string(index) + " " + serial + " : stopped ===");
 }
@@ -780,14 +842,16 @@ int main(int argc, char **argv) {
   if (argc < 3) {
     std::cerr << "Usage: " << argv[0]
               << " <dest_ip> <base_port> [width=480] [height=270] [fps=30] "
-                 "[max_depth_m=1.0] [--enable-d405s|--disable-d405s] "
+                 "[max_depth_m=1.0] [--depth-codec zstd|raw|mjpeg8] [--depth-zstd-level <n>] "
+                 "[--depth-min <m>] [--depth-knee <m>] [--depth-knee-frac <f>] "
+                 "[--enable-d405s|--disable-d405s] "
                  "[--d435-rgb|--no-d435-rgb] [--dual-rgb-no-depth] "
                  "[--disable-left-d405] "
                  "[--color-exposure <us>] "
                  "[--color-wb <K>] [--d435-fps <n>] [--d435-codec mjpeg|h264] [--d435-bitrate <kbps>] "
                  "[--d435-apriltag-hz <hz>] [--no-d435-apriltag] "
                  "[--no-d435-imu] [--d435-imu-gyro-hz <n>] [--d435-imu-accel-hz <n>] "
-                 "[--h264|--mjpeg] (default H264)"
+                 "[--h264|--mjpeg] (D405s; default MJPEG)"
               << std::endl;
     return 1;
   }
@@ -809,7 +873,14 @@ int main(int argc, char **argv) {
   // intra, so a lost packet costs that one frame instead of smearing blocks
   // until the next H264 keyframe.
   bool d435_mjpeg = true;
-  bool mjpeg = false;          // default H264 (x264enc zerolatency); --mjpeg → jpegenc intra-only zero-latency
+  // D405 RGB + depth codec: MJPEG q90 by default (intra-only, a lost packet
+  // costs one frame); --h264 → x264enc zerolatency at x264's 2 Mbps default.
+  bool mjpeg = true;
+  ffw_stream::depth_curve::Params depth_params;  // max_m comes from max_depth_m below
+  // D405 depth: lossless Z16 + zstd over plain UDP by default (depth_udp.hpp);
+  // "raw" = uncompressed Z16; "mjpeg8" = legacy 8-bit curve through gst.
+  std::string depth_codec = "zstd";
+  int depth_zstd_level = 1;
   int color_exposure_us = -1;  // -1 = leave SDK default auto-exposure
   int color_wb = -1;           // -1 = leave SDK default white balance
   for (int i = 1; i < argc; ++i) {
@@ -862,6 +933,16 @@ int main(int argc, char **argv) {
       if (i + 1 < argc) {
         d435_fps = std::atoi(argv[++i]);
       }
+    } else if (arg == "--depth-codec") {
+      if (i + 1 < argc) depth_codec = argv[++i];
+    } else if (arg == "--depth-zstd-level") {
+      if (i + 1 < argc) depth_zstd_level = std::atoi(argv[++i]);
+    } else if (arg == "--depth-min") {
+      if (i + 1 < argc) depth_params.min_m = std::atof(argv[++i]);
+    } else if (arg == "--depth-knee") {
+      if (i + 1 < argc) depth_params.knee_m = std::atof(argv[++i]);
+    } else if (arg == "--depth-knee-frac") {
+      if (i + 1 < argc) depth_params.knee_frac = std::atof(argv[++i]);
     } else if (arg == "--mjpeg") {
       mjpeg = true;
     } else if (arg == "--h264") {
@@ -869,6 +950,11 @@ int main(int argc, char **argv) {
     } else {
       positional_args.push_back(arg);
     }
+  }
+
+  if (depth_codec != "zstd" && depth_codec != "raw" && depth_codec != "mjpeg8") {
+    std::cerr << "--depth-codec must be zstd, raw or mjpeg8 (got " << depth_codec << ")" << std::endl;
+    return 1;
   }
 
   if (positional_args.size() < 2) {
@@ -894,6 +980,7 @@ int main(int argc, char **argv) {
   if (fps == 0) fps = 15;
   if (d435_fps <= 0) d435_fps = fps;
   if (max_depth_m <= 0) max_depth_m = 1.0f;
+  depth_params.max_m = max_depth_m;
 
   std::signal(SIGINT, on_sigint);
 
@@ -948,6 +1035,7 @@ int main(int argc, char **argv) {
       "  " + std::to_string(width) + "x" + std::to_string(height) + "@" +
       std::to_string(fps) + "  max_depth=" + std::to_string(max_depth_m) + "m" +
       "  codec=" + std::string(mjpeg ? "mjpeg" : "h264") +
+      "  depth_codec=" + depth_codec +
       "  d405s=" + std::string(enable_d405s ? "on" : "off") +
       "  d435_rgb=" + std::string(d435_rgb_enabled ? "on" : "off") +
       "  d435_fps=" + std::to_string(d435_fps) +
@@ -992,8 +1080,8 @@ int main(int argc, char **argv) {
       frames_captured["CAM" + std::to_string(cam_idx)];
       threads.emplace_back(stream_camera, serials[i], cam_idx,
                            dest_ip, depth_port, ir_port, width, height, fps,
-                           max_depth_m, mjpeg, rgb_mode, color_exposure_us, color_wb,
-                           enable_depth);
+                           depth_params, mjpeg, rgb_mode, color_exposure_us, color_wb,
+                           enable_depth, depth_codec, depth_zstd_level);
       cam_idx++;
     }
   }

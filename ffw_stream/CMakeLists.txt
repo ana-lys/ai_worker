@@ -21,6 +21,8 @@ find_package(geometry_msgs REQUIRED)
 
 # GStreamer for in-process H264 encoding (realsense_udp_streamer)
 pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0)
+# zstd for the lossless Z16 depth stream (include/ffw_stream/depth_udp.hpp)
+pkg_check_modules(ZSTD REQUIRED libzstd)
 
 # ────────────────────────────────────────────────────────────────
 # RealSense streamer (all platforms)
@@ -32,12 +34,13 @@ target_include_directories(realsense_udp_streamer PUBLIC
 )
 target_compile_features(realsense_udp_streamer PUBLIC c_std_99 cxx_std_17)
 ament_target_dependencies(realsense_udp_streamer rclcpp sensor_msgs std_msgs geometry_msgs)
-target_include_directories(realsense_udp_streamer PRIVATE ${GST_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
+target_include_directories(realsense_udp_streamer PRIVATE ${GST_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIRS})
 target_compile_options(realsense_udp_streamer PRIVATE ${GST_CFLAGS_OTHER})
 target_link_libraries(realsense_udp_streamer
   realsense2::realsense2
   pthread
   ${GST_LIBRARIES}
+  ${ZSTD_LIBRARIES}
   apriltag::apriltag
   Eigen3::Eigen
   ${OpenCV_LIBS}
@@ -56,7 +59,8 @@ target_include_directories(realsense_udp_receiver PUBLIC
 )
 target_compile_features(realsense_udp_receiver PUBLIC c_std_99 cxx_std_17)
 ament_target_dependencies(realsense_udp_receiver rclcpp sensor_msgs std_msgs cv_bridge)
-target_link_libraries(realsense_udp_receiver ${OpenCV_LIBS})
+target_include_directories(realsense_udp_receiver PRIVATE ${ZSTD_INCLUDE_DIRS})
+target_link_libraries(realsense_udp_receiver ${OpenCV_LIBS} ${ZSTD_LIBRARIES})
 install(TARGETS realsense_udp_receiver
   DESTINATION lib/${PROJECT_NAME})
 

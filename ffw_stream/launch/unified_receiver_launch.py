@@ -15,8 +15,13 @@ def generate_launch_description():
         DeclareLaunchArgument('d435_codec', default_value='mjpeg',
                               description='D435 head stream (9100) codec: mjpeg (default) or h264 -- '
                                           'must match the streamer d435_codec'),
-        DeclareLaunchArgument('rs_codec', default_value='h264',
-                              description='RealSense D405/D435 codec: h264 (default) or mjpeg (zero-latency)'),
+        DeclareLaunchArgument('rs_codec', default_value='mjpeg',
+                              description='D405 RGB + depth codec: mjpeg (default, zero-latency) or h264 -- '
+                                          'must match the streamer d405_codec'),
+        DeclareLaunchArgument('depth_codec', default_value='zstd',
+                              description='D405 depth: zstd (default) or raw = lossless 16-bit Z16 over UDP '
+                                          '(16UC1 on depth/image_rect_raw + 32FC1 depth/image_meters); '
+                                          'mjpeg8 = legacy 8-bit curve over rs_codec. Must match the streamer.'),
         DeclareLaunchArgument('oakd_720p_video_port', default_value='9110',
                               description='OAK-D 720p stream video port (telemetry = +200)'),
         DeclareLaunchArgument('dual_rgb_no_depth', default_value='false',
@@ -39,6 +44,7 @@ def generate_launch_description():
                 'rgb_source': LaunchConfiguration('rgb_source'),
                 'oakd_codec': LaunchConfiguration('oakd_codec'),
                 'rs_codec': LaunchConfiguration('rs_codec'),
+                'depth_codec': LaunchConfiguration('depth_codec'),
                 'd435_codec': LaunchConfiguration('d435_codec'),
                 'oakd_720p_video_port': LaunchConfiguration('oakd_720p_video_port'),
                 'dual_rgb_no_depth': LaunchConfiguration('dual_rgb_no_depth'),

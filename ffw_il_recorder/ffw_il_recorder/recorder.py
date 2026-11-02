@@ -112,7 +112,7 @@ class ILRecorderNode(Node):
         self.declare_parameter("sample_hz", 30.0)
         self.declare_parameter("jpeg_quality", 95)
         self.declare_parameter("oakd_codec", "h264")
-        self.declare_parameter("rs_codec", "h264")
+        self.declare_parameter("rs_codec", "mjpeg")
         self.declare_parameter("oakd_720p_video_port", 9110)
         self.declare_parameter("right_rgb_port", 9003)
         self.declare_parameter("headless", False)

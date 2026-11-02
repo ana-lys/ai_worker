@@ -72,6 +72,20 @@ def generate_launch_description():
         description='D435 head stream codec: mjpeg (default, jpegenc q90 like the OAK-D MJPEG feed; '
                     'a lost packet costs one frame) or h264'
     )
+    d405_codec_arg = DeclareLaunchArgument(
+        'd405_codec',
+        default_value='mjpeg',
+        description='D405 RGB + depth codec: mjpeg (default, jpegenc q90, intra-only) or h264 '
+                    '(x264 2 Mbps). rgb_source:=oakd_lite_720p_mjpeg forces mjpeg. '
+                    'Receiver rs_codec must match.'
+    )
+    depth_codec_arg = DeclareLaunchArgument(
+        'depth_codec',
+        default_value='zstd',
+        description='D405 depth: zstd (default, lossless 16-bit Z16, delta filter + zstd-1 over UDP, ~10 Mbps/camera), '
+                    'raw (uncompressed Z16, ~31 Mbps/camera -- too much for a 100 Mbps link with both), '
+                    'or mjpeg8 (legacy 8-bit curve via d405_codec). Receiver depth_codec must match.'
+    )
     d435_apriltag_hz_arg = DeclareLaunchArgument(
         'd435_apriltag_hz',
         default_value='15',
@@ -164,12 +178,14 @@ def generate_launch_description():
                 cmd += ['--dual-rgb-no-depth']
             if disable_left_d405:
                 cmd += ['--disable-left-d405']
-            # H264 is the streamer default again; every non-mjpeg profile passes
-            # --h264 explicitly and the all-MJPEG profile opts in with --mjpeg.
-            if rgb_source == 'oakd_lite_720p_mjpeg':
+            # D405 codec: d405_codec (default mjpeg); the all-MJPEG profile
+            # forces mjpeg. Independent of the D435 (d435_codec) and OAK-D.
+            d405_codec = LaunchConfiguration('d405_codec').perform(context)
+            if rgb_source == 'oakd_lite_720p_mjpeg' or d405_codec != 'h264':
                 cmd += ['--mjpeg']
             else:
                 cmd += ['--h264']
+            cmd += ['--depth-codec', LaunchConfiguration('depth_codec').perform(context)]
             if color_exposure != '0':
                 cmd += ['--color-exposure', color_exposure]
             if color_wb != '0':
@@ -293,6 +309,8 @@ def generate_launch_description():
         disable_left_d405_arg,
         rgb_source_arg,
         d435_codec_arg,
+        d405_codec_arg,
+        depth_codec_arg,
         d435_apriltag_hz_arg,
         d435_bitrate_arg,
         use_h264_arg,

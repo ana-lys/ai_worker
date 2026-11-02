@@ -19,6 +19,7 @@
   <depend>geometry_msgs</depend>
   <depend>apriltag</depend>
   <depend>eigen</depend>
+  <depend>zstd</depend>
   <exec_depend>ffw_depthai</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
