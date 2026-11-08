@@ -855,6 +855,12 @@ private:
         cv::Mat blank = cv::Mat::zeros(h, w, CV_8UC3);
         if (depth.empty()) depth = blank.clone();
         if (ir.empty()) ir = blank.clone();
+        // RTP/JPEG (RFC 2435) carries dimensions in 8-px units, so the MJPEG
+        // RGB arrives 270 -> 272 px while Z16 depth stays exact; match the
+        // depth tile to the RGB tile (display only) so vconcat can't abort.
+        if (depth.size() != ir.size()) {
+          cv::resize(depth, depth, ir.size(), 0, 0, cv::INTER_NEAREST);
+        }
 
         std::string second_label = cam_is_rgb ? "RGB" : "IR";
         cv::putText(depth, "Cam " + std::to_string(i) + " Depth", cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2);
