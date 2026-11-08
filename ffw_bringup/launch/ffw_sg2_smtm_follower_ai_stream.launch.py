@@ -146,12 +146,12 @@ def generate_launch_description():
         DeclareLaunchArgument('stream_to_server', default_value='false',
                               description='If true, stream all cameras to the AI server 192.168.0.249 '
                                           'instead of dest_ip (default 192.168.0.241)'),
-        DeclareLaunchArgument('dual_rgb_no_depth', default_value='true',
+        DeclareLaunchArgument('dual_rgb_no_depth', default_value='false',
                               description='Disable D405 depth capture/transmission (both cameras stay '
-                                          'RGB-only) -- default on to cut USB2 bandwidth on the shared bus '
-                                          'the Dynamixel controller (FT4232H) also sits on; depth streaming '
-                                          'contention there was implicated in BULK_READ_FAIL/joint_states '
-                                          'dropouts. Set false to restore depth (e.g. for IL data recording).'),
+                                          'RGB-only). Default false: both D405s stream RGB (MJPEG) + '
+                                          'lossless Z16 depth (zstd) at 480x270@15. The D405 USB2 bus is '
+                                          'shared with the Dynamixel controller (FT4232H); set true if '
+                                          'BULK_READ_FAIL/joint_states dropouts reappear.'),
     ]
 
     start_rviz = LaunchConfiguration('start_rviz')
@@ -406,10 +406,11 @@ def generate_launch_description():
             # Both D405s enabled: at 15Hz, both-RGB+both-depth (~19.4 MB/s)
             # is comfortably under the old 30fps legacy default (~30.5 MB/s)
             # in raw byte-count terms -- but that USB2 bus is shared with the
-            # Dynamixel controller (FT4232H) and traced BULK_READ_FAIL /
-            # joint_states dropouts to depth-stream contention there, so
-            # depth is off by default now (dual_rgb_no_depth) even though
-            # the raw MB/s "fits". Both D405s stay RGB-only.
+            # Dynamixel controller (FT4232H). BULK_READ_FAIL / joint_states
+            # dropouts were once blamed on depth contention there (the
+            # 2026-09-25 fault was later traced to the right gripper ID 8
+            # link), so depth is on by default again; pass
+            # dual_rgb_no_depth:=true to go back to RGB-only.
             'disable_left_d405': 'false',
             'dual_rgb_no_depth': dual_rgb_no_depth,
         }.items(),
