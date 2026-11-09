@@ -19,7 +19,9 @@ perpendicular to it.
     gives no stereo matches. Distance ~20-30 cm.
   * D435 (has projector): a plain flat wall at ~0.6-1.5 m is fine.
 Hold still (camera and target) during the ~10-30 s check, even light, no
-shiny surfaces.
+shiny surfaces. Auto-exposure is switched ON for the check (the streamer's
+fixed --color-exposure also pins the D405 depth imager); --keep-exposure
+skips that. The streamer re-applies its own exposure when it restarts.
 
 The cameras must be FREE: stop realsense_udp_streamer first (bringup with
 launch_cameras:=false, or kill the streamer process).
@@ -148,6 +150,8 @@ def main():
     ap.add_argument('--timeout', type=float, default=60, help='seconds per camera')
     ap.add_argument('--no-plane', action='store_true', help='skip the plane-fit flatness test')
     ap.add_argument('--out', default=None, help='JSON result file')
+    ap.add_argument('--keep-exposure', action='store_true',
+                    help='keep the current (e.g. streamer manual) exposure instead of auto-exposure')
     args = ap.parse_args()
 
     ctx = rs.context()
@@ -162,6 +166,17 @@ def main():
             print(f'[{s}] not connected (have {sorted(devs)})')
             continue
         dev = devs[s]
+        if not args.keep_exposure:
+            # The streamer's --color-exposure pins the SHARED imager (D405 RGB
+            # comes from the depth imager) with auto-exposure off, and the
+            # setting stays on the camera after the streamer exits. Calibrate
+            # with auto-exposure, as Intel recommends.
+            try:
+                ds = dev.first_depth_sensor()
+                if ds.supports(rs.option.enable_auto_exposure):
+                    ds.set_option(rs.option.enable_auto_exposure, 1)
+            except Exception as e:
+                print(f'[{s}] could not enable auto-exposure: {e}')
         name = dev.get_info(rs.camera_info.name)
         fw = dev.get_info(rs.camera_info.firmware_version)
         print(f'\n=== {name}  serial {s}  FW {fw} ===')
