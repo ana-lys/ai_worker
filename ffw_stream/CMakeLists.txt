@@ -157,6 +157,7 @@ install(PROGRAMS
   scripts/calib_record.py
   scripts/stream_recorder.py
   scripts/d405_health_check.py
+  scripts/realsense_calib_backup.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
