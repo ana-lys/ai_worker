@@ -143,6 +143,54 @@ def plane_test(dev, serial, n_frames=30, roi=0.5):
         pipe.stop()
 
 
+def aim(dev, serial, target_m):
+    """Live text readout to line the target up (no display needed over ssh).
+    Press Enter to continue. Returns when Enter is pressed."""
+    import select
+    prof = pick(depth_profiles(dev), [(848, 480, 30), (640, 480, 30), (1280, 720, 30), (480, 270, 15)])
+    pipe, profile = start(serial, prof)
+    try:
+        scale = dev.first_depth_sensor().get_depth_scale()
+        intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
+        w, h = intr.width, intr.height
+        x0, x1, y0, y1 = w // 4, 3 * w // 4, h // 4, 3 * h // 4
+        us, vs = np.meshgrid(np.arange(x0, x1, 2), np.arange(y0, y1, 2))
+        print('  AIM: line up the target, then press Enter  '
+              f'(want: fill > 80 %, distance ~{target_m*100:.0f} cm, tilt < 3 deg)')
+        while True:
+            z_full = np.asanyarray(pipe.wait_for_frames(5000).get_depth_frame().get_data())
+            fill = 100.0 * (z_full > 0).mean()
+            z = z_full[y0:y1:2, x0:x1:2]
+            m = z > 0
+            msg = f'fill {fill:5.1f} %'
+            hints = []
+            if m.sum() > 200:
+                Z = z[m].astype(np.float64) * scale
+                X = (us[m] - intr.ppx) / intr.fx * Z
+                Y = (vs[m] - intr.ppy) / intr.fy * Z
+                A = np.c_[X, Y, np.ones_like(X)]
+                (a, b, c), *_ = np.linalg.lstsq(A, Z, rcond=None)
+                res = Z - A @ np.array([a, b, c])
+                d = float(np.median(Z))
+                tx, ty = np.degrees(np.arctan(a)), np.degrees(np.arctan(b))
+                rms = np.sqrt(np.mean(res ** 2)) * 1000
+                msg += f' | dist {d*100:5.1f} cm | tilt L/R {tx:+5.1f} U/D {ty:+5.1f} deg | rms {rms:5.2f} mm'
+                if d > target_m * 1.25: hints.append('closer')
+                if d < target_m * 0.75: hints.append('farther')
+                if abs(tx) > 3 or abs(ty) > 3: hints.append('face-on')
+            else:
+                hints.append('no depth: target in view? textured? light?')
+            if fill < 80: hints.append('fill the view / more texture or light')
+            msg += '  -> ' + (', '.join(hints) if hints else 'OK, press Enter')
+            print('\r  ' + msg[:150].ljust(150), end='', flush=True)
+            if select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.readline()
+                print()
+                return
+    finally:
+        pipe.stop()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--serial', action='append', help='camera serial (repeatable); default all')
@@ -150,6 +198,9 @@ def main():
     ap.add_argument('--timeout', type=float, default=60, help='seconds per camera')
     ap.add_argument('--no-plane', action='store_true', help='skip the plane-fit flatness test')
     ap.add_argument('--out', default=None, help='JSON result file')
+    ap.add_argument('--no-aim', action='store_true', help='skip the live aiming readout')
+    ap.add_argument('--target-m', type=float, default=None,
+                    help='aiming distance hint (default 0.20 m D405, 1.0 m others)')
     ap.add_argument('--keep-exposure', action='store_true',
                     help='keep the current (e.g. streamer manual) exposure instead of auto-exposure')
     args = ap.parse_args()
@@ -185,6 +236,11 @@ def main():
             print('  on-chip calibration not supported by this device/firmware')
             r['health'] = None
         else:
+            if not args.no_aim:
+                try:
+                    aim(dev, s, args.target_m or (0.20 if 'D405' in name else 1.0))
+                except Exception as e:
+                    print(f'  aim view failed ({e}), continuing')
             print(f'  health check ({SPEEDS[args.speed]}) -- keep camera and target still...')
             try:
                 r.update(health_check(dev, s, args.speed, args.timeout))
