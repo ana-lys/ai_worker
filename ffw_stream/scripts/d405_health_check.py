@@ -71,11 +71,27 @@ def pick(profiles, wanted):
     return None
 
 
+AUTO_EXPOSURE = True  # set from --keep-exposure in main()
+
+
 def start(serial, prof):
+    """Start depth and return (pipe, profile). ALWAYS talk to the camera via
+    profile.get_device() afterwards: a device handle from another rs.context()
+    cannot reach a camera this pipeline holds ('failed to set power state')."""
     pipe, cfg = rs.pipeline(), rs.config()
     cfg.enable_device(serial)
     cfg.enable_stream(rs.stream.depth, prof[0], prof[1], rs.format.z16, prof[2])
     profile = pipe.start(cfg)
+    if AUTO_EXPOSURE:
+        # The streamer's --color-exposure pins the SHARED imager (D405 RGB
+        # comes from the depth imager) with auto-exposure off, and that stays
+        # on the camera after the streamer exits. Calibrate with auto-exposure.
+        try:
+            ds = profile.get_device().first_depth_sensor()
+            if ds.supports(rs.option.enable_auto_exposure):
+                ds.set_option(rs.option.enable_auto_exposure, 1)
+        except Exception as e:
+            print(f'  could not enable auto-exposure: {e}')
     for _ in range(30):  # let auto-exposure settle
         pipe.wait_for_frames(5000)
     return pipe, profile
@@ -85,9 +101,9 @@ def health_check(dev, serial, speed, timeout_s):
     prof = pick(depth_profiles(dev), [(256, 144, 90), (848, 480, 30), (1280, 720, 30), (640, 480, 30)])
     if prof is None:
         raise RuntimeError('no usable depth profile')
-    pipe, _ = start(serial, prof)
+    pipe, profile = start(serial, prof)
     try:
-        ac = dev.as_auto_calibrated_device()
+        ac = profile.get_device().as_auto_calibrated_device()
         cfg = json.dumps({'calib type': 0, 'speed': speed, 'scan parameter': 0,
                           'white_wall_mode': 1 if speed == 4 else 0})
         last = [-10]
@@ -109,7 +125,7 @@ def plane_test(dev, serial, n_frames=30, roi=0.5):
     prof = pick(depth_profiles(dev), [(848, 480, 30), (640, 480, 30), (1280, 720, 30), (480, 270, 15)])
     pipe, profile = start(serial, prof)
     try:
-        scale = dev.first_depth_sensor().get_depth_scale()
+        scale = profile.get_device().first_depth_sensor().get_depth_scale()
         intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
         w, h = intr.width, intr.height
         x0, x1 = int(w * (1 - roi) / 2), int(w * (1 + roi) / 2)
@@ -150,7 +166,7 @@ def aim(dev, serial, target_m):
     prof = pick(depth_profiles(dev), [(848, 480, 30), (640, 480, 30), (1280, 720, 30), (480, 270, 15)])
     pipe, profile = start(serial, prof)
     try:
-        scale = dev.first_depth_sensor().get_depth_scale()
+        scale = profile.get_device().first_depth_sensor().get_depth_scale()
         intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
         w, h = intr.width, intr.height
         x0, x1, y0, y1 = w // 4, 3 * w // 4, h // 4, 3 * h // 4
@@ -204,6 +220,8 @@ def main():
     ap.add_argument('--keep-exposure', action='store_true',
                     help='keep the current (e.g. streamer manual) exposure instead of auto-exposure')
     args = ap.parse_args()
+    global AUTO_EXPOSURE
+    AUTO_EXPOSURE = not args.keep_exposure
 
     ctx = rs.context()
     devs = {d.get_info(rs.camera_info.serial_number): d for d in ctx.query_devices()}
@@ -217,17 +235,6 @@ def main():
             print(f'[{s}] not connected (have {sorted(devs)})')
             continue
         dev = devs[s]
-        if not args.keep_exposure:
-            # The streamer's --color-exposure pins the SHARED imager (D405 RGB
-            # comes from the depth imager) with auto-exposure off, and the
-            # setting stays on the camera after the streamer exits. Calibrate
-            # with auto-exposure, as Intel recommends.
-            try:
-                ds = dev.first_depth_sensor()
-                if ds.supports(rs.option.enable_auto_exposure):
-                    ds.set_option(rs.option.enable_auto_exposure, 1)
-            except Exception as e:
-                print(f'[{s}] could not enable auto-exposure: {e}')
         name = dev.get_info(rs.camera_info.name)
         fw = dev.get_info(rs.camera_info.firmware_version)
         print(f'\n=== {name}  serial {s}  FW {fw} ===')
