@@ -328,16 +328,16 @@
         <param name="Min Position Limit">-151875</param>
       </gpio>
       <!-- XH540-V270-R right gripper at ID 130 (replaces the XM430-W350).
-           Raw window Min Position Limit 1786 = CLOSED, Max 3286 = OPEN.
-           TEMPORARY recalibration window, the old 2000..3072 widened by 20%
-           (214 ticks) at both ends. Narrow again once the real ends are found.
+           Raw window Min Position Limit 1940 = CLOSED, Max 2583 = OPEN.
+           Recalibrated 2026-11-09 by driving the gripper to both physical
+           ends (closed 1940 jaws in contact, open 2583 free), was 2000..3072.
            Not physical radians. Like the RH-P12-RN-A side it reports an
            arbitrary 0 (open) .. 1.2 (closed) so teleop treats both grippers
            alike. [unit info] maps it with a NEGATIVE multiplier,
-             q = raw * m + off,  m = -1.2/1498,  off = -3285*m
-           so 0 -> raw 3285 (open) and 1.2 -> raw 1787 (closed), one tick inside
-           each limit, because the driver truncates (q-off)/m and 1.2 would
-           otherwise land on 1785, outside the limit.
+             q = raw * m + off,  m = -1.2/641,  off = -2582*m
+           so 0 -> raw 2582 (open) and 1.2 -> raw 1941 (closed) on paper, one
+           tick inside each limit, because the driver truncates (q-off)/m.
+           In double precision 1.2 truncates to 1940, still on the limit.
            NO colon-space in this comment, xacro keeps comments and the
            launch parses robot_description as YAML. -->
       <gpio name="dxl130">
@@ -355,9 +355,9 @@
         <param name="Profile Velocity">350</param>
         <param name="Profile Acceleration">50</param>
         <param name="Homing Offset">0</param>
-        <param name="Max Position Limit">3286</param>
-        <param name="Min Position Limit">1786</param>
-        <param name="[unit info]">Goal Position, -0.0008010680907877169, rad, signed, 2.6315086782376502; Present Position, -0.0008010680907877169, rad, signed, 2.6315086782376502</param>
+        <param name="Max Position Limit">2583</param>
+        <param name="Min Position Limit">1940</param>
+        <param name="[unit info]">Goal Position, -0.0018720748829953197, rad, signed, 4.833697347893915; Present Position, -0.0018720748829953197, rad, signed, 4.833697347893915</param>
       </gpio>
       <!-- LEFT ARM -->
       <gpio name="dxl31">
