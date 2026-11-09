@@ -159,9 +159,11 @@ def plane_test(dev, serial, n_frames=30, roi=0.5):
         pipe.stop()
 
 
-def aim(dev, serial, target_m):
+def aim(dev, serial, target_m, countdown_s=3.0):
     """Live text readout to line the target up (no display needed over ssh).
-    Press Enter to continue. Returns when Enter is pressed."""
+    Continues by itself once the target has stayed OK for countdown_s
+    seconds (the countdown restarts whenever it goes out of tolerance);
+    Enter continues immediately."""
     import select
     prof = pick(depth_profiles(dev), [(848, 480, 30), (640, 480, 30), (1280, 720, 30), (480, 270, 15)])
     pipe, profile = start(serial, prof)
@@ -171,7 +173,9 @@ def aim(dev, serial, target_m):
         w, h = intr.width, intr.height
         x0, x1, y0, y1 = w // 4, 3 * w // 4, h // 4, 3 * h // 4
         us, vs = np.meshgrid(np.arange(x0, x1, 2), np.arange(y0, y1, 2))
-        print('  AIM: line up the target, then press Enter  '
+        ok_since = None
+        print(f'  AIM: line up the target; it starts by itself after {countdown_s:.0f} s OK '
+              '(Enter = start now)  '
               f'(want: fill > 80 %, distance ~{target_m*100:.0f} cm, tilt < 3 deg)')
         while True:
             z_full = np.asanyarray(pipe.wait_for_frames(5000).get_depth_frame().get_data())
@@ -197,7 +201,17 @@ def aim(dev, serial, target_m):
             else:
                 hints.append('no depth: target in view? textured? light?')
             if fill < 80: hints.append('fill the view / more texture or light')
-            msg += '  -> ' + (', '.join(hints) if hints else 'OK, press Enter')
+            now = time.time()
+            if hints:
+                ok_since = None
+                msg += '  -> ' + ', '.join(hints)
+            else:
+                ok_since = ok_since or now
+                left = countdown_s - (now - ok_since)
+                if left <= 0:
+                    print('\r  ' + (msg + '  -> OK, starting').ljust(150), flush=True)
+                    return
+                msg += f'  -> OK, hold still... starting in {left:3.1f} s'
             print('\r  ' + msg[:150].ljust(150), end='', flush=True)
             if select.select([sys.stdin], [], [], 0)[0]:
                 sys.stdin.readline()
@@ -215,6 +229,8 @@ def main():
     ap.add_argument('--no-plane', action='store_true', help='skip the plane-fit flatness test')
     ap.add_argument('--out', default=None, help='JSON result file')
     ap.add_argument('--no-aim', action='store_true', help='skip the live aiming readout')
+    ap.add_argument('--countdown', type=float, default=3.0,
+                    help='seconds the aim must stay OK before the check starts by itself (default 3)')
     ap.add_argument('--target-m', type=float, default=None,
                     help='aiming distance hint (default 0.20 m D405, 1.0 m others)')
     ap.add_argument('--keep-exposure', action='store_true',
@@ -245,7 +261,7 @@ def main():
         else:
             if not args.no_aim:
                 try:
-                    aim(dev, s, args.target_m or (0.20 if 'D405' in name else 1.0))
+                    aim(dev, s, args.target_m or (0.20 if 'D405' in name else 1.0), args.countdown)
                 except Exception as e:
                     print(f'  aim view failed ({e}), continuing')
             print(f'  health check ({SPEEDS[args.speed]}) -- keep camera and target still...')
