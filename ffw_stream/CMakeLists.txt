@@ -155,6 +155,7 @@ install(DIRECTORY config launch
 install(PROGRAMS
   scripts/glitch_viewer.py
   scripts/calib_record.py
+  scripts/stream_recorder.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
