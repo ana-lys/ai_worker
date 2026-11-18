@@ -67,6 +67,7 @@
 // GStreamer appsrc-based H264 encoding
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
+#include <gst/rtp/gstrtpbuffer.h>
 
 // ROS node so this executable can publish the D435 intrinsics with zero-latency
 // (transient_local) QoS — same pattern as the OAK-D streamer's /oakd/camera_info.
@@ -105,7 +106,34 @@ void on_sigint(int) { g_running = false; }
 
 // ── GStreamer appsrc-based H264 encoding ────────────────────────────
 
+// Running mean/max of a latency in ms (shared with a GStreamer probe thread).
+struct LatAcc {
+  std::mutex m;
+  double sum = 0.0, max = 0.0;
+  uint64_t n = 0;
+  void add(double ms) {
+    std::lock_guard<std::mutex> l(m);
+    sum += ms; max = std::max(max, ms); ++n;
+  }
+  // "mean/max ms" and reset; "-" when empty.
+  std::string take() {
+    std::lock_guard<std::mutex> l(m);
+    std::ostringstream os;
+    if (n) os << std::fixed << std::setprecision(1) << sum / n << "/" << max;
+    else os << "-";
+    sum = max = 0.0; n = 0;
+    return os.str();
+  }
+};
+
+inline uint64_t sys_now_ns() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
 struct GstEncoder {
+  // capture -> last RTP packet of the frame handed to udpsink (encode included)
+  std::shared_ptr<LatAcc> sent_lat = std::make_shared<LatAcc>();
   GstElement *pipeline = nullptr;
   GstElement *appsrc    = nullptr;
   uint64_t    pts_counter = 0;
@@ -162,7 +190,7 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
          // timestamp-offset=0: RTP timestamp = capture time (PTS) in 90 kHz
          // ticks mod 2^32; the receiver unwraps it against its own clock.
          << "rtpjpegpay timestamp-offset=0 ! "
-         << "udpsink host=" << ip << " port=" << port << " sync=false async=false";
+         << "udpsink name=out host=" << ip << " port=" << port << " sync=false async=false";
   } else {
     pipe << "x264enc speed-preset=ultrafast tune=zerolatency key-int-max=" << fps;
     if (bitrate_kbps > 0) pipe << " bitrate=" << bitrate_kbps;
@@ -171,7 +199,7 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
     // net.core.wmem_max (208 KB stock) -- raise that on the robot to benefit.
     pipe << " ! h264parse config-interval=-1 ! "
          << "rtph264pay pt=96 timestamp-offset=0 ! "
-         << "udpsink host=" << ip << " port=" << port
+         << "udpsink name=out host=" << ip << " port=" << port
          << " sync=false async=false buffer-size=4194304";
   }
 
@@ -184,6 +212,39 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
   }
 
   enc.appsrc = gst_bin_get_by_name(GST_BIN(enc.pipeline), "src");
+  // Latency probe: PTS = capture time (epoch ns) when pushed with capture_ns;
+  // measured on the frame's last RTP packet (marker bit) entering udpsink.
+  if (GstElement *out = gst_bin_get_by_name(GST_BIN(enc.pipeline), "out")) {
+    GstPad *pad = gst_element_get_static_pad(out, "sink");
+    auto *acc = new std::shared_ptr<LatAcc>(enc.sent_lat);
+    // Payloaders push buffer lists: look at the list's last packet.
+    gst_pad_add_probe(
+        pad, static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST),
+        [](GstPad *, GstPadProbeInfo *info, gpointer ud) -> GstPadProbeReturn {
+          GstBuffer *b = nullptr;
+          if (info->type & GST_PAD_PROBE_TYPE_BUFFER_LIST) {
+            GstBufferList *l = GST_PAD_PROBE_INFO_BUFFER_LIST(info);
+            const guint n = l ? gst_buffer_list_length(l) : 0;
+            if (n) b = gst_buffer_list_get(l, n - 1);
+          } else {
+            b = GST_PAD_PROBE_INFO_BUFFER(info);
+          }
+          if (!b) return GST_PAD_PROBE_OK;
+          const GstClockTime pts = GST_BUFFER_PTS(b);
+          if (!GST_CLOCK_TIME_IS_VALID(pts) || pts < 1000000000ull * GST_SECOND) return GST_PAD_PROBE_OK;
+          GstRTPBuffer rtp = GST_RTP_BUFFER_INIT;
+          if (gst_rtp_buffer_map(b, GST_MAP_READ, &rtp)) {
+            const bool last = gst_rtp_buffer_get_marker(&rtp);
+            gst_rtp_buffer_unmap(&rtp);
+            if (last)
+              (*static_cast<std::shared_ptr<LatAcc> *>(ud))->add((double(sys_now_ns()) - double(pts)) / 1e6);
+          }
+          return GST_PAD_PROBE_OK;
+        },
+        acc, [](gpointer ud) { delete static_cast<std::shared_ptr<LatAcc> *>(ud); });
+    gst_object_unref(pad);
+    gst_object_unref(out);
+  }
   gst_element_set_state(enc.pipeline, GST_STATE_PLAYING);
   return enc;
 }
@@ -753,6 +814,8 @@ void stream_camera(const std::string &serial, int index,
     std::vector<uint8_t> second_buf(width * height * second_bpp, 0);
     std::string cam_name = "CAM" + std::to_string(index);
     bool ts_domain_logged = false;
+    LatAcc lat_rs, lat_toa, exp_us, frame_minus_sensor;
+    int lat_frames = 0;
 
     while (g_running && rclcpp::ok()) {
       rs2::frameset frames;
@@ -778,7 +841,28 @@ void stream_camera(const std::string &serial, int index,
 
       // Per-frame capture time (epoch ns): RTP timestamp of the RGB/IR (and
       // mjpeg8 depth) stream, stamp_ns of the Z16 depth stream.
+      const uint64_t got_ns = sys_now_ns();   // frameset handed to us by librealsense
       const uint64_t second_ns = rs_capture_ns(second_frame);
+      // Where the capture->network latency goes (logged every ~30 s):
+      //   rs   = capture -> wait_for_frames() returned
+      //   toa  = capture -> librealsense TIME_OF_ARRIVAL (frame reached the host)
+      //   sent = capture -> last RTP packet into udpsink (jpeg encode included)
+      lat_rs.add((double(got_ns) - double(second_ns)) / 1e6);
+      if (second_frame.supports_frame_metadata(RS2_FRAME_METADATA_TIME_OF_ARRIVAL))
+        lat_toa.add(double(second_frame.get_frame_metadata(RS2_FRAME_METADATA_TIME_OF_ARRIVAL)) -
+                    double(second_ns) / 1e6);
+      if (second_frame.supports_frame_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE))
+        exp_us.add(double(second_frame.get_frame_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE)));
+      if (second_frame.supports_frame_metadata(RS2_FRAME_METADATA_FRAME_TIMESTAMP) &&
+          second_frame.supports_frame_metadata(RS2_FRAME_METADATA_SENSOR_TIMESTAMP))
+        frame_minus_sensor.add((double(second_frame.get_frame_metadata(RS2_FRAME_METADATA_FRAME_TIMESTAMP)) -
+                                double(second_frame.get_frame_metadata(RS2_FRAME_METADATA_SENSOR_TIMESTAMP))) / 1e3);
+      if (++lat_frames >= fps * 30) {
+        lat_frames = 0;
+        log(cam_name + " latency mean/max ms: capture->rs " + lat_rs.take() +
+            ", ->host arrival " + lat_toa.take() + ", ->sent " + second_enc.sent_lat->take() +
+            " | exposure_us " + exp_us.take() + ", frame_ts-sensor_ts ms " + frame_minus_sensor.take());
+      }
       const uint64_t depth_ns = (enable_depth && depth) ? rs_capture_ns(depth) : second_ns;
       if (!ts_domain_logged) {
         ts_domain_logged = true;
