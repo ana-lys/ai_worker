@@ -111,7 +111,22 @@ struct GstEncoder {
   uint64_t    pts_counter = 0;
   bool        mjpeg     = false;   // MJPEG pipeline → stamp real ns PTS for jpegenc
   uint64_t    frame_interval_ns = 0;
+  uint64_t    last_pts  = 0;       // capture-time PTS is kept strictly increasing
 };
+
+// Capture time of a RealSense frame in system-clock (epoch) ns. GLOBAL/SYSTEM
+// timestamps are host epoch ms; any other domain falls back to now (arrival).
+// This is what goes on the wire as the frame's RTP timestamp (see
+// create_gst_stream) and as the Z16 depth stamp_ns -- the receiver turns it
+// back into header.stamp. Valid on the PC because the robot follows the PC
+// clock (chrony).
+uint64_t rs_capture_ns(const rs2::frame &f) {
+  auto dom = f.get_frame_timestamp_domain();
+  if (dom == RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME || dom == RS2_TIMESTAMP_DOMAIN_SYSTEM_TIME)
+    return static_cast<uint64_t>(f.get_timestamp() * 1e6);
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count());
+}
 
 // Build an appsrc-based encoding + UDP streaming pipeline.
 // rgb_mode=true → RGB24 input; false → GRAY8 input.
@@ -144,7 +159,9 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
   if (mjpeg) {
     // Intra-only frames → no GOP/reorder delay, instant decode, per-frame loss recovery
     pipe << "jpegenc quality=90 ! "
-         << "rtpjpegpay ! "
+         // timestamp-offset=0: RTP timestamp = capture time (PTS) in 90 kHz
+         // ticks mod 2^32; the receiver unwraps it against its own clock.
+         << "rtpjpegpay timestamp-offset=0 ! "
          << "udpsink host=" << ip << " port=" << port << " sync=false async=false";
   } else {
     pipe << "x264enc speed-preset=ultrafast tune=zerolatency key-int-max=" << fps;
@@ -153,7 +170,7 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
     // dropped at the socket (Udp SndbufErrors). The kernel clamps it to
     // net.core.wmem_max (208 KB stock) -- raise that on the robot to benefit.
     pipe << " ! h264parse config-interval=-1 ! "
-         << "rtph264pay pt=96 ! "
+         << "rtph264pay pt=96 timestamp-offset=0 ! "
          << "udpsink host=" << ip << " port=" << port
          << " sync=false async=false buffer-size=4194304";
   }
@@ -172,7 +189,10 @@ GstEncoder create_gst_stream(const std::string &ip, int port, int width, int hei
 }
 
 // Push a raw frame (GRAY8 or RGB24) into a GstEncoder pipeline.
-bool gst_encoder_push_frame(GstEncoder &enc, const uint8_t *data, size_t size) {
+// capture_ns > 0 (epoch ns, rs_capture_ns) becomes the PTS and so the RTP
+// timestamp; 0 keeps the old synthetic frame-counter PTS.
+bool gst_encoder_push_frame(GstEncoder &enc, const uint8_t *data, size_t size,
+                            uint64_t capture_ns = 0) {
   if (!enc.pipeline || !enc.appsrc) return false;
 
   GstBuffer *buffer = gst_buffer_new_allocate(nullptr, size, nullptr);
@@ -182,7 +202,11 @@ bool gst_encoder_push_frame(GstEncoder &enc, const uint8_t *data, size_t size) {
     gst_buffer_unmap(buffer, &map);
   }
 
-  if (enc.mjpeg) {
+  if (capture_ns > 0) {
+    enc.last_pts = std::max(capture_ns, enc.last_pts + 1);
+    GST_BUFFER_PTS(buffer)      = enc.last_pts;
+    GST_BUFFER_DURATION(buffer) = enc.frame_interval_ns;
+  } else if (enc.mjpeg) {
     // Proper monotonic PTS in ns. jpegenc/rtpjpegpay stamp the RTP timeline from the
     // 90 kHz clock; a raw frame-index counter (µs-scale "ns") would collapse to ~0.
     // H264 path keeps the frame-index behavior exactly as before.
@@ -480,7 +504,7 @@ void stream_camera_rgb(const std::string &serial, const std::string &dest_ip, in
       }
 
       // Push the frame into the GStreamer pipeline
-      if (!gst_encoder_push_frame(gst_enc, rgb_buf.data(), expected_size)) {
+      if (!gst_encoder_push_frame(gst_enc, rgb_buf.data(), expected_size, rs_capture_ns(color))) {
         log("CAM RGB " + serial + " : gst_encoder_push_frame failed, stopping");
         break;
       }
@@ -728,6 +752,7 @@ void stream_camera(const std::string &serial, int index,
     auto z16_t0 = std::chrono::steady_clock::now();
     std::vector<uint8_t> second_buf(width * height * second_bpp, 0);
     std::string cam_name = "CAM" + std::to_string(index);
+    bool ts_domain_logged = false;
 
     while (g_running && rclcpp::ok()) {
       rs2::frameset frames;
@@ -751,6 +776,20 @@ void stream_camera(const std::string &serial, int index,
       rs2::video_frame second_frame = second_base.as<rs2::video_frame>();
       if (!second_frame) continue;
 
+      // Per-frame capture time (epoch ns): RTP timestamp of the RGB/IR (and
+      // mjpeg8 depth) stream, stamp_ns of the Z16 depth stream.
+      const uint64_t second_ns = rs_capture_ns(second_frame);
+      const uint64_t depth_ns = (enable_depth && depth) ? rs_capture_ns(depth) : second_ns;
+      if (!ts_domain_logged) {
+        ts_domain_logged = true;
+        log(cam_name + " : capture timestamps from domain '" +
+            rs2_timestamp_domain_to_string(second_frame.get_frame_timestamp_domain()) + "'" +
+            (enable_depth && depth
+                 ? std::string(" (depth '") +
+                       rs2_timestamp_domain_to_string(depth.get_frame_timestamp_domain()) + "')"
+                 : std::string()));
+      }
+
       // Log latest hardware timestamp
       {
         std::lock_guard<std::mutex> lck(timestamp_mutex);
@@ -768,8 +807,7 @@ void stream_camera(const std::string &serial, int index,
             std::memcpy(depth16.data() + y * width, draw + y * dstride, width * 2);
           src = depth16.data();
         }
-        z16_bytes_acc += depth_sender.send(src, width, height, depth_scale,
-                                           ffw_stream::depth_udp::realtime_ns());
+        z16_bytes_acc += depth_sender.send(src, width, height, depth_scale, depth_ns);
         if (++z16_frames_acc >= fps * 30) {  // every ~30 s
           double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - z16_t0).count();
           double kb = z16_bytes_acc / 1024.0 / z16_frames_acc;
@@ -816,11 +854,11 @@ void stream_camera(const std::string &serial, int index,
 
       // Push frames into GStreamer pipelines
       if (enable_depth && !depth_z16 &&
-          !gst_encoder_push_frame(depth_enc, depth8.data(), depth8.size())) {
+          !gst_encoder_push_frame(depth_enc, depth8.data(), depth8.size(), depth_ns)) {
         log(cam_name + " : gst_encoder_push_frame(depth) failed, stopping");
         break;
       }
-      if (!gst_encoder_push_frame(second_enc, second_buf.data(), second_buf.size())) {
+      if (!gst_encoder_push_frame(second_enc, second_buf.data(), second_buf.size(), second_ns)) {
         log(cam_name + " : gst_encoder_push_frame(second) failed, stopping");
         break;
       }

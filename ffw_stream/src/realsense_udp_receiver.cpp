@@ -7,6 +7,7 @@
 
 #include "ffw_stream/depth_curve.hpp"
 #include "ffw_stream/depth_udp.hpp"
+#include "ffw_stream/rtp_capture_stream.hpp"
 
 #include <iostream>
 #include <array>
@@ -26,6 +27,7 @@
 class RealsenseUDPReceiver : public rclcpp::Node {
 public:
   RealsenseUDPReceiver() : Node("realsense_udp_receiver") {
+    gst_init(nullptr, nullptr);  // D405 RTP feeds run their own GStreamer pipelines
     this->declare_parameter<int>("base_port", 9000);
     this->declare_parameter<int>("num_cameras", 2);
     this->declare_parameter<bool>("headless", false);
@@ -183,12 +185,59 @@ public:
   }
 
 private:
+  // Per-feed capture-time bookkeeping (one per receive thread, not shared).
+  struct CaptureStats {
+    uint64_t stamped = 0;      // frames stamped with the sender capture time
+    uint64_t fallback = 0;     // frames stamped with arrival time
+    double lat_sum_ms = 0.0;   // arrival - capture
+    double lat_max_ms = 0.0;
+    bool warned = false;
+  };
+
+  // header.stamp for a received frame: the sender capture time when there is
+  // one (epoch ns), otherwise arrival time on this machine.
+  rclcpp::Time stampFrame(const std::string &feed, CaptureStats &st, uint64_t capture_ns) {
+    const uint64_t now_ns = ffw_stream::system_now_ns();
+    if (capture_ns == 0) {
+      ++st.fallback;
+      if (!st.warned) {
+        st.warned = true;
+        RCLCPP_WARN(this->get_logger(),
+                    "[%s] no capture time from the sender (old streamer, or clocks > 2 s apart) -- "
+                    "stamping with ARRIVAL time", feed.c_str());
+      }
+      return rclcpp::Time(static_cast<int64_t>(now_ns), RCL_SYSTEM_TIME);
+    }
+    ++st.stamped;
+    const double lat = (static_cast<double>(now_ns) - static_cast<double>(capture_ns)) / 1e6;
+    st.lat_sum_ms += lat;
+    st.lat_max_ms = std::max(st.lat_max_ms, lat);
+    return rclcpp::Time(static_cast<int64_t>(capture_ns), RCL_SYSTEM_TIME);
+  }
+
+  // Logs the capture-stamp coverage + capture->arrival latency, then resets.
+  void logCaptureStats(const std::string &feed, CaptureStats &st, uint64_t rejected) {
+    const uint64_t n = st.stamped + st.fallback;
+    if (n == 0) return;
+    RCLCPP_INFO(this->get_logger(),
+                "[%s] stamps: %lu/%lu frames capture-time, %lu arrival-time, %lu rejected RTP times; "
+                "capture->arrival mean %.1f ms max %.1f ms",
+                feed.c_str(), static_cast<unsigned long>(st.stamped), static_cast<unsigned long>(n),
+                static_cast<unsigned long>(st.fallback), static_cast<unsigned long>(rejected),
+                st.stamped ? st.lat_sum_ms / st.stamped : 0.0, st.lat_max_ms);
+    const bool warned = st.warned;
+    st = CaptureStats{};
+    st.warned = warned;
+  }
+
   void streamLoop(int cam_index, const std::string& type, int port, rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub) {
     // Both D405s always send RGB on their "IR" port now (no more left=IR
     // profile) -- dual_rgb_no_depth_ only affects whether depth is opened at
     // all (see the D405 setup block above), not which cameras are RGB.
     bool is_rgb = (type == "IR");
 
+    // The depayloader is named "dep": RtpCaptureStream reads each frame's RTP
+    // timestamp there (= sender capture time, see rtp_capture_stream.hpp).
     std::string pipeline;
     if (rs_codec_ == "mjpeg") {
       // MJPEG zero-latency: intra-only → no jitter buffer, instant decode.
@@ -196,24 +245,30 @@ private:
       // mid-frame would corrupt the whole JPEG, so the socket must hold a frame.
       pipeline = "udpsrc port=" + std::to_string(port) +
         " buffer-size=2147483647 caps=\"application/x-rtp, media=video, encoding-name=JPEG, payload=26\" ! "
-        "rtpjpegdepay ! jpegdec ! videoconvert ! "
+        "rtpjpegdepay name=dep ! jpegdec ! videoconvert ! video/x-raw,format=BGR ! "
         "queue max-size-buffers=1 leaky=downstream ! "
-        "appsink drop=true sync=false";
+        "appsink name=sink drop=true max-buffers=1 sync=false";
     } else {
       pipeline = "udpsrc port=" + std::to_string(port) +
         " buffer-size=2147483647 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
-        "rtpjitterbuffer latency=5 ! rtph264depay ! decodebin ! videoconvert ! appsink drop=true sync=false";
+        "rtpjitterbuffer latency=5 ! rtph264depay name=dep ! decodebin ! videoconvert ! "
+        "video/x-raw,format=BGR ! appsink name=sink drop=true max-buffers=1 sync=false";
     }
 
     std::string feed_name = "Cam" + std::to_string(cam_index) + "_" + type;
 
     RCLCPP_INFO(this->get_logger(), "[%s] Starting receiver on %s", feed_name.c_str(), pipeline.c_str());
 
-    while (running_ && rclcpp::ok()) {
-      cv::VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
+    // header.stamp = capture time from the sender (RTP timestamp); arrival
+    // time only for frames without one (old streamer / clocks > 2 s apart).
+    CaptureStats stats;
 
-      if (!cap.isOpened()) {
-        RCLCPP_WARN(this->get_logger(), "[%s] Failed to open UDP stream, retrying in 2s...", feed_name.c_str());
+    while (running_ && rclcpp::ok()) {
+      ffw_stream::RtpCaptureStream cap;
+      std::string err;
+      if (!cap.open(pipeline, &err)) {
+        RCLCPP_WARN(this->get_logger(), "[%s] Failed to open UDP stream (%s), retrying in 2s...",
+                    feed_name.c_str(), err.c_str());
         std::this_thread::sleep_for(std::chrono::seconds(2));
         continue;
       }
@@ -225,12 +280,16 @@ private:
       header.frame_id = "camera_" + std::to_string(cam_index) + "_link";
 
       while (running_ && rclcpp::ok()) {
-        if (!cap.read(frame) || frame.empty()) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        uint64_t capture_ns = 0;
+        if (!cap.pull(frame, capture_ns, 100) || frame.empty()) {
+          if (cap.failed(&err)) {
+            RCLCPP_WARN(this->get_logger(), "[%s] pipeline stopped (%s), reopening", feed_name.c_str(), err.c_str());
+            break;
+          }
           continue;
         }
 
-        header.stamp = this->now();
+        header.stamp = stampFrame(feed_name, stats, capture_ns);
 
         if (is_rgb) {
           // Right D405 RGB stream: rotate and store as BGR (OpenCV native) for color display
@@ -282,6 +341,7 @@ private:
           if (fps_val < 28.0) {
             RCLCPP_WARN(this->get_logger(), "[%s] Frame drop detected! Average FPS: %.1f", feed_name.c_str(), fps_val);
           }
+          logCaptureStats(feed_name, stats, cap.rejected());
           frames_received_[feed_name] = 0;
           fps_timers_[feed_name] = now;
         }
@@ -315,6 +375,7 @@ private:
     RCLCPP_INFO(this->get_logger(), "[%s] lossless Z16 depth on udp:%d", feed_name.c_str(), port);
 
     ffw_stream::depth_udp::DepthReassembler rx;
+    CaptureStats stats;
     std::vector<uint8_t> pkt(65536);
     std::array<uint8_t, 65536> code_lut{};
     float lut_scale = -1.0f;
@@ -347,7 +408,14 @@ private:
       cv::Mat z16(h, w, CV_16UC1, const_cast<uint16_t *>(rx.frame().data()));
       cv::Mat z16r;
       cv::rotate(z16, z16r, cv::ROTATE_90_COUNTERCLOCKWISE);
-      header.stamp = this->now();
+      {
+        // stamp_ns = sender capture time (epoch ns); implausible (old
+        // streamer stamped send time is still fine, garbage is not) -> arrival.
+        const uint64_t cap_ns = rx.stamp_ns(), now_ns = ffw_stream::system_now_ns();
+        const uint64_t skew = cap_ns > now_ns ? cap_ns - now_ns : now_ns - cap_ns;
+        header.stamp = stampFrame(feed_name, stats,
+                                  skew <= ffw_stream::RtpCaptureStream::kMaxSkewNs ? cap_ns : 0);
+      }
 
       if (cam_index < static_cast<int>(pub_depth_.size()) && pub_depth_[cam_index]) {
         pub_depth_[cam_index]->publish(*cv_bridge::CvImage(header, "16UC1", z16r).toImageMsg());
@@ -379,6 +447,7 @@ private:
         RCLCPP_INFO(this->get_logger(), "[%s] %.1f fps, %.1f KB/frame, %lu incomplete frames dropped so far",
                     feed_name.c_str(), fps_val, rx.payload_size() / 1024.0,
                     static_cast<unsigned long>(rx.dropped()));
+        logCaptureStats(feed_name, stats, 0);
         frames_received_[feed_name] = 0;
         fps_timers_[feed_name] = now;
       }

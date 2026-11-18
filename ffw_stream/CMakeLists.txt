@@ -20,7 +20,7 @@ find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(geometry_msgs REQUIRED)
 
 # GStreamer for in-process H264 encoding (realsense_udp_streamer)
-pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0)
+pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0 gstreamer-rtp-1.0)
 # zstd for the lossless Z16 depth stream (include/ffw_stream/depth_udp.hpp)
 pkg_check_modules(ZSTD REQUIRED libzstd)
 
@@ -59,8 +59,11 @@ target_include_directories(realsense_udp_receiver PUBLIC
 )
 target_compile_features(realsense_udp_receiver PUBLIC c_std_99 cxx_std_17)
 ament_target_dependencies(realsense_udp_receiver rclcpp sensor_msgs std_msgs cv_bridge)
-target_include_directories(realsense_udp_receiver PRIVATE ${ZSTD_INCLUDE_DIRS})
-target_link_libraries(realsense_udp_receiver ${OpenCV_LIBS} ${ZSTD_LIBRARIES})
+# GStreamer directly (not via cv::VideoCapture) to read each frame's RTP
+# timestamp = capture time (include/ffw_stream/rtp_capture_stream.hpp)
+target_include_directories(realsense_udp_receiver PRIVATE ${ZSTD_INCLUDE_DIRS} ${GST_INCLUDE_DIRS})
+target_compile_options(realsense_udp_receiver PRIVATE ${GST_CFLAGS_OTHER})
+target_link_libraries(realsense_udp_receiver ${OpenCV_LIBS} ${ZSTD_LIBRARIES} ${GST_LIBRARIES})
 install(TARGETS realsense_udp_receiver
   DESTINATION lib/${PROJECT_NAME})
 
