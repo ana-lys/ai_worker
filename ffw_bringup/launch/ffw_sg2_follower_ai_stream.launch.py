@@ -122,7 +122,7 @@ def generate_launch_description():
                               description='Base UDP port for UDP Streamer'),
         DeclareLaunchArgument('use_h264', default_value='true',
                               description='OAK-D codec: true=H264 Baseline (default), false=MJPEG'),
-        DeclareLaunchArgument('color_exposure', default_value='25300',
+        DeclareLaunchArgument('color_exposure', default_value='27830',
                               description='Fixed color exposure (us) for both D405 RGB streams; '
                                           'disables auto-exposure and auto white balance'),
         DeclareLaunchArgument('color_wb', default_value='3000',
